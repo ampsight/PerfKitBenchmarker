@@ -1,4 +1,4 @@
-## NVIDIA's CUDA bandwidth test AWS
+--NVIDIA's CUDA bandwidth test AWS
 
 SELECT  'AWS_g4dn_xlarge', value, metric FROM `perfkitbenchmark-test-project.gpu_pcie_bandwidth_preliminary.AWS_g4dn_xlarge_us-east-1a` WHERE metric = 'Host to device bandwidth'
 UNION ALL
@@ -6,7 +6,7 @@ SELECT  'AWS_g4dn_xlarge'as CSP, value as bandwith, metric FROM `perfkitbenchmar
 UNION ALL
 SELECT  'AWS_g4dn_xlarge', value, metric FROM `perfkitbenchmark-test-project.gpu_pcie_bandwidth_preliminary.AWS_g4dn_xlarge_us-east-1a` WHERE metric = 'Device to device bandwidth'
 
-## NVIDIA's CUDA bandwidth test GCP
+--NVIDIA's CUDA bandwidth test GCP
 
 SELECT  'GCP_n1_standard_4', value, metric FROM `perfkitbenchmark-test-project.gpu_pcie_bandwidth_preliminary.GCP_n1_standard_4_us-west3-b` WHERE metric = 'Host to device bandwidth'
 UNION ALL
