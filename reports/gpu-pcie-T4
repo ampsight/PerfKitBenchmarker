@@ -14,3 +14,9 @@ SELECT  'GCP_n1_standard_4'as CSP, value as bandwith, metric FROM `perfkitbenchm
 UNION ALL
 SELECT  'GCP_n1_standard_4', value, metric FROM `perfkitbenchmark-test-project.gpu_pcie_bandwidth_preliminary.GCP_n1_standard_4_us-west3-b` WHERE metric = 'Device to device bandwidth'
 
+==NVIDIA's CUDA bandwidth test AZURE
+SELECT  'Azure_Standard_NCas_T4_v3_eastus', value, metric FROM `perfkitbenchmark-test-project.gpu_pcie_bandwidth_preliminary.Azure_Standard_NCas_T4_v3_eastus`  WHERE metric = 'Host to device bandwidth'
+UNION ALL 
+SELECT  'Azure_Standard_NCas_T4_v3_eastus', value, metric FROM `perfkitbenchmark-test-project.gpu_pcie_bandwidth_preliminary.Azure_Standard_NCas_T4_v3_eastus`  WHERE metric = 'Device to host bandwidth'
+UNION ALL
+SELECT  'Azure_Standard_NCas_T4_v3_eastus', value, metric FROM `perfkitbenchmark-test-project.gpu_pcie_bandwidth_preliminary.Azure_Standard_NCas_T4_v3_eastus`  WHERE metric = 'Device to device bandwidth'
