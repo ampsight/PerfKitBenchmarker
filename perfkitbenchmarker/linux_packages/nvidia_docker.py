@@ -18,27 +18,39 @@
 Installation: https://github.com/NVIDIA/nvidia-docker
 """
 from absl import flags
-_VERSION = flags.DEFINE_string('nvidia_docker_version', '2.11.0-1',
+_VERSION = flags.DEFINE_string('nvidia_docker_version', None,
                                'The version of nvidia docker to install.')
+
+
+def CheckNvidiaDockerExists(vm):
+  resp, _ = vm.RemoteHostCommand(
+      'command -v nvidia-docker', ignore_failure=True
+  )
+  return bool(resp.rstrip())
 
 
 def AptInstall(vm):
   """Installs the nvidia-docker package on the VM."""
+  if CheckNvidiaDockerExists(vm):
+    return
   vm.Install('docker')
   vm.RemoteCommand('curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey '
                    '| sudo apt-key add -')
   vm.RemoteCommand('curl -s -L https://nvidia.github.io/nvidia-docker/'
                    '$(. /etc/os-release;echo $ID$VERSION_ID)'
                    '/nvidia-docker.list | sudo tee '
-                   '/etc/apt/sources.list.d/nvidia-docker.list')
+                   '/etc/apt/sources.list.d/nvidia-container-toolkit.list')
   vm.RemoteCommand('sudo apt-get update')
-  vm.InstallPackages(f'nvidia-docker2={_VERSION.value}')
+  version = f'={_VERSION.value}' if _VERSION.value else ''
+  vm.InstallPackages(f'nvidia-docker2{version}')
   # Reload the Docker daemon configuration
   vm.RemoteCommand('sudo pkill -SIGHUP dockerd')
 
 
 def YumInstall(vm):
   """Installs the nvidia-docker package on the VM."""
+  if CheckNvidiaDockerExists(vm):
+    return
   vm.Install('docker')
   vm.RemoteCommand('curl -s -L https://nvidia.github.io/'
                    'nvidia-container-runtime/'

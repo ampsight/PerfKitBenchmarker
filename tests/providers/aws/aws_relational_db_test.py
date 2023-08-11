@@ -14,7 +14,9 @@
 """Tests for perfkitbenchmarker.providers.aws.aws_relational_db."""
 
 import contextlib
+import json
 import os
+import textwrap
 import unittest
 
 from absl import flags
@@ -29,6 +31,7 @@ from perfkitbenchmarker.providers.aws import aws_rds_db  # pylint: disable=unuse
 from perfkitbenchmarker.providers.aws import aws_relational_db
 from perfkitbenchmarker.sql_engine_utils import AURORA_POSTGRES
 from perfkitbenchmarker.sql_engine_utils import MYSQL
+from tests import matchers
 from tests import pkb_common_test_case
 from six.moves import builtins
 
@@ -153,7 +156,7 @@ class AwsRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def CreateIAASDbFromSpec(self):
     mock_spec = self.CreateMockSpec()
-    aws_db = aws_relational_db.AwsIAASRelationalDb(mock_spec)
+    aws_db = aws_relational_db.AWSMysqlIAASRelationalDb(mock_spec)
     self.CreateMockClientVM(aws_db)
     self.CreateMockServerVM(aws_db)
     return aws_db
@@ -213,7 +216,11 @@ class AwsRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
         'db_spec': default_server_db_spec,
         'zones': ['us-east-1a', 'us-east-1d'],
         'engine_version': '9.6.2',
-        'high_availability': True
+        'high_availability': True,
+        'enable_freeze_restore': False,
+        'create_on_restore_error': False,
+        'delete_on_freeze_error': False,
+        'load_machine_type': None,
     }
     if additional_spec_items:
       spec_dict.update(additional_spec_items)
@@ -229,11 +236,6 @@ class AwsRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
   def CreateAurora(self, additional_spec_items=None):
     if additional_spec_items is None:
       additional_spec_items = {}
-    additional_spec_items.update({
-        'enable_freeze_restore': False,
-        'create_on_restore_error': False,
-        'delete_on_freeze_error': False,
-    })
     with self._PatchCriticalObjects() as issue_command:
       db = self.CreateAuroraDbFromSpec(additional_spec_items)
       db._Create()
@@ -244,11 +246,39 @@ class AwsRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testCreateAurora(self):
     command_strings = self.CreateAurora()
-    self.assertListEqual(command_strings, [
-        'aws --output json rds create-db-cluster --db-cluster-identifier=pkb-db-cluster-123 --engine=aurora-postgresql --engine-version=9.6.2 --master-username=fakeusername --master-user-password=fakepassword --region=us-east-1 --db-subnet-group-name=fake_db_subnet --vpc-security-group-ids=fake_security_group_id --availability-zones=us-east-1a --tags',
-        'aws --output json rds create-db-instance --db-instance-identifier=pkb-db-instance-123 --db-cluster-identifier=pkb-db-cluster-123 --engine=aurora-postgresql --engine-version=9.6.2 --no-auto-minor-version-upgrade --db-instance-class=db.t1.micro --region=us-east-1 --availability-zone=us-east-1a --tags',
-        'aws --output json rds create-db-instance --db-instance-identifier=pkb-db-instance-123-us-east-1d --db-cluster-identifier=pkb-db-cluster-123 --engine=aurora-postgresql --engine-version=9.6.2 --no-auto-minor-version-upgrade --db-instance-class=db.t1.micro --region=us-east-1 --availability-zone=us-east-1d --tags'
-    ])
+    self.assertListEqual(
+        command_strings,
+        [
+            (
+                'aws --output json rds create-db-cluster'
+                ' --db-cluster-identifier=pkb-db-cluster-123'
+                ' --engine=aurora-postgresql --engine-version=9.6.2'
+                ' --master-username=fakeusername'
+                ' --master-user-password=fakepassword --region=us-east-1'
+                ' --db-subnet-group-name=fake_db_subnet'
+                ' --vpc-security-group-ids=fake_security_group_id'
+                ' --availability-zones=us-east-1a --storage-type=aurora --tags'
+            ),
+            (
+                'aws --output json rds create-db-instance'
+                ' --db-instance-identifier=pkb-db-instance-123'
+                ' --db-cluster-identifier=pkb-db-cluster-123'
+                ' --engine=aurora-postgresql --engine-version=9.6.2'
+                ' --no-auto-minor-version-upgrade'
+                ' --db-instance-class=db.t1.micro --region=us-east-1'
+                ' --availability-zone=us-east-1a --tags'
+            ),
+            (
+                'aws --output json rds create-db-instance'
+                ' --db-instance-identifier=pkb-db-instance-123-us-east-1d'
+                ' --db-cluster-identifier=pkb-db-cluster-123'
+                ' --engine=aurora-postgresql --engine-version=9.6.2'
+                ' --no-auto-minor-version-upgrade'
+                ' --db-instance-class=db.t1.micro --region=us-east-1'
+                ' --availability-zone=us-east-1d --tags'
+            ),
+        ],
+    )
 
   def testNoHighAvailability(self):
     spec_dict = {
@@ -351,6 +381,84 @@ class AwsRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
       self.assertEqual(db.spec.database_username, 'root')
       self.assertEqual(db.spec.database_password, 'perfkitbenchmarker')
       self.assertIsNone(issue_command.call_args)
+
+  def testUpdateClusterClass(self):
+    fake_describe_output = textwrap.dedent("""
+    {
+        "DBInstances": [
+            {
+                "DBInstanceIdentifier": "mydbinstance",
+                "DBInstanceClass": "db.t3.small",
+                "Engine": "mysql",
+                "DBInstanceStatus": "available",
+                "MasterUsername": "masterawsuser",
+                "Endpoint": {
+                    "Address": "mydbinstancecf.abcexample.us-east-1.rds.amazonaws.com",
+                    "Port": 3306,
+                    "HostedZoneId": "Z2R2ITUGPM61AM"
+                }
+            }
+        ]
+    }
+    """)
+    db = self.CreateAuroraDbFromSpec()
+    db.all_instance_ids.append('mydbinstance')
+    mock_issue_command = self.enter_context(
+        mock.patch.object(vm_util, 'IssueCommand')
+    )
+    self.enter_context(
+        mock.patch.object(db, '_IsInstanceReady', return_value=True)
+    )
+    self.enter_context(
+        mock.patch.object(
+            db,
+            '_DescribeInstance',
+            return_value=json.loads(fake_describe_output),
+        )
+    )
+
+    db._UpdateClusterClass('db.m5.large')
+
+    mock_issue_command.assert_called_once_with(
+        matchers.HAS('--db-instance-class=db.m5.large'),
+        raise_on_failure=mock.ANY,
+    )
+
+  def testUpdateClusterClassNotChanged(self):
+    fake_describe_output = textwrap.dedent("""
+    {
+        "DBInstances": [
+            {
+                "DBInstanceIdentifier": "mydbinstance",
+                "DBInstanceClass": "db.t3.small",
+                "Engine": "mysql",
+                "DBInstanceStatus": "available",
+                "MasterUsername": "masterawsuser",
+                "Endpoint": {
+                    "Address": "mydbinstancecf.abcexample.us-east-1.rds.amazonaws.com",
+                    "Port": 3306,
+                    "HostedZoneId": "Z2R2ITUGPM61AM"
+                }
+            }
+        ]
+    }
+    """)
+    db = self.CreateAuroraDbFromSpec()
+    db.all_instance_ids.append('mydbinstance')
+    mock_issue_command = self.enter_context(
+        mock.patch.object(vm_util, 'IssueCommand')
+    )
+    self.enter_context(
+        mock.patch.object(
+            db,
+            '_DescribeInstance',
+            return_value=json.loads(fake_describe_output),
+        )
+    )
+
+    db._UpdateClusterClass('db.t3.small')
+
+    mock_issue_command.assert_not_called()
 
 
 if __name__ == '__main__':

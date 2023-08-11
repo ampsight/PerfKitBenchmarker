@@ -21,7 +21,6 @@ The disk size parameters that are being passed as part of vm_spec are actually
 used as arguments to the dpb service creation commands and the concrete
 implementations (dataproc, emr, dataflow, etc.) control using the disk size
 during the cluster setup.
-
 dpb_wordcount_out_base: The output directory to capture the word count results
 
 For dataflow jobs, please build the dpb_job_jarfile based on
@@ -78,7 +77,10 @@ WORD_COUNT_CONFIGURATION = dict([
     (dpb_service.DATAFLOW, ('org.example.WordCount',
                             dpb_service.BaseDpbService.DATAFLOW_JOB_TYPE)),
     (dpb_service.EMR, ('org.apache.spark.examples.JavaWordCount',
-                       dpb_service.BaseDpbService.SPARK_JOB_TYPE))
+                       dpb_service.BaseDpbService.SPARK_JOB_TYPE)),
+    (dpb_service.KUBERNETES_FLINK_CLUSTER,
+     ('org.apache.beam.examples.WordCount',
+      dpb_service.BaseDpbService.FLINK_JOB_TYPE))
 ])
 
 flags.DEFINE_string('dpb_wordcount_input', None, 'Input for word count')
@@ -149,8 +151,11 @@ def Run(benchmark_spec):
       dpb_service_instance.SERVICE_TYPE)
   if FLAGS.dpb_job_classname:
     classname = FLAGS.dpb_job_classname
+  if FLAGS.dpb_job_type:
+    job_type = FLAGS.dpb_job_type
   if dpb_service_instance.SERVICE_TYPE in [
-      dpb_service.DATAFLOW, dpb_service.DATAPROC_FLINK
+      dpb_service.DATAFLOW, dpb_service.DATAPROC_FLINK,
+      dpb_service.KUBERNETES_FLINK_CLUSTER
   ] or FLAGS.dpb_wordcount_force_beam_style_job_args:
     jarfile = benchmark_spec.dpb_wordcount_jarfile
     job_arguments.append('--inputFile={}'.format(input_location))
@@ -183,12 +188,18 @@ def Run(benchmark_spec):
   end_time = datetime.datetime.now()
 
   # Update metadata after job run to get job id
-  metadata = copy.copy(dpb_service_instance.GetMetadata())
-  metadata.update({'input_location': input_location,
-                   'dpb_wordcount_additional_args': ','.join(
-                       FLAGS.dpb_wordcount_additional_args),
-                   'dpb_wordcount_force_beam_style_job_args':
-                       FLAGS.dpb_wordcount_force_beam_style_job_args})
+  metadata = copy.copy(dpb_service_instance.GetResourceMetadata())
+  metadata.update({
+      'input_location': input_location,
+      'dpb_wordcount_additional_args': ','.join(
+          FLAGS.dpb_wordcount_additional_args
+      ),
+      'dpb_wordcount_force_beam_style_job_args': (
+          FLAGS.dpb_wordcount_force_beam_style_job_args
+      ),
+      'dpb_job_type': job_type,
+  })
+  dpb_service_instance.metadata.update(metadata)
 
   run_time = (end_time - start_time).total_seconds()
   results.append(sample.Sample('run_time', run_time, 'seconds', metadata))
@@ -211,7 +222,7 @@ def Run(benchmark_spec):
       for name, value in stats.items():
         results.append(sample.Sample(name, value, 'number', metadata))
 
-    total_cost = dpb_service_instance.CalculateCost()
+    total_cost = dpb_service_instance.CalculateLastJobCost()
     if total_cost is not None:
       results.append(sample.Sample('total_cost', total_cost, '$', metadata))
   else:

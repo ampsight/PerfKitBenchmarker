@@ -14,12 +14,16 @@
 """Managed relational database provisioning and teardown for AWS Aurora."""
 
 import json
+import time
+from typing import Any
 
 from absl import flags
+from absl import logging
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import sql_engine_utils
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.aws import aws_relational_db
+from perfkitbenchmarker.providers.aws import flags as aws_flags
 from perfkitbenchmarker.providers.aws import util
 
 FLAGS = flags.FLAGS
@@ -47,6 +51,10 @@ class AwsAuroraRelationalDb(aws_relational_db.BaseAwsRelationalDb):
   def __init__(self, relational_db_spec):
     super(AwsAuroraRelationalDb, self).__init__(relational_db_spec)
     self.cluster_id = 'pkb-db-cluster-' + FLAGS.run_uri
+    self.storage_type = aws_flags.AURORA_STORAGE_TYPE.value
+    self._load_machine_type = self.spec.db_spec.machine_type
+    if self.spec.load_machine_type is not None:
+      self._load_machine_type = self.spec.load_machine_type
 
   def _Create(self):
     """Creates the AWS RDS instance.
@@ -65,18 +73,25 @@ class AwsAuroraRelationalDb(aws_relational_db.BaseAwsRelationalDb):
                           zones_needed_for_high_availability, len(self.zones)))
 
     # Create the cluster.
-    cmd = util.AWS_PREFIX + [
-        'rds', 'create-db-cluster',
-        '--db-cluster-identifier=%s' % self.cluster_id,
-        '--engine=%s' % self.spec.engine,
-        '--engine-version=%s' % self.spec.engine_version,
-        '--master-username=%s' % self.spec.database_username,
-        '--master-user-password=%s' % self.spec.database_password,
-        '--region=%s' % self.region,
-        '--db-subnet-group-name=%s' % self.db_subnet_group_name,
-        '--vpc-security-group-ids=%s' % self.security_group_id,
-        '--availability-zones=%s' % self.spec.zones[0], '--tags'
-    ] + util.MakeFormattedDefaultTags()
+    cmd = (
+        util.AWS_PREFIX
+        + [
+            'rds',
+            'create-db-cluster',
+            '--db-cluster-identifier=%s' % self.cluster_id,
+            '--engine=%s' % self.spec.engine,
+            '--engine-version=%s' % self.spec.engine_version,
+            '--master-username=%s' % self.spec.database_username,
+            '--master-user-password=%s' % self.spec.database_password,
+            '--region=%s' % self.region,
+            '--db-subnet-group-name=%s' % self.db_subnet_group_name,
+            '--vpc-security-group-ids=%s' % self.security_group_id,
+            '--availability-zones=%s' % self.spec.zones[0],
+            '--storage-type=%s' % self.storage_type,
+            '--tags',
+        ]
+        + util.MakeFormattedDefaultTags()
+    )
 
     vm_util.IssueCommand(cmd)
 
@@ -113,9 +128,42 @@ class AwsAuroraRelationalDb(aws_relational_db.BaseAwsRelationalDb):
     """
     super()._PostCreate()
     self._SetPrimaryAndSecondaryZones()
-    self._SetEndpoint()
 
-    self.client_vm_query_tools.InstallPackages()
+  def _UpdateClusterClass(self, instance_class: str) -> None:
+    """Updates DBInstanceClass for all instances in the cluster."""
+    for db_instance in self.all_instance_ids:
+      self._UpdateInstanceClass(db_instance, instance_class)
+
+  def _UpdateInstanceClass(self, instance_id: str, instance_class: str) -> None:
+    """Updates DBInstanceClass for the writer instance."""
+    current_instance_class = self._DescribeInstance(instance_id)[
+        'DBInstances'
+    ][0]['DBInstanceClass']
+    if current_instance_class != instance_class:
+      logging.info(
+          'Updating capacity from %s to %s',
+          current_instance_class,
+          instance_class,
+      )
+      cmd = util.AWS_PREFIX + [
+          'rds',
+          'modify-db-instance',
+          '--db-instance-identifier=%s' % instance_id,
+          '--region=%s' % self.region,
+          '--db-instance-class=%s' % instance_class,
+          '--apply-immediately',
+      ]
+      vm_util.IssueCommand(cmd, raise_on_failure=True)
+      while not self._IsInstanceReady(instance_id=instance_id):
+        time.sleep(5)
+
+  def UpdateCapacityForLoad(self) -> None:
+    """See base class."""
+    self._UpdateClusterClass(self._load_machine_type)
+
+  def UpdateCapacityForRun(self) -> None:
+    """See base class."""
+    self._UpdateClusterClass(self.spec.db_spec.machine_type)
 
   def _DescribeCluster(self):
     cmd = util.AWS_PREFIX + [
@@ -195,3 +243,8 @@ class AwsAuroraRelationalDb(aws_relational_db.BaseAwsRelationalDb):
     if engine not in _MAP_ENGINE_TO_DEFAULT_VERSION:
       raise Exception('Unspecified default version for {0}'.format(engine))
     return _MAP_ENGINE_TO_DEFAULT_VERSION[engine]
+
+  def GetResourceMetadata(self) -> dict[str, Any]:
+    metadata = super().GetResourceMetadata()
+    metadata['aurora_storage_type'] = self.storage_type
+    return metadata

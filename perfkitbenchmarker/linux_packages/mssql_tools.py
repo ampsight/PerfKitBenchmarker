@@ -33,8 +33,26 @@ _DEB_FILE_LOCATION = '/etc/apt/sources.list.d/msprod.list'
 OS_TYPE_MAPPING = {
     os_types.UBUNTU1604: '16.04',
     os_types.UBUNTU1804: '18.04',
-    os_types.UBUNTU2004: '20.04'
+    os_types.UBUNTU2004: '20.04',
+    os_types.UBUNTU2204: '22.04'
 }
+
+
+def YumInstall(vm):
+  """Installs the ms sql package on the RedHat VM."""
+  vm.RemoteCommand('sudo curl -o /etc/yum.repos.d/mssql-server.repo '
+                   'https://packages.microsoft.com/config/rhel/8/'
+                   'mssql-server-2022.repo')
+  vm.RemoteCommand('sudo curl -o /etc/yum.repos.d/msprod.repo '
+                   'https://packages.microsoft.com/config/rhel/8/prod.repo')
+
+  vm.RemoteCommand('sudo ACCEPT_EULA=Y yum install -y mssql-tools '
+                   'unixODBC-devel')
+  vm.RemoteCommand(
+      r'echo PATH="$PATH:/opt/mssql-tools/bin" >> ~/.bash_profile')
+  vm.RemoteCommand(
+      r'echo export PATH="$PATH:/opt/mssql-tools/bin" >> ~/.bashrc')
+  vm.RemoteCommand('source ~/.bashrc')
 
 
 def AptInstall(vm):

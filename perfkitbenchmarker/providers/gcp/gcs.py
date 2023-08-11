@@ -42,9 +42,9 @@ WRITER = 'objectCreator'
 flags.DEFINE_string('google_cloud_sdk_version', None,
                     'Use a particular version of the Google Cloud SDK, e.g.: '
                     '103.0.0')
-flags.DEFINE_enum('gcs_client', GCS_CLIENT_BOTO,
+flags.DEFINE_enum('gcs_client', GCS_CLIENT_PYTHON,
                   [GCS_CLIENT_PYTHON, GCS_CLIENT_BOTO],
-                  'The GCS client library to use (default boto).')
+                  'The GCS client library to use (default python).')
 
 FLAGS = flags.FLAGS
 
@@ -70,6 +70,9 @@ class GoogleCloudStorageService(object_storage_service.ObjectStorageService):
       command.extend(['-c', FLAGS.object_storage_storage_class])
     if FLAGS.project:
       command.extend(['-p', FLAGS.project])
+    if object_storage_service.OBJECT_TTL_DAYS.value:
+      command.extend(
+          ['--retention', f'{object_storage_service.OBJECT_TTL_DAYS.value}d'])
     command.extend(['gs://%s' % bucket])
 
     _, stderr, ret_code = vm_util.IssueCommand(command, raise_on_failure=False)

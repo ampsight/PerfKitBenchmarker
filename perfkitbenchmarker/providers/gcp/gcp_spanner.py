@@ -40,23 +40,41 @@ import requests
 
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string('cloud_spanner_config',
-                    None,
-                    'The config for the Cloud Spanner instance. Use default '
-                    'config if unset.')
-flags.DEFINE_integer('cloud_spanner_nodes', None,
-                     'The number of nodes for the Cloud Spanner instance.')
-flags.DEFINE_string('cloud_spanner_project',
-                    None,
-                    'The project for the Cloud Spanner instance. Use default '
-                    'project if unset.')
-flags.DEFINE_string('cloud_spanner_instance', None,
-                    'The name of the static Cloud Spanner instance. New '
-                    'instance created if unset.')
-flags.DEFINE_string('cloud_spanner_database', None,
-                    'The name of the static Cloud Spanner database. New '
-                    'database created if unset. cloud_spanner_instance flag is '
-                    'mandatory to use this flag.')
+flags.DEFINE_string(
+    'cloud_spanner_config',
+    None,
+    'The config for the Cloud Spanner instance. Use default config if unset.',
+)
+flags.DEFINE_integer(
+    'cloud_spanner_nodes',
+    None,
+    'The number of nodes for the Cloud Spanner instance.',
+)
+_LOAD_NODES = flags.DEFINE_integer(
+    'cloud_spanner_load_nodes',
+    None,
+    'The number of nodes for the Cloud Spanner instance to use for the load'
+    ' phase. Assumes that the benchmark calls UpdateRunCapacity to set the '
+    ' correct node count manually before the run phase.',
+)
+flags.DEFINE_string(
+    'cloud_spanner_project',
+    None,
+    'The project for the Cloud Spanner instance. Use default project if unset.',
+)
+flags.DEFINE_string(
+    'cloud_spanner_instance',
+    None,
+    'The name of the static Cloud Spanner instance. New '
+    'instance created if unset.',
+)
+flags.DEFINE_string(
+    'cloud_spanner_database',
+    None,
+    'The name of the static Cloud Spanner database. New '
+    'database created if unset. cloud_spanner_instance flag is '
+    'mandatory to use this flag.',
+)
 
 # Type aliases
 _RelationalDbSpec = relational_db_spec.RelationalDbSpec
@@ -97,19 +115,16 @@ class SpannerSpec(relational_db_spec.RelationalDbSpec):
   spanner_description: str
   spanner_config: str
   spanner_nodes: int
+  spanner_load_nodes: int
   spanner_project: str
 
-  def __init__(self,
-               component_full_name: str,
-               flag_values: Optional[flags.FlagValues] = None,
-               **kwargs):
+  def __init__(
+      self,
+      component_full_name: str,
+      flag_values: Optional[flags.FlagValues] = None,
+      **kwargs,
+  ):
     super().__init__(component_full_name, flag_values=flag_values, **kwargs)
-    if (self.spanner_instance_id is None) ^ (self.spanner_database_id is None):
-      raise errors.Config.InvalidValue(
-          'Please set both spanner_instance_id and database_name '
-          'to denote a user managed instance. Got '
-          f'spanner_instance_id={self.spanner_instance_id} and '
-          f'spanner_database_id={self.spanner_database_id}.')
 
   @classmethod
   def _GetOptionDecoderConstructions(cls) -> dict[str, Any]:
@@ -128,6 +143,7 @@ class SpannerSpec(relational_db_spec.RelationalDbSpec):
         'spanner_description': (option_decoders.StringDecoder, _NONE_OK),
         'spanner_config': (option_decoders.StringDecoder, _NONE_OK),
         'spanner_nodes': (option_decoders.IntDecoder, _NONE_OK),
+        'spanner_load_nodes': (option_decoders.IntDecoder, _NONE_OK),
         'spanner_project': (option_decoders.StringDecoder, _NONE_OK),
         'db_spec': (option_decoders.PerCloudConfigDecoder, _NONE_OK),
         'db_disk_spec': (option_decoders.PerCloudConfigDecoder, _NONE_OK),
@@ -135,17 +151,18 @@ class SpannerSpec(relational_db_spec.RelationalDbSpec):
     return result
 
   @classmethod
-  def _ApplyFlags(cls, config_values: dict[str, Any],
-                  flag_values: flags.FlagValues) -> None:
+  def _ApplyFlags(
+      cls, config_values: dict[str, Any], flag_values: flags.FlagValues
+  ) -> None:
     """Modifies config options based on runtime flag values.
 
     Can be overridden by derived classes to add support for specific flags.
 
     Args:
-      config_values: dict mapping config option names to provided values. May
-          be modified by this function.
+      config_values: dict mapping config option names to provided values. May be
+        modified by this function.
       flag_values: flags.FlagValues. Runtime flags that may override the
-          provided config values.
+        provided config values.
     """
     super()._ApplyFlags(config_values, flag_values)
     if flag_values['cloud_spanner_instance'].present:
@@ -156,6 +173,8 @@ class SpannerSpec(relational_db_spec.RelationalDbSpec):
       config_values['spanner_config'] = flag_values.cloud_spanner_config
     if flag_values['cloud_spanner_nodes'].present:
       config_values['spanner_nodes'] = flag_values.cloud_spanner_nodes
+    if flag_values['cloud_spanner_load_nodes'].present:
+      config_values['spanner_load_nodes'] = flag_values.cloud_spanner_load_nodes
     if flag_values['cloud_spanner_project'].present:
       config_values['spanner_project'] = flag_values.cloud_spanner_project
 
@@ -176,27 +195,29 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
     description: Description of the instance.
     database:    Name of the database to create
   """
+
   CLOUD = 'GCP'
   IS_MANAGED = True
   REQUIRED_ATTRS = ['CLOUD', 'IS_MANAGED', 'ENGINE']
 
   def __init__(self, db_spec: SpannerSpec, **kwargs):
     super(GcpSpannerInstance, self).__init__(db_spec, **kwargs)
-    self.user_managed = True if db_spec.spanner_instance_id else False
-    if self.user_managed:
-      self.instance_id = db_spec.spanner_instance_id
-      self.database = db_spec.spanner_database_id
-    else:
-      self.instance_id = f'pkb-instance-{FLAGS.run_uri}'
-      self.database = f'pkb-database-{FLAGS.run_uri}'
+    self.instance_id = (
+        db_spec.spanner_instance_id or f'pkb-instance-{FLAGS.run_uri}'
+    )
+    self.database = (
+        db_spec.spanner_database_id or f'pkb-database-{FLAGS.run_uri}'
+    )
     self._description = db_spec.spanner_description or _DEFAULT_DESCRIPTION
     self._config = db_spec.spanner_config or self._GetDefaultConfig()
     self.nodes = db_spec.spanner_nodes or _DEFAULT_NODES
-    self._end_point = None
+    self._load_nodes = db_spec.spanner_load_nodes or self.nodes
+    self._api_endpoint = None
 
     # Cloud Spanner may not explicitly set the following common flags.
     self.project = (
-        db_spec.spanner_project or FLAGS.project or util.GetDefaultProject())
+        db_spec.spanner_project or FLAGS.project or util.GetDefaultProject()
+    )
 
   def _GetDefaultConfig(self) -> str:
     """Gets the config that corresponds the region used for the test."""
@@ -212,25 +233,29 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
 
   def _Create(self) -> None:
     """Creates the instance, the database, and update the schema."""
-    cmd = util.GcloudCommand(self, 'spanner', 'instances', 'create',
-                             self.instance_id)
+    cmd = util.GcloudCommand(
+        self, 'spanner', 'instances', 'create', self.instance_id
+    )
     cmd.flags['description'] = self._description
     cmd.flags['nodes'] = self.nodes
     cmd.flags['config'] = self._config
     _, _, retcode = cmd.Issue(raise_on_failure=False)
     if retcode != 0:
-      logging.error('Create GCP Spanner instance failed.')
-      return
+      # TODO(user) Currently loops if the database doesn't exist. To fix
+      # this we should move waiting for the database to be ready from Exists
+      # to this function.
+      if self._Exists():
+        logging.info(
+            'Found an existing instance, setting user_managed to True.'
+        )
+        self.user_managed = True
+      else:
+        logging.error('Create GCP Spanner instance failed.')
+        return
 
     self._UpdateLabels(util.GetDefaultTags())
 
-    cmd = util.GcloudCommand(self, 'spanner', 'databases', 'create',
-                             self.database)
-    cmd.flags['instance'] = self.instance_id
-    cmd.flags['database-dialect'] = self.dialect
-    _, _, retcode = cmd.Issue(raise_on_failure=False)
-    if retcode != 0:
-      logging.error('Create GCP Spanner database failed.')
+    self.CreateDatabase(self.database)
 
   def CreateTables(self, ddl: str) -> None:
     """Creates the tables specified by the DDL.
@@ -243,8 +268,9 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
     Raises:
       errors.Benchmarks.RunError if updating the DDL fails.
     """
-    cmd = util.GcloudCommand(self, 'spanner', 'databases', 'ddl', 'update',
-                             self.database)
+    cmd = util.GcloudCommand(
+        self, 'spanner', 'databases', 'ddl', 'update', self.database
+    )
     cmd.flags['instance'] = self.instance_id
     cmd.flags['ddl'] = ddl
     _, stderr, retcode = cmd.Issue(raise_on_failure=False)
@@ -256,21 +282,39 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
 
   def _Delete(self) -> None:
     """Deletes the instance."""
-    cmd = util.GcloudCommand(self, 'spanner', 'instances', 'delete',
-                             self.instance_id)
+    cmd = util.GcloudCommand(
+        self, 'spanner', 'instances', 'delete', self.instance_id
+    )
     _, _, retcode = cmd.Issue(raise_on_failure=False)
     if retcode != 0:
       logging.error('Delete GCP Spanner instance failed.')
     else:
       logging.info('Deleted GCP Spanner instance.')
 
+  def CreateDatabase(self, database_name: str) -> tuple[str, str]:
+    """Creates the database."""
+    cmd = util.GcloudCommand(
+        self, 'spanner', 'databases', 'create', database_name
+    )
+    cmd.flags['instance'] = self.instance_id
+    cmd.flags['database-dialect'] = self.dialect
+    stdout, stderr, retcode = cmd.Issue(raise_on_failure=False)
+    if retcode != 0:
+      logging.error('Create GCP Spanner database failed.')
+    return stdout, stderr
+
+  def DeleteDatabase(self, database_name: str) -> tuple[str, str]:
+    """Deletes the database."""
+    cmd = util.GcloudCommand(
+        self, 'spanner', 'databases', 'delete', database_name
+    )
+    cmd.flags['instance'] = self.instance_id
+    stdout, stderr, _ = cmd.Issue(raise_on_failure=False)
+    return stdout, stderr
+
   def _Exists(self, instance_only: bool = False) -> bool:
     """Returns true if the instance and the database exists."""
-    cmd = util.GcloudCommand(self, 'spanner', 'instances', 'describe',
-                             self.instance_id)
-
-    # Do not log error or warning when checking existence.
-    _, _, retcode = cmd.Issue(raise_on_failure=False)
+    _, retcode = self._DescribeInstance(raise_on_failure=False)
     if retcode != 0:
       logging.info('Could not find GCP Spanner instance %s.', self.instance_id)
       return False
@@ -278,8 +322,9 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
     if instance_only:
       return True
 
-    cmd = util.GcloudCommand(self, 'spanner', 'databases', 'describe',
-                             self.database)
+    cmd = util.GcloudCommand(
+        self, 'spanner', 'databases', 'describe', self.database
+    )
     cmd.flags['instance'] = self.instance_id
 
     # Do not log error or warning when checking existence.
@@ -293,25 +338,48 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
 
     return True
 
-  def GetEndPoint(self) -> str:
-    """Returns the end point for Cloud Spanner."""
-    if self._end_point:
-      return self._end_point
+  def GetApiEndPoint(self) -> str:
+    """Returns the API endpoint override for Cloud Spanner."""
+    if self._api_endpoint:
+      return self._api_endpoint
 
-    cmd = util.GcloudCommand(self, 'config', 'get-value',
-                             'api_endpoint_overrides/spanner')
+    cmd = util.GcloudCommand(
+        self, 'config', 'get-value', 'api_endpoint_overrides/spanner'
+    )
     stdout, _, retcode = cmd.Issue(raise_on_failure=False)
     if retcode != 0:
       logging.warning('Fail to retrieve cloud spanner end point.')
-    self._end_point = json.loads(stdout) or _DEFAULT_ENDPOINT
-    return self._end_point
+    self._api_endpoint = json.loads(stdout) or _DEFAULT_ENDPOINT
+    return self._api_endpoint
+
+  def _WaitUntilInstanceReady(self) -> None:
+    """Waits until the instance is ready."""
+    # TODO(user): Refactor Spanner instance to use this method in Create
+    while True:
+      instance, _ = self._DescribeInstance()
+      if json.loads(instance)['state'] == 'READY':
+        break
 
   def _SetNodes(self, nodes: int) -> None:
     """Sets the number of nodes on the Spanner instance."""
-    cmd = util.GcloudCommand(self, 'spanner', 'instances', 'update',
-                             self.instance_id)
+    current_nodes = self._GetNodes()
+    if nodes == current_nodes:
+      return
+    logging.info('Updating node count from %s to %s.', current_nodes, nodes)
+    cmd = util.GcloudCommand(
+        self, 'spanner', 'instances', 'update', self.instance_id
+    )
     cmd.flags['nodes'] = nodes
     cmd.Issue(raise_on_failure=True)
+    self._WaitUntilInstanceReady()
+
+  def UpdateCapacityForLoad(self) -> None:
+    """See base class."""
+    self._SetNodes(self._load_nodes)
+
+  def UpdateCapacityForRun(self) -> None:
+    """See base class."""
+    self._SetNodes(self.nodes)
 
   def _Restore(self) -> None:
     """See base class.
@@ -330,33 +398,44 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
     """
     self._SetNodes(_FROZEN_NODE_COUNT)
 
-  def _GetLabels(self) -> Dict[str, Any]:
+  def _DescribeInstance(self, raise_on_failure=True) -> tuple[str, int]:
+    """Returns `spanner instances describe` output for this instance."""
+    cmd = util.GcloudCommand(
+        self, 'spanner', 'instances', 'describe', self.instance_id
+    )
+    stdout, _, retcode = cmd.Issue(raise_on_failure=raise_on_failure)
+    return stdout, retcode
+
+  def _GetLabels(self) -> dict[str, Any]:
     """Gets labels from the current instance."""
-    cmd = util.GcloudCommand(self, 'spanner', 'instances', 'describe',
-                             self.instance_id)
-    stdout, _, _ = cmd.Issue(raise_on_failure=True)
-    return json.loads(stdout).get('labels', {})
+    return json.loads(self._DescribeInstance()[0]).get('labels', {})
+
+  def _GetNodes(self) -> int:
+    """Gets node count from the current instance."""
+    return json.loads(self._DescribeInstance()[0])['nodeCount']
 
   def _UpdateLabels(self, labels: Dict[str, Any]) -> None:
     """Updates the labels of the current instance."""
     header = {'Authorization': f'Bearer {util.GetAccessToken()}'}
-    url = (f'{self.GetEndPoint()}/v1/projects/'
-           f'{self.project}/instances/{self.instance_id}')
+    url = (
+        f'{self.GetApiEndPoint()}/v1/projects/'
+        f'{self.project}/instances/{self.instance_id}'
+    )
     # Keep any existing labels
     tags = self._GetLabels()
     tags.update(labels)
     args = {
-        'instance': {
-            'labels': tags
-        },
+        'instance': {'labels': tags},
         'fieldMask': 'labels',
     }
     response = requests.patch(url, headers=header, json=args)
-    logging.info('Update labels: status code %s, %s',
-                 response.status_code, response.text)
+    logging.info(
+        'Update labels: status code %s, %s', response.status_code, response.text
+    )
     if response.status_code != 200:
       raise errors.Resource.UpdateError(
-          f'Unable to update Spanner instance: {response.text}')
+          f'Unable to update Spanner instance: {response.text}'
+      )
 
   def _UpdateTimeout(self, timeout_minutes: int) -> None:
     """See base class."""
@@ -371,7 +450,8 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
         'gcp_spanner_database_dialect': self.dialect,
         'gcp_spanner_node_count': self.nodes,
         'gcp_spanner_config': self._config,
-        'gcp_spanner_endpoint': self.GetEndPoint()
+        'gcp_spanner_endpoint': self.GetApiEndPoint(),
+        'gcp_spanner_load_node_cont': self._load_nodes,
     }
 
   def GetAverageCpuUsage(self, duration_minutes: int) -> float:
@@ -380,46 +460,60 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
     # It takes up to 3 minutes for CPU metrics to appear.
     end_timestamp = time.time() - CPU_API_DELAY_SECONDS
     cpu_query = query.Query(
-        client, project=self.project,
-        metric_type='spanner.googleapis.com/instance/cpu/utilization_by_priority',
+        client,
+        project=self.project,
+        metric_type=(
+            'spanner.googleapis.com/instance/cpu/utilization_by_priority'
+        ),
         end_time=datetime.datetime.utcfromtimestamp(end_timestamp),
-        minutes=duration_minutes)
+        minutes=duration_minutes,
+    )
     # Filter by high priority
     cpu_query = cpu_query.select_metrics(
-        database=self.database, priority='high')
+        database=self.database, priority='high'
+    )
     # Filter by the Spanner instance
     cpu_query = cpu_query.select_resources(
-        instance_id=self.instance_id, project_id=self.project)
+        instance_id=self.instance_id, project_id=self.project
+    )
     # Aggregate user and system high priority by the minute
     time_series = list(cpu_query)
     # Expect 2 metrics: user and system high-priority CPU
     if len(time_series) != 2:
       raise errors.Benchmarks.RunError(
           'Expected 2 metrics (user and system) for Spanner high-priority CPU '
-          f'utilization query, got {len(time_series)}')
+          f'utilization query, got {len(time_series)}'
+      )
     cpu_aggregated = [
         user.value.double_value + system.value.double_value
         for user, system in zip(time_series[0].points, time_series[1].points)
     ]
     average_cpu = statistics.mean(cpu_aggregated)
     logging.info('CPU aggregated: %s', cpu_aggregated)
-    logging.info('Average CPU for the %s minutes ending at %s: %s',
-                 duration_minutes,
-                 datetime.datetime.fromtimestamp(end_timestamp), average_cpu)
+    logging.info(
+        'Average CPU for the %s minutes ending at %s: %s',
+        duration_minutes,
+        datetime.datetime.fromtimestamp(end_timestamp),
+        average_cpu,
+    )
     return average_cpu
 
-  def CalculateRecommendedThroughput(self, read_proportion: float,
-                                     write_proportion: float) -> int:
+  def CalculateRecommendedThroughput(
+      self, read_proportion: float, write_proportion: float
+  ) -> int:
     """Returns the recommended throughput based on the workload and nodes."""
     if read_proportion + write_proportion != 1:
       raise errors.Benchmarks.RunError(
           'Unrecognized workload, read + write proportion must be equal to 1, '
-          f'got {read_proportion} + {write_proportion}.')
+          f'got {read_proportion} + {write_proportion}.'
+      )
     # Calculates the starting throughput based off of each node being able to
     # handle 10k QPS of reads or 2k QPS of writes. For example, for a 50/50
     # workload, run at a QPS target of 1666 reads + 1666 writes = 3333 (round).
-    a = np.array([[1 / _READ_OPS_PER_NODE, 1 / _WRITE_OPS_PER_NODE],
-                  [write_proportion, -(1 - write_proportion)]])
+    a = np.array([
+        [1 / _READ_OPS_PER_NODE, 1 / _WRITE_OPS_PER_NODE],
+        [write_proportion, -(1 - write_proportion)],
+    ])
     b = np.array([1, 0])
     result = np.linalg.solve(a, b)
     return int(sum(result) * self.nodes)
@@ -427,11 +521,19 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
 
 class GoogleSqlGcpSpannerInstance(GcpSpannerInstance):
   """GoogleSQL-based Spanner instance."""
+
   ENGINE = sql_engine_utils.SPANNER_GOOGLESQL
 
   def __init__(self, db_spec: SpannerSpec, **kwargs: Any):
     super().__init__(db_spec, **kwargs)
     self.dialect = GOOGLESQL
+
+  def _PostCreate(self):
+    # Overrides BaseRelationalDB _PostCreate since client utils are
+    # not yet implemented.
+    if self.spec.db_flags:
+      self._ApplyDbFlags()
+    self._SetEndpoint()
 
   def GetDefaultPort(self) -> int:
     return 0  # Port is unused
@@ -439,6 +541,7 @@ class GoogleSqlGcpSpannerInstance(GcpSpannerInstance):
 
 class PostgresGcpSpannerInstance(GcpSpannerInstance):
   """PostgreSQL-based Spanner instance."""
+
   ENGINE = sql_engine_utils.SPANNER_POSTGRES
 
   def __init__(self, db_spec: SpannerSpec, **kwargs: Any):
@@ -449,17 +552,17 @@ class PostgresGcpSpannerInstance(GcpSpannerInstance):
   def GetDefaultPort(self) -> int:
     return relational_db.DEFAULT_POSTGRES_PORT
 
-  def _PostCreate(self):
-    super()._PostCreate()
-    self.client_vm_query_tools.InstallPackages()
-
-  @property
-  def client_vm_query_tools(self):
-    if not hasattr(self, '_client_vm_query_tools'):
-      connection_properties = sql_engine_utils.DbConnectionProperties(
-          self.spec.engine, self.spec.engine_version, self.endpoint, self.port,
-          self.spec.database_username, self.spec.database_password,
-          self.instance_id, self.database, self.project)
-      self._client_vm_query_tools = sql_engine_utils.GetQueryToolsByEngine(
-          self.client_vm, connection_properties)
-    return self._client_vm_query_tools
+  def _GetDbConnectionProperties(
+      self,
+  ) -> sql_engine_utils.DbConnectionProperties:
+    return sql_engine_utils.DbConnectionProperties(
+        self.spec.engine,
+        self.spec.engine_version,
+        self.endpoint,
+        self.port,
+        self.spec.database_username,
+        self.spec.database_password,
+        self.instance_id,
+        self.database,
+        self.project,
+    )

@@ -29,13 +29,16 @@ import time
 
 from absl import flags
 from perfkitbenchmarker import data
-from perfkitbenchmarker import iaas_relational_db
+from perfkitbenchmarker import mysql_iaas_relational_db
+from perfkitbenchmarker import postgres_iaas_relational_db
 from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import relational_db
 from perfkitbenchmarker import sql_engine_utils
+from perfkitbenchmarker import sqlserver_iaas_relational_db
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.gcp import util
 from six.moves import range
+
 
 FLAGS = flags.FLAGS
 
@@ -44,21 +47,24 @@ GCP_DATABASE_VERSION_MAPPING = {
         '5.5': 'MYSQL_5_5',
         '5.6': 'MYSQL_5_6',
         '5.7': 'MYSQL_5_7',
-        '8.0': 'MYSQL_8_0'
+        '8.0': 'MYSQL_8_0',
+        '8.0.31': 'MYSQL_8_0_31',
     },
     sql_engine_utils.POSTGRES: {
         '9.6': 'POSTGRES_9_6',
         '10': 'POSTGRES_10',
         '11': 'POSTGRES_11',
         '12': 'POSTGRES_12',
-        '13': 'POSTGRES_13'
+        '13': 'POSTGRES_13',
+        '14': 'POSTGRES_14',
+        '15': 'POSTGRES_15',
     },
     sql_engine_utils.SQLSERVER: {
         '2017_Standard': 'SQLSERVER_2017_Standard',
         '2017_Enterprise': 'SQLSERVER_2017_ENTERPRISE',
         '2017_Express': 'SQLSERVER_2017_EXPRESS',
-        '2017_Web': 'SQLSERVER_2017_WEB'
-    }
+        '2017_Web': 'SQLSERVER_2017_WEB',
+    },
 }
 
 
@@ -94,8 +100,25 @@ class UnsupportedDatabaseEngineError(Exception):
   pass
 
 
-class GCPIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
+class GCPSQLServerIAASRelationalDb(
+    sqlserver_iaas_relational_db.SQLServerIAASRelationalDb
+):
   """A GCP IAAS database resource."""
+
+  CLOUD = provider_info.GCP
+
+
+class GCPPostgresIAASRelationalDb(
+    postgres_iaas_relational_db.PostgresIAASRelationalDb
+):
+  """A GCP IAAS database resource."""
+
+  CLOUD = provider_info.GCP
+
+
+class GCPMysqlIAASRelationalDb(mysql_iaas_relational_db.MysqlIAASRelationalDb):
+  """A GCP IAAS database resource."""
+
   CLOUD = provider_info.GCP
 
 
@@ -118,8 +141,10 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     """Get CIDR connections for list of VM specs that need to access the db."""
     for vm in vms:
       if not vm.HasIpAddress:
-        raise Exception('Client vm needs to be initialized before database can '
-                        'discover authorized network.')
+        raise RuntimeError(
+            'Client vm needs to be initialized before database can '
+            'discover authorized network.'
+        )
     # create the CIDR of the client VM that is configured to access
     # the database
     return ','.join('{0}/32'.format(vm.ip_address) for vm in vms)
@@ -135,7 +160,6 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
 
     cmd_string = [
         self,
-        'beta',
         'sql',
         'instances',
         'create',
@@ -169,7 +193,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
       machine_type_flag = '--tier=%s' % self.spec.db_spec.machine_type
       cmd_string.append(machine_type_flag)
     else:
-      raise Exception('Unspecified machine type')
+      raise RuntimeError('Unspecified machine type')
 
     if self.spec.high_availability:
       cmd_string.append(self._GetHighAvailabilityFlag())
@@ -182,6 +206,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
       cmd_string.append('--no-backup')
     cmd = util.GcloudCommand(*cmd_string)
     cmd.flags['project'] = self.project
+    cmd.use_beta_gcloud = True
 
     _, stderr, retcode = cmd.Issue(timeout=CREATION_TIMEOUT)
 
@@ -289,7 +314,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     try:
       json_output = json.loads(stdout)
       return json_output['kind'] == 'sql#instance'
-    except:
+    except:  # pylint: disable=bare-except
       return False
 
   def _IsDBInstanceReady(self, instance_id, timeout=IS_READY_TIMEOUT):
@@ -309,7 +334,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
         logging.info('Instance %s state: %s', instance_id, state)
         if state == 'RUNNABLE':
           break
-      except:
+      except:  # pylint: disable=bare-except
         logging.exception('Error attempting to read stdout. Creation failure.')
         return False
       time.sleep(5)
@@ -354,7 +379,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
       return ''
     try:
       selflink = describe_instance_json['ipAddresses'][0]['ipAddress']
-    except:
+    except:  # pylint: disable=bare-except
       selflink = ''
       logging.exception('Error attempting to read stdout. Creation failure.')
     return selflink
@@ -384,8 +409,6 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     super()._PostCreate()
     self.SetManagedDatabasePassword()
 
-    self.client_vm_query_tools.InstallPackages()
-
   def _ApplyDbFlags(self):
     cmd_string = [
         self, 'sql', 'instances', 'patch', self.instance_id,
@@ -401,7 +424,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
       # Updated [https://sqladmin.googleapis.com/].
       if 'Updated' in stderr:
         return
-      raise Exception('Invalid flags: %s' % stderr)
+      raise RuntimeError('Invalid flags: %s' % stderr)
 
     self._Reboot()
 
@@ -413,8 +436,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     cmd.Issue()
 
     if not self._IsReady():
-      raise Exception('Instance could not be set to ready after '
-                      'reboot')
+      raise RuntimeError('Instance could not be set to ready after reboot')
 
   @staticmethod
   def GetDefaultEngineVersion(engine):

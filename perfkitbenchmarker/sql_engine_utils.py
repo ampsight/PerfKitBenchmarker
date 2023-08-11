@@ -16,13 +16,19 @@
 import abc
 import dataclasses
 import logging
+import time
 import timeit
-from typing import Dict, List, Any, Tuple, Union, Optional
-
+from typing import Any, Dict, List, Optional, Tuple, Union
+from absl import flags
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import virtual_machine
 
+FLAGS = flags.FLAGS
+
 SECOND = 'seconds'
+
+FLEXIBLE_SERVER_MYSQL = 'flexible-server-mysql'
+FLEXIBLE_SERVER_POSTGRES = 'flexible-server-postgres'
 
 MYSQL = 'mysql'
 POSTGRES = 'postgres'
@@ -34,6 +40,7 @@ SQLSERVER_ENTERPRISE = 'sqlserver-ee'
 SQLSERVER_STANDARD = 'sqlserver-se'
 SPANNER_GOOGLESQL = 'spanner-googlesql'
 SPANNER_POSTGRES = 'spanner-postgres'
+ALLOYDB = 'alloydb-postgresql'
 
 ALL_ENGINES = [
     MYSQL,
@@ -46,27 +53,34 @@ ALL_ENGINES = [
     SQLSERVER_STANDARD,
     SPANNER_GOOGLESQL,
     SPANNER_POSTGRES,
+    FLEXIBLE_SERVER_MYSQL,
+    FLEXIBLE_SERVER_POSTGRES,
+    ALLOYDB,
 ]
 
-ENGINE_TYPES = [
-    MYSQL,
-    POSTGRES,
-    SQLSERVER
-]
+ENGINE_TYPES = [MYSQL, POSTGRES, SQLSERVER]
 
-AWS_SQLSERVER_ENGINES = ['sqlserver-ee', 'sqlserver-se',
-                         'sqlserver-ex', 'sqlserver-web']
+AWS_SQLSERVER_ENGINES = [
+    'sqlserver-ee',
+    'sqlserver-se',
+    'sqlserver-ex',
+    'sqlserver-web',
+]
 
 AWS_AURORA_POSTGRES_ENGINE = 'aurora-postgresql'
 AWS_AURORA_MYSQL_ENGINE = 'aurora-mysql'
 
 DEFAULT_COMMAND = 'default'
 
+_PGADAPTER_MAX_SESSIONS = 5000
+_PGADAPTER_CONNECT_WAIT_SEC = 60
+
 
 # Query Related tools
 @dataclasses.dataclass
-class DbConnectionProperties():
+class DbConnectionProperties:
   """Data class to store attrubutes needed for connecting to a database."""
+
   engine: str
   engine_version: str
   endpoint: str
@@ -81,23 +95,29 @@ class DbConnectionProperties():
 class ISQLQueryTools(metaclass=abc.ABCMeta):
   """Interface for SQL related query.
 
-    Attributes:
+  Attributes:
     vm: VM to issue command with.
     connection_properties: Connection properties of the database.
   """
+
   ENGINE_TYPE = None
 
-  def __init__(self, vm: virtual_machine.VirtualMachine,
-               connection_properties: DbConnectionProperties):
+  def __init__(
+      self,
+      vm: virtual_machine.VirtualMachine,
+      connection_properties: DbConnectionProperties,
+  ):
     """Initialize ISQLQuery class."""
     self.vm = vm
     self.connection_properties = connection_properties
 
-  def TimeQuery(self,
-                database_name: str,
-                query: str,
-                is_explain: bool = False,
-                suppress_stdout: bool = False) -> Tuple[Any, Any, str]:
+  def TimeQuery(
+      self,
+      database_name: str,
+      query: str,
+      is_explain: bool = False,
+      suppress_stdout: bool = False,
+  ) -> Tuple[Any, Any, str]:
     """Time a query.."""
     if is_explain:
       query = self.GetExplainPrefix() + query
@@ -107,7 +127,8 @@ class ISQLQueryTools(metaclass=abc.ABCMeta):
         query,
         database_name=database_name,
         suppress_stdout=suppress_stdout,
-        timeout=60*300)
+        timeout=60 * 300,
+    )
     end = timeit.default_timer()
     run_time = str(end - start)
     if error_:
@@ -117,15 +138,17 @@ class ISQLQueryTools(metaclass=abc.ABCMeta):
     return stdout_, error_, run_time
 
   def SamplesFromQueriesWithExplain(
-      self, database_name: str, queries: Dict[str, str],
-      metadata: Dict[str, Any]) -> List[sample.Sample]:
+      self,
+      database_name: str,
+      queries: Dict[str, str],
+      metadata: Dict[str, Any],
+  ) -> List[sample.Sample]:
     """Helper function to run quries."""
     results = []
     for query in queries:
       execution_plan, _, run_time = self.TimeQuery(
-          database_name,
-          queries[query],
-          is_explain=True)
+          database_name, queries[query], is_explain=True
+      )
 
       logging.info('Execution Plan for Query %s: %s', query, execution_plan)
       result = sample.Sample('Query %s' % query, run_time, SECOND, metadata)
@@ -134,33 +157,40 @@ class ISQLQueryTools(metaclass=abc.ABCMeta):
     return results
 
   def SamplesFromQueriesAfterRunningExplain(
-      self, database_name: str, queries: Dict[str, str],
-      metadata: Dict[str, Any]) -> List[sample.Sample]:
+      self,
+      database_name: str,
+      queries: Dict[str, str],
+      metadata: Dict[str, Any],
+  ) -> List[sample.Sample]:
     """Run queryset once to prewarm, then run the queryset again for timing."""
     results = []
     for query in queries:
       execution_plan, _, _ = self.TimeQuery(
-          database_name, queries[query], is_explain=True)
+          database_name, queries[query], is_explain=True
+      )
 
       logging.info('Execution Plan for Query %s: %s', query, execution_plan)
 
     for query in queries:
       _, _, run_time = self.TimeQuery(
-          database_name, queries[query], is_explain=False, suppress_stdout=True)
+          database_name, queries[query], is_explain=False, suppress_stdout=True
+      )
 
       result = sample.Sample('Query %s' % query, run_time, SECOND, metadata)
       results.append(result)
 
     return results
 
-  def IssueSqlCommand(self,
-                      command: Union[str, Dict[str, str]],
-                      database_name: str = '',
-                      superuser: bool = False,
-                      session_variables: str = '',
-                      timeout: Optional[int] = None,
-                      ignore_failure: bool = False,
-                      suppress_stdout: bool = False):
+  def IssueSqlCommand(
+      self,
+      command: Union[str, Dict[str, str]],
+      database_name: str = '',
+      superuser: bool = False,
+      session_variables: str = '',
+      timeout: Optional[int] = None,
+      ignore_failure: bool = False,
+      suppress_stdout: bool = False,
+  ):
     """Issue Sql Command."""
     command_string = None
     # Get the command to issue base on type
@@ -175,7 +205,8 @@ class ISQLQueryTools(metaclass=abc.ABCMeta):
     command_string = self.MakeSqlCommand(
         command_string,
         database_name=database_name,
-        session_variables=session_variables)
+        session_variables=session_variables,
+    )
 
     if superuser:
       command_string = 'sudo ' + command_string
@@ -184,7 +215,8 @@ class ISQLQueryTools(metaclass=abc.ABCMeta):
       command_string = command_string + ' >/dev/null 2>&1'
 
     return self.vm.RemoteCommand(
-        command_string, timeout=timeout, ignore_failure=ignore_failure)
+        command_string, timeout=timeout, ignore_failure=ignore_failure
+    )
 
   @abc.abstractmethod
   def InstallPackages(self) -> None:
@@ -197,10 +229,9 @@ class ISQLQueryTools(metaclass=abc.ABCMeta):
     pass
 
   @abc.abstractmethod
-  def MakeSqlCommand(self,
-                     command: str,
-                     database_name: str = '',
-                     session_variables: str = ''):
+  def MakeSqlCommand(
+      self, command: str, database_name: str = '', session_variables: str = ''
+  ):
     """Make a sql command."""
     pass
 
@@ -208,9 +239,9 @@ class ISQLQueryTools(metaclass=abc.ABCMeta):
     """Returns the prefix for explain query."""
     return 'EXPLIAN '
 
-  def RunSqlScript(self,
-                   file_path: str,
-                   database_name: str = '') -> Tuple[str, str]:
+  def RunSqlScript(
+      self, file_path: str, database_name: str = ''
+  ) -> Tuple[str, str]:
     """Run a sql command through a file.
 
     The file could have multiple commands. RunSqlScript runs the sql file
@@ -219,18 +250,26 @@ class ISQLQueryTools(metaclass=abc.ABCMeta):
 
     Args:
       file_path: The local path from the machine.
-      database_name: Name of the database. Uses the master database
-        or the default database if nothing is supplied.
+      database_name: Name of the database. Uses the master database or the
+        default database if nothing is supplied.
 
     Returns:
       A tuple of standard output and standard error.
-
     """
     raise NotImplementedError('Running from a file is not currently supported.')
+
+  def CreateDatabase(self, database_name: str) -> tuple[str, str]:
+    """Creates the specified database."""
+    raise NotImplementedError()
+
+  def DeleteDatabase(self, database_name: str) -> tuple[str, str]:
+    """Deletes the specified database."""
+    raise NotImplementedError()
 
 
 class PostgresCliQueryTools(ISQLQueryTools):
   """SQL Query class to issue postgres related query."""
+
   ENGINE_TYPE = POSTGRES
 
   # The default database in postgres
@@ -240,10 +279,9 @@ class PostgresCliQueryTools(ISQLQueryTools):
     """Installs packages required for making queries."""
     self.vm.Install('postgres_client')
 
-  def MakeSqlCommand(self,
-                     command: str,
-                     database_name: str = '',
-                     session_variables: str = ''):
+  def MakeSqlCommand(
+      self, command: str, database_name: str = '', session_variables: str = ''
+  ):
     """Make Sql Command."""
     if not database_name:
       database_name = self.DEFAULT_DATABASE
@@ -258,52 +296,94 @@ class PostgresCliQueryTools(ISQLQueryTools):
   def GetConnectionString(self, database_name=''):
     if not database_name:
       database_name = self.DEFAULT_DATABASE
-    return '\'host={0} user={1} password={2} dbname={3}\''.format(
+    return "'host={0} user={1} password={2} dbname={3}'".format(
         self.connection_properties.endpoint,
         self.connection_properties.database_username,
-        self.connection_properties.database_password, database_name)
+        self.connection_properties.database_password,
+        database_name,
+    )
 
   def GetDSNConnectionString(self, database_name=''):
     if not database_name:
       database_name = self.DEFAULT_DATABASE
-    return (f'postgresql://{self.connection_properties.database_username}:' +
-            f'{self.connection_properties.database_password}@' +
-            f'{self.connection_properties.endpoint}:5432/{database_name}')
+    return (
+        f'postgresql://{self.connection_properties.database_username}:'
+        + f'{self.connection_properties.database_password}@'
+        + f'{self.connection_properties.endpoint}:5432/{database_name}'
+    )
 
   def GetSysbenchConnectionString(self):
-    return ('--pgsql-host={0} --pgsql-user={1} --pgsql-password="{2}" '
-            '--pgsql-port=5432').format(
-                self.connection_properties.endpoint,
-                self.connection_properties.database_username,
-                self.connection_properties.database_password)
+    return (
+        '--pgsql-host={0} --pgsql-user={1} --pgsql-password="{2}" '
+        '--pgsql-port=5432'
+    ).format(
+        self.connection_properties.endpoint,
+        self.connection_properties.database_username,
+        self.connection_properties.database_password,
+    )
 
   def GetExplainPrefix(self) -> str:
     """Adding hints to increase the verboseness of the explain."""
     return 'EXPLAIN (ANALYZE, BUFFERS, TIMING, SUMMARY, VERBOSE) '
 
+  def CreateDatabase(self, database_name: str) -> tuple[str, str]:
+    """See base class."""
+    return self.IssueSqlCommand(f'create database {database_name}')
+
+  def DeleteDatabase(self, database_name: str) -> tuple[str, str]:
+    """See base class."""
+    return self.IssueSqlCommand(f'drop database {database_name}')
+
 
 class SpannerPostgresCliQueryTools(PostgresCliQueryTools):
   """SQL Query class to issue Spanner postgres queries (subset of postgres)."""
+
   ENGINE_TYPE = SPANNER_POSTGRES
 
   # The default database in postgres
   DEFAULT_DATABASE = POSTGRES
 
-  def InstallPackages(self):
+  def Connect(self, sessions: Optional[int] = None) -> None:
+    """Connects to the DB using PGAdapter.
+
+    See https://cloud.google.com/spanner/docs/sessions for a description
+    of how session count affects performance.
+
+    Args:
+      sessions: The number of Spanner minSessions to set for the client.
+    """
+    self.vm.RemoteCommand('fuser -k 5432/tcp', ignore_failure=True)
+    # Connections need some time to cleanup, or the run command fails.
+    time.sleep(_PGADAPTER_CONNECT_WAIT_SEC)
+    sessions_arg = ''
+    if sessions:
+      sessions_arg = (
+          f'-r "minSessions={sessions};'
+          f'maxSessions={_PGADAPTER_MAX_SESSIONS};'
+          f'numChannels={int(_PGADAPTER_MAX_SESSIONS/100)}"'
+      )
+    properties = self.connection_properties
+    self.vm.RemoteCommand(
+        'java -jar pgadapter.jar '
+        '-dir /tmp '
+        f'-p {properties.project} '
+        f'-i {properties.instance_name} '
+        f'-d {properties.database_name} '
+        f'{sessions_arg} '
+        '&> /dev/null &'
+    )
+    # Connections need some time to startup, or the run command fails.
+    time.sleep(_PGADAPTER_CONNECT_WAIT_SEC)
+
+  def InstallPackages(self) -> None:
     """Installs packages required for making queries."""
     self.vm.Install('pgadapter')
-    properties = self.connection_properties
-    self.vm.RemoteCommand('java -jar pgadapter.jar '
-                          '-dir /tmp '
-                          f'-p {properties.project} '
-                          f'-i {properties.instance_name} '
-                          f'-d {properties.database_name} &> /dev/null &')
+    self.Connect()
     self.vm.Install('postgres_client')
 
-  def MakeSqlCommand(self,
-                     command: str,
-                     database_name: str = '',
-                     session_variables: str = '') -> str:
+  def MakeSqlCommand(
+      self, command: str, database_name: str = '', session_variables: str = ''
+  ) -> str:
     """Makes Sql Command."""
     sql_command = 'psql %s ' % self.GetConnectionString()
     if session_variables:
@@ -321,32 +401,39 @@ class SpannerPostgresCliQueryTools(PostgresCliQueryTools):
 
 class MysqlCliQueryTools(ISQLQueryTools):
   """SQL Query class to issue Mysql related query."""
+
   ENGINE_TYPE = MYSQL
 
   def InstallPackages(self):
     """Installs packages required for making queries."""
-    if (self.connection_properties.engine_version == '5.6' or
-        self.connection_properties.engine_version.startswith('5.6.')):
+    if (
+        self.connection_properties.engine_version == '5.6'
+        or self.connection_properties.engine_version.startswith('5.6.')
+    ):
       mysql_name = 'mysqlclient56'
-    elif (self.connection_properties.engine_version == '5.7' or
-          self.connection_properties.engine_version.startswith('5.7') or
-          self.connection_properties.engine_version == '8.0' or
-          self.connection_properties.engine_version.startswith('8.0')):
+    elif (
+        self.connection_properties.engine_version == '5.7'
+        or self.connection_properties.engine_version.startswith('5.7')
+        or self.connection_properties.engine_version == '8.0'
+        or self.connection_properties.engine_version.startswith('8.0')
+    ):
       mysql_name = 'mysqlclient'
     else:
-      raise Exception('Invalid database engine version: %s. Only 5.6, 5.7 '
-                      'and 8.0 are supported.' %
-                      self.connection_properties.engine_version)
+      raise ValueError(
+          'Invalid database engine version: %s. Only 5.6, 5.7 '
+          'and 8.0 are supported.'
+          % self.connection_properties.engine_version
+      )
     self.vm.Install(mysql_name)
 
-  def MakeSqlCommand(self,
-                     command: str,
-                     database_name: str = '',
-                     session_variables: str = ''):
+  def MakeSqlCommand(
+      self, command: str, database_name: str = '', session_variables: str = ''
+  ):
     """See base class."""
     if session_variables:
       raise NotImplementedError(
-          'Session variables is currently not supported in mysql')
+          'Session variables is currently not supported in mysql'
+      )
     mysql_command = 'mysql %s ' % (self.GetConnectionString())
     if database_name:
       mysql_command += database_name + ' '
@@ -357,35 +444,47 @@ class MysqlCliQueryTools(ISQLQueryTools):
     return '-h {0} -P 3306 -u {1} -p{2}'.format(
         self.connection_properties.endpoint,
         self.connection_properties.database_username,
-        self.connection_properties.database_password)
+        self.connection_properties.database_password,
+    )
 
   def GetSysbenchConnectionString(self):
     return ('--mysql-host={0} --mysql-user={1} --mysql-password="{2}" ').format(
         self.connection_properties.endpoint,
         self.connection_properties.database_username,
-        self.connection_properties.database_password)
+        self.connection_properties.database_password,
+    )
+
+  def CreateDatabase(self, database_name: str) -> tuple[str, str]:
+    """See base class."""
+    return self.IssueSqlCommand(f'create database {database_name}')
+
+  def DeleteDatabase(self, database_name: str) -> tuple[str, str]:
+    """See base class."""
+    return self.IssueSqlCommand(f'drop database {database_name}')
 
 
 class SqlServerCliQueryTools(ISQLQueryTools):
   """SQL Query class to issue SQL server related query."""
+
   ENGINE_TYPE = SQLSERVER
 
   def InstallPackages(self):
     """Installs packages required for making queries."""
     self.vm.Install('mssql_tools')
 
-  def MakeSqlCommand(self,
-                     command: str,
-                     database_name: str = '',
-                     session_variables: str = ''):
+  def MakeSqlCommand(
+      self, command: str, database_name: str = '', session_variables: str = ''
+  ):
     """See base class."""
     if session_variables:
       raise NotImplementedError(
-          'Session variables is currently not supported in mysql')
+          'Session variables is currently not supported in mysql'
+      )
     sqlserver_command = 'sqlcmd -S %s -U %s -P %s ' % (
         self.connection_properties.endpoint,
         self.connection_properties.database_username,
-        self.connection_properties.database_password)
+        self.connection_properties.database_password,
+    )
     if database_name:
       sqlserver_command += '-d %s ' % database_name
 
@@ -395,9 +494,9 @@ class SqlServerCliQueryTools(ISQLQueryTools):
   def GetConnectionString(self, database_name=''):
     raise NotImplementedError('Connection string currently not supported')
 
-  def RunSqlScript(self,
-                   file_path: str,
-                   database_name: str = '') -> Tuple[str, str]:
+  def RunSqlScript(
+      self, file_path: str, database_name: str = ''
+  ) -> Tuple[str, str]:
     """Runs Sql script from sqlcmd.
 
     This method execute command in a sql file using sqlcmd with the -i option
@@ -409,16 +508,15 @@ class SqlServerCliQueryTools(ISQLQueryTools):
     Returns:
        A tuple of stdout and stderr from running the command.
     """
-    sqlserver_command = (
-        '/opt/mssql-tools/bin/sqlcmd -S '
-        '%s -U %s -P %s ' %
-        (self.connection_properties.endpoint,
-         self.connection_properties.database_username,
-         self.connection_properties.database_password))
+    sqlserver_command = '/opt/mssql-tools/bin/sqlcmd -S %s -U %s -P %s ' % (
+        self.connection_properties.endpoint,
+        self.connection_properties.database_username,
+        self.connection_properties.database_password,
+    )
     if database_name:
       sqlserver_command += '-d %s ' % database_name
 
-    sqlserver_command += ' -i ' +  file_path
+    sqlserver_command += ' -i ' + file_path
     return self.vm.RemoteCommand(sqlserver_command)
 
 
@@ -439,10 +537,17 @@ def GetDbEngineType(db_engine: str) -> str:
   # AWS uses sqlserver-se and sqlserver-ex as db_egine for sql server
   if db_engine in AWS_SQLSERVER_ENGINES:
     return SQLSERVER
-  elif db_engine == AWS_AURORA_POSTGRES_ENGINE:
+  elif (
+      db_engine == AWS_AURORA_POSTGRES_ENGINE
+      or db_engine == FLEXIBLE_SERVER_POSTGRES
+  ):
     return POSTGRES
-  elif db_engine == AWS_AURORA_MYSQL_ENGINE:
+  elif (
+      db_engine == AWS_AURORA_MYSQL_ENGINE or db_engine == FLEXIBLE_SERVER_MYSQL
+  ):
     return MYSQL
+  elif db_engine == ALLOYDB:
+    return POSTGRES
   elif db_engine == SPANNER_POSTGRES:
     return SPANNER_POSTGRES
   elif db_engine == SPANNER_GOOGLESQL:

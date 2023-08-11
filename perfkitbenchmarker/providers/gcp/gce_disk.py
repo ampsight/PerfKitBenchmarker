@@ -26,6 +26,7 @@ from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.configs import option_decoders
+from perfkitbenchmarker.providers.gcp import flags as gcp_flags
 from perfkitbenchmarker.providers.gcp import util
 
 FLAGS = flags.FLAGS
@@ -34,14 +35,21 @@ PD_STANDARD = 'pd-standard'
 PD_SSD = 'pd-ssd'
 PD_BALANCED = 'pd-balanced'
 PD_EXTREME = 'pd-extreme'
+HYPERDISK_THROUGHPUT = 'hyperdisk-throughput'
+HYPERDISK_EXTREME = 'hyperdisk-extreme'
+HYPERDISK_BALANCED = 'hyperdisk-balanced'
 GCE_REMOTE_DISK_TYPES = [
     PD_STANDARD,
     PD_SSD,
     PD_BALANCED,
     PD_EXTREME,
+    HYPERDISK_THROUGHPUT,
+    HYPERDISK_EXTREME,
+    HYPERDISK_BALANCED,
 ]
 GCE_REMOTE_EXTREME_DISK_TYPES = [
     PD_EXTREME,
+    HYPERDISK_EXTREME,
 ]
 
 DISK_TYPE = {disk.STANDARD: PD_STANDARD, disk.REMOTE_SSD: PD_SSD}
@@ -62,6 +70,18 @@ DISK_METADATA = {
         disk.REPLICATION: disk.ZONE,
     },
     PD_EXTREME: {
+        disk.MEDIA: disk.SSD,
+        disk.REPLICATION: disk.ZONE,
+    },
+    HYPERDISK_THROUGHPUT: {
+        disk.MEDIA: disk.HDD,
+        disk.REPLICATION: disk.ZONE,
+    },
+    HYPERDISK_EXTREME: {
+        disk.MEDIA: disk.SSD,
+        disk.REPLICATION: disk.ZONE,
+    },
+    HYPERDISK_BALANCED: {
         disk.MEDIA: disk.SSD,
         disk.REPLICATION: disk.ZONE,
     },
@@ -92,7 +112,7 @@ def PdDriveIsNvme(vm):
   # such as confidential VMs on Milan.
   # this is not robust, but can get refactored when
   # there is more clarity on what groups of VMs are NVMe.
-  if family in ['n2d', 'c2d'] and 'confidential' in vm.OS_TYPE:
+  if gcp_flags.GCE_CONFIDENTIAL_COMPUTE.value:
     return True
   return False
 
@@ -113,7 +133,7 @@ def AddLabels(gcp_resource: resource.BaseResource, disk_name: str):
 
 
 class GceDiskSpec(disk.BaseDiskSpec):
-  """Object holding the information needed to create an GCPDisk."""
+  """Object holding the information needed to create a GCPDisk."""
 
   CLOUD = provider_info.GCP
 
@@ -159,7 +179,7 @@ class GceDiskSpec(disk.BaseDiskSpec):
 
 
 class GceDisk(disk.BaseDisk):
-  """Object representing an GCE Disk."""
+  """Object representing a GCE Disk."""
 
   def __init__(self,
                disk_spec,
@@ -296,10 +316,7 @@ class GceDisk(disk.BaseDisk):
 
   def GetDevicePath(self):
     """Returns the path to the device inside the VM."""
-    if self.disk_type == disk.LOCAL and self.interface == NVME:
-      return '/dev/%s' % self.name
-    else:
-      if self.disk_type in GCE_REMOTE_DISK_TYPES and self.interface == NVME:
-        return self.name
-      # by default, returns this name id.
-      return '/dev/disk/by-id/google-%s' % self.name
+    if self.disk_type in GCE_REMOTE_DISK_TYPES and self.interface == NVME:
+      return self.name
+    # by default, returns this name id.
+    return f'/dev/disk/by-id/google-{self.name}'
