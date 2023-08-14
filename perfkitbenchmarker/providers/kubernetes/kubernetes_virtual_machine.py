@@ -26,7 +26,7 @@ from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import kubernetes_helper
 from perfkitbenchmarker import linux_virtual_machine
-from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.linux_packages import google_cloud_sdk
@@ -49,7 +49,7 @@ def _IsKubectlErrorEphemeral(retcode: int, stderr: str) -> bool:
 
 class KubernetesVirtualMachine(virtual_machine.BaseVirtualMachine):
   """Object representing a Kubernetes POD."""
-  CLOUD = provider_info.KUBERNETES
+  CLOUD = providers.KUBERNETES
   DEFAULT_IMAGE = None
   HOME_DIR = '/root'
   IS_REBOOTABLE = False
@@ -95,11 +95,18 @@ class KubernetesVirtualMachine(virtual_machine.BaseVirtualMachine):
   def _DeleteDependencies(self):
     self._DeleteVolumes()
 
+  def _Create(self):
+    self._CreatePod()
+    self._WaitForPodBootCompletion()
+
   @vm_util.Retry()
   def _PostCreate(self):
     self._GetInternalIp()
     self._ConfigureProxy()
     self._SetupDevicesPaths()
+
+  def _Delete(self):
+    self._DeletePod()
 
   # Kubernetes VMs do not implement _Start or _Stop
   def _Start(self):
@@ -123,14 +130,15 @@ class KubernetesVirtualMachine(virtual_machine.BaseVirtualMachine):
         raise Exception('Please provide a list of Ceph Monitors using '
                         '--ceph_monitors flag.')
 
-  def _Create(self):
+  def _CreatePod(self):
     """Creates a POD (Docker container with optional volumes)."""
     create_rc_body = self._BuildPodBody()
     logging.info('About to create a pod with the following configuration:')
     logging.info(create_rc_body)
     kubernetes_helper.CreateResource(create_rc_body)
 
-  def _IsReady(self):
+  @vm_util.Retry(poll_interval=10, max_retries=100, log_errors=False)
+  def _WaitForPodBootCompletion(self):
     """Need to wait for the PODs to get up, they're created with a little delay."""
     exists_cmd = [
         FLAGS.kubectl,
@@ -146,14 +154,11 @@ class KubernetesVirtualMachine(virtual_machine.BaseVirtualMachine):
         if (containers[0]['name'].startswith(self.name)
             and pod_status == 'Running'):
           logging.info('POD is up and running.')
-          return True
-    return False
+          return
+    raise Exception('POD %s is not running. Retrying to check status.' %
+                    self.name)
 
-  def WaitForBootCompletion(self):
-    """No-op, because waiting for boot completion covered by _IsReady."""
-    self.bootable_time = self.resource_ready_time
-
-  def _Delete(self):
+  def _DeletePod(self):
     """Deletes a POD."""
     delete_pod = [
         FLAGS.kubectl,
@@ -400,15 +405,10 @@ class DebianBasedKubernetesVirtualMachine(KubernetesVirtualMachine,
                                       retries=None,
                                       ignore_failure=False,
                                       login_shell=False,
-                                      timeout=None,
-                                      ip_address=None,
-                                      stack_level: int = 2):
+                                      timeout=None):
     """Runs a command in the Kubernetes container."""
-    if ip_address:
-      raise AssertionError('Kubernetes VMs cannot use IP')
     if retries is None:
       retries = FLAGS.ssh_retries
-    stack_level += 1
     cmd = [
         FLAGS.kubectl,
         '--kubeconfig=%s' % FLAGS.kubeconfig, 'exec', '-i', self.name, '--',
@@ -418,8 +418,7 @@ class DebianBasedKubernetesVirtualMachine(KubernetesVirtualMachine,
       stdout, stderr, retcode = vm_util.IssueCommand(
           cmd,
           timeout=timeout,
-          raise_on_failure=False,
-          stack_level=stack_level)
+          raise_on_failure=False)
       # Check for ephemeral connection issues.
       if not _IsKubectlErrorEphemeral(retcode, stderr):
         break
@@ -532,7 +531,7 @@ class DebianBasedKubernetesVirtualMachine(KubernetesVirtualMachine,
     # Utilities packages install here so that we
     # have similar base packages. This is essentially the same as running
     # unminimize.
-    # ubuntu-minimal contains iputils-ping
+    # ubunut-minimal contains iputils-ping
     # ubuntu-server contains curl, net-tools, software-properties-common
     # ubuntu-standard contains wget
     # TODO(pclay): Revisit if Debian or RHEL images are added.
@@ -635,7 +634,7 @@ class Ubuntu2204BasedKubernetesVirtualMachine(
 
   def _InstallPrepareVmEnvironmentDependencies(self):
     # fdisk is not installed. It needs to be installed after sudo, but before
-    # RecordAdditionalMetadata.
+    # RecordAdditionalMetatada.
     super()._InstallPrepareVmEnvironmentDependencies()
     # util-linux budled in the image no longer depends on fdisk.
     # Ubuntu 22 VMs get fdisk from ubuntu-server (which maybe we should

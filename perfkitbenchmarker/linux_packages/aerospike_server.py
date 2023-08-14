@@ -43,28 +43,20 @@ class AerospikeEdition(enum.Enum):
 MEMORY = 'memory'
 DISK = 'disk'
 
-DEFAULT_VERSION = '6.2.0'
-DEFAULT_PACKAGE = 'ubuntu20_amd64'
-DEFAULT_INSTALL_URL = (
-    'https://enterprise.aerospike.com/enterprise/download/server/{}/artifact/{}'
-)
+VERSION = '6.2.0'
 
-
-# Link could be found here
+# Linke could be found here
 # https://aerospike.com/download/#servers
-
-_AEROSPIKE_ENTERPRISE_VERSION = flags.DEFINE_string(
-    'aerospike_enterprise_version', DEFAULT_VERSION, 'Aerospike version to use'
+_AEROSPIKE_ENTERPISE_PACKAGE_INSTALL_URL = flags.DEFINE_string(
+    'aerospike_enterprise_package_install_url',
+    f'https://enterprise.aerospike.com/enterprise/download/server/{VERSION}/artifact/ubuntu20_amd64',
+    'The url of the aerospike package',
 )
-_AEROSPIKE_ENTERPRISE_PACKAGE = flags.DEFINE_string(
-    'aerospike_enterprise_package', DEFAULT_PACKAGE, 'Aerospike package to use'
-)
-
 _AEROSPIKE_EDITION = flags.DEFINE_enum_class(
     'aerospike_edition',
     AerospikeEdition.COMNUNITY,
     AerospikeEdition,
-    'The type of edition aerospike uses.',
+    'The type of version aerospike uses.',
 )
 flags.DEFINE_enum(
     'aerospike_storage_type',
@@ -139,14 +131,9 @@ def _InstallFromPackage(vm):
     )
   # https://docs.aerospike.com/server/operations/install/linux/ubuntu
   vm.RemoteCommand(
-      'wget -O aerospike.tgz '
-      + DEFAULT_INSTALL_URL.format(
-          _AEROSPIKE_ENTERPRISE_VERSION.value,
-          _AEROSPIKE_ENTERPRISE_PACKAGE.value,
-      )
+      f'wget -O aerospike.tgz {_AEROSPIKE_ENTERPISE_PACKAGE_INSTALL_URL.value}'
   )
   # Create log directory
-  vm.InstallPackages('python')
   vm.RemoteCommand('sudo mkdir -p /var/log/aerospike')
 
   vm.RemoteCommand('mkdir -p aerospike')

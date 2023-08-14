@@ -80,11 +80,10 @@ class _TcpdumpCollector(base_collector.BaseCollector):
     """See base class."""
     return 'tcpdump'
 
-  def _KillCommand(self, vm, pid):
+  def _KillCommand(self, pid):
     """See base class.
 
     Args:
-      vm: vm command executes on (unused)
       pid: The pid of the process to kill
 
     Different from base class:

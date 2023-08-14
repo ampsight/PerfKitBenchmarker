@@ -15,7 +15,6 @@
 
 import collections
 import copy
-import logging
 import statistics
 from typing import Any, List, Dict
 
@@ -30,16 +29,6 @@ TIME_SERIES_SAMPLES_FOR_AGGREGATION = [
     sample.OPS_TIME_SERIES,
 ]
 PERCENTILES = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-
-DEGRADATION_PERCENT = flags.DEFINE_float(
-    'maintenance_degradation_percent',
-    95.0,
-    (
-        'Percentage to consider a given second is a degradation. This should'
-        ' set to (1 - max variance) of the benchmark. I.e if the benchmark have'
-        ' max variance of 5%, this should be set to 95.'
-    ),
-)
 
 SIMULATE_MAINTENANCE = flags.DEFINE_boolean(
     'simulate_maintenance',
@@ -115,10 +104,7 @@ class MaintenanceEventTrigger(base_time_trigger.BaseTimeTrigger):
       for vm in self.vms:
         vm.WaitLMNotificationRelease()
         lm_events_dict = vm.CollectLMNotificationsTime()
-        # Host maintenance is in s
-        lm_ends = max(
-            lm_ends, float(lm_events_dict['Host_maintenance_end']) * 1000
-        )
+        lm_ends = max(lm_ends, float(lm_events_dict['Host_maintenance_end']))
         samples.append(
             sample.Sample(
                 'LM Total Time',
@@ -180,18 +166,17 @@ class MaintenanceEventTrigger(base_time_trigger.BaseTimeTrigger):
       if time >= ramp_up_ends and time <= ramp_down_starts:
         interval_values = []
         # If more than 1 sequential value is missing from the time series.
-        # Distrubute the ops throughout the time series
+        # Assume the worst case value (0.0) for the metric during those entries.
+        # Gaps of length 1 are expected due to normal time drift.
         if i > 0:
           time_gap_in_seconds = ((time - time_series[i - 1]) / 1000)
           missing_entry_count = int((time_gap_in_seconds / interval) - 1)
           if missing_entry_count > 1:
             interval_values.extend(
-                [int(values[i] / float(missing_entry_count + 1))]
-                * (missing_entry_count + 1)
+                [0.0 for second in range(missing_entry_count)]
             )
 
-          else:
-            interval_values.append(values[i])
+        interval_values.append(values[i])
         if time <= lm_start:
           base_line_values.extend(interval_values)
         else:
@@ -202,9 +187,6 @@ class MaintenanceEventTrigger(base_time_trigger.BaseTimeTrigger):
 
     median = statistics.median(base_line_values)
     mean = statistics.mean(base_line_values)
-
-    logging.info('LM Baseline median: %s', median)
-    logging.info('LM Baseline mean: %s', mean)
 
     # Keep the metadata from the original sample except time series metadata
     for field in sample.TIME_SERIES_METADATA:
@@ -220,10 +202,6 @@ class MaintenanceEventTrigger(base_time_trigger.BaseTimeTrigger):
     if values_after_lm_ends:
       mean_after_lm_ends = statistics.mean(values_after_lm_ends)
       samples += self._ComputeDegradation(mean, mean_after_lm_ends, metadata)
-      logging.info('Mean after LM ends: %s', mean_after_lm_ends)
-      logging.info(
-          'Number of samples after LM ends: %s', len(values_after_lm_ends)
-      )
     return samples
 
   def _ComputeLossPercentile(
@@ -289,7 +267,7 @@ class MaintenanceEventTrigger(base_time_trigger.BaseTimeTrigger):
     total_loss_seconds = 0
     unresponsive_metric = 0
     for value in values_after_lm:
-      if value < median * DEGRADATION_PERCENT.value / 100.0:
+      if value < median * 0.95:
         total_loss_seconds += (median - value) / median * interval
         unresponsive_metric += (((median - value) / median) ** (3.0)) * interval
 

@@ -44,7 +44,6 @@ PREMIUM_STORAGE = 'Premium_LRS'
 PREMIUM_STORAGE_V2 = 'PremiumV2_LRS'
 STANDARD_DISK = 'Standard_LRS'
 ULTRA_STORAGE = 'UltraSSD_LRS'
-PREMIUM_ZRS = 'Premium_ZRS'
 
 # Deprecated
 DISK_TYPE = {disk.STANDARD: STANDARD_DISK, disk.REMOTE_SSD: PREMIUM_STORAGE}
@@ -74,13 +73,13 @@ AZURE_NVME_TYPES = [
 AZURE_NO_TMP_DISK_TYPES = [
     r'(Standard_D[0-9]+s?_v4)',
     r'(Standard_E[0-9]+i?s?_v4)',
-    r'(Standard_D[0-9]+l?s?_v5)',
+    r'(Standard_D[0-9]+s?_v5)',
     r'(Standard_E[0-9]+i?s?_v5)',
     r'(Standard_D[0-9]+as?_v5)',
     r'(Standard_E[0-9]+as?_v5)',
-    r'(Standard_E[0-9]+i?bs?_v5)',
-    r'(Standard_D[0-9]+pl?s_v5)',
-    r'(Standard_E[0-9]+ps_v5)',
+    r'(Standard_E[0-9]+bs?_v5)',
+    r'(Standard_D[0-9]+pl?d?s_v5)',
+    r'(Standard_E[0-9]+pd?s_v5)',
 ]
 
 
@@ -165,8 +164,7 @@ class AzureDisk(disk.BaseDisk):
     self._deleted = False
     self.machine_type = vm.machine_type
     if (self.disk_type == PREMIUM_STORAGE or
-        self.disk_type == PREMIUM_STORAGE_V2 or
-        self.disk_type == ULTRA_STORAGE):
+        self.disk_type == PREMIUM_STORAGE_V2):
       self.metadata.update({
           disk.MEDIA: disk.SSD,
           disk.REPLICATION: disk.ZONE,
@@ -176,12 +174,6 @@ class AzureDisk(disk.BaseDisk):
       self.metadata.update({
           disk.MEDIA: disk.HDD,
           disk.REPLICATION: AZURE_REPLICATION_MAP[FLAGS.azure_storage_type],
-          HOST_CACHING: self.host_caching,
-      })
-    elif self.disk_type == PREMIUM_ZRS:
-      self.metadata.update({
-          disk.MEDIA: disk.SSD,
-          disk.REPLICATION: disk.REGION,
           HOST_CACHING: self.host_caching,
       })
     elif self.disk_type == disk.LOCAL:

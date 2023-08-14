@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from absl import flags
 from perfkitbenchmarker import data_discovery_service
-from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.aws import util
 
@@ -32,7 +32,7 @@ class AwsGlueCrawler(data_discovery_service.BaseDataDiscoveryService):
       aws_glue_crawler_sample_size flag for more info.
   """
 
-  CLOUD = provider_info.AWS
+  CLOUD = providers.AWS
   SERVICE_TYPE = 'glue'
   READY = 'READY'
   FAILED = 'FAILED'
@@ -201,3 +201,4 @@ class AwsGlueCrawler(data_discovery_service.BaseDataDiscoveryService):
         '--region', self.region,
     ]
     return vm_util.IssueCommand(cmd, raise_on_failure=raise_on_failure)
+

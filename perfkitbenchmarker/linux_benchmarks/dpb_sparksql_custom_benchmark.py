@@ -106,7 +106,7 @@ def Prepare(benchmark_spec: bm_spec.BenchmarkSpec):
   """
   cluster = benchmark_spec.dpb_service
   storage_service = cluster.storage_service
-  benchmark_spec.staged_query = _LoadAndStageQueries(cluster)
+  benchmark_spec.staged_queries = _LoadAndStageQueries(cluster)
 
   scripts_to_upload = [
       SPARK_SQL_RUNNER_SCRIPT,
@@ -130,15 +130,13 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> List[sample.Sample]:
   """
   cluster = benchmark_spec.dpb_service
   storage_service = cluster.storage_service
-  metadata = benchmark_spec.dpb_service.GetResourceMetadata()
+  metadata = benchmark_spec.dpb_service.GetMetadata()
 
   # Run PySpark Spark SQL Runner
   report_dir = '/'.join([cluster.base_dir, f'report-{int(time.time()*1000)}'])
   args = [
-      '--sql-scripts-dir',
-      os.path.dirname(benchmark_spec.staged_query),
       '--sql-scripts',
-      os.path.basename(benchmark_spec.staged_query),
+      ','.join(benchmark_spec.staged_queries),
       '--report-dir',
       report_dir,
   ]
@@ -172,6 +170,11 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> List[sample.Sample]:
   results.append(
       sample.Sample('sparksql_total_wall_time', job_result.wall_time, 'seconds',
                     metadata))
+  cluster_create_time = cluster.GetClusterCreateTime()
+  if cluster_create_time is not None:
+    results.append(
+        sample.Sample('dpb_cluster_create_time', cluster_create_time, 'seconds',
+                      metadata))
   results.append(
       sample.Sample('dpb_sparksql_job_pending', job_result.pending_time,
                     'seconds', metadata))
@@ -239,8 +242,8 @@ def _GetSubstitutedSqlQuery(cluster: dpb_service.BaseDpbService):
   return query_string
 
 
-def _LoadAndStageQueries(cluster: dpb_service.BaseDpbService) -> str:
-  """Loads query from gcs and stages it in object storage.
+def _LoadAndStageQueries(cluster: dpb_service.BaseDpbService) -> List[str]:
+  """Loads query from gcs and stages them in object storage.
 
   Query is picked from location `--dpb_spark_query_uri_path`.
   Variables or parameter in query are substituted using
@@ -250,7 +253,7 @@ def _LoadAndStageQueries(cluster: dpb_service.BaseDpbService) -> str:
     cluster: BaseDpbService object.
 
   Returns:
-    The path to the staged query path.
+    The paths to the stage queries.
 
   Raises:
     PrepareException if a requested query is not found.
@@ -266,7 +269,7 @@ def _LoadAndStageQueries(cluster: dpb_service.BaseDpbService) -> str:
   query_file = local_script_file_name
   staged_file = '/'.join([base_dir, query_file])
   storage_service.Copy(local_script_file, staged_file)
-  return staged_file
+  return [staged_file]
 
 
 def Cleanup(benchmark_spec: bm_spec.BenchmarkSpec):

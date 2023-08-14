@@ -19,7 +19,6 @@ from typing import Callable
 
 from absl import flags
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import os_types
 
 JAVA_HOME = '/usr'
 
@@ -53,15 +52,7 @@ def _Install(vm, get_package_name_for_version: Callable[[int], str]):
 def YumInstall(vm):
   """Installs the OpenJDK package on the VM."""
   def OpenJdkPackage(version: int) -> str:
-    numeric_version = version > 8 and version or f'1.{version}.0'
-    if vm.OS_TYPE == os_types.AMAZONLINUX2023:
-      # Corretto is Amazon's build of the OpenJDK source.
-      # https://aws.amazon.com/corretto/
-      build_name = 'amazon-corretto'
-    else:
-      build_name = 'openjdk'
-
-    return f'java-{numeric_version}-{build_name}-devel'
+    return f"java-{version > 8 and version or f'1.{version}.0'}-openjdk-devel"
   _Install(vm, OpenJdkPackage)
 
 

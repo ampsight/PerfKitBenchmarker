@@ -19,12 +19,11 @@ import logging
 import time
 
 from absl import flags
+
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import mysql_iaas_relational_db
-from perfkitbenchmarker import postgres_iaas_relational_db
-from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import iaas_relational_db
+from perfkitbenchmarker import providers
 from perfkitbenchmarker import relational_db
-from perfkitbenchmarker import sqlserver_iaas_relational_db
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.aws import aws_network
 from perfkitbenchmarker.providers.aws import util
@@ -40,26 +39,9 @@ MYSQL_SUPPORTED_MAJOR_VERSIONS = ['5.7', '8.0']
 POSTGRES_SUPPORTED_MAJOR_VERSIONS = ['9.6', '10', '11', '12', '13']
 
 
-class AWSSQLServerIAASRelationalDb(
-    sqlserver_iaas_relational_db.SQLServerIAASRelationalDb
-):
+class AwsIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
   """A AWS IAAS database resource."""
-
-  CLOUD = provider_info.AWS
-
-
-class AWSPostgresIAASRelationalDb(
-    postgres_iaas_relational_db.PostgresIAASRelationalDb
-):
-  """A AWS IAAS database resource."""
-
-  CLOUD = provider_info.AWS
-
-
-class AWSMysqlIAASRelationalDb(mysql_iaas_relational_db.MysqlIAASRelationalDb):
-  """A AWS IAAS database resource."""
-
-  CLOUD = provider_info.AWS
+  CLOUD = providers.AWS
 
 
 class AwsRelationalDbParameterError(Exception):
@@ -338,10 +320,6 @@ class BaseAwsRelationalDb(relational_db.BaseRelationalDb):
           if waiting_param:
             logging.info('Applying parameter')
 
-          if state == 'insufficient-capacity':
-            raise errors.Benchmarks.InsufficientCapacityCloudFailure(
-                'Insufficient capacity to provision this db.'
-            )
           if state == 'available' and not pending_values and not waiting_param:
             break
 
@@ -357,7 +335,7 @@ class BaseAwsRelationalDb(relational_db.BaseRelationalDb):
     """Reboot the database and wait until the database is in ready state."""
     # Can only reboot when the instance is in ready state
     if not self._IsInstanceReady(self.instance_id, timeout=IS_READY_TIMEOUT):
-      raise RuntimeError('Instance is not in a state that can reboot')
+      raise Exception('Instance is not in a state that can reboot')
 
     cmd = util.AWS_PREFIX + [
         'rds', 'reboot-db-instance',
@@ -368,7 +346,7 @@ class BaseAwsRelationalDb(relational_db.BaseRelationalDb):
     vm_util.IssueCommand(cmd)
 
     if not self._IsInstanceReady(self.instance_id, timeout=IS_READY_TIMEOUT):
-      raise RuntimeError('Instance could not be set to ready after reboot')
+      raise Exception('Instance could not be set to ready after reboot')
 
   def _SetPrimaryAndSecondaryZones(self):
     self.primary_zone = self.subnets_used_by_db[0].zone
@@ -407,6 +385,9 @@ class BaseAwsRelationalDb(relational_db.BaseRelationalDb):
       })
 
     return metadata
+
+  def _SetEndpoint(self):
+    raise NotImplementedError('Set endpoint is not implemented')
 
   def _InstanceExists(self, instance_id) -> bool:
     """Returns true if the underlying instance."""
@@ -448,3 +429,4 @@ class BaseAwsRelationalDb(relational_db.BaseRelationalDb):
 
     for current_instance_id in self.all_instance_ids:
       WaitUntilInstanceDeleted(current_instance_id)
+

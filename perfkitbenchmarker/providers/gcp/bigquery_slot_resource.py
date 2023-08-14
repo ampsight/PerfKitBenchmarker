@@ -16,7 +16,7 @@ import time
 from absl import flags
 from perfkitbenchmarker import edw_compute_resource
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 from perfkitbenchmarker import vm_util
 
 
@@ -26,7 +26,7 @@ FLAGS = flags.FLAGS
 class BigquerySlotResource(edw_compute_resource.EdwComputeResource):
   """Class representing a flat-rate slot allocation on a BigQuery project."""
 
-  CLOUD = provider_info.GCP
+  CLOUD = providers.GCP
   SERVICE_TYPE = 'bigquery_slots'
 
   def __init__(self, edw_service_spec):

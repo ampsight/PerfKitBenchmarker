@@ -38,8 +38,6 @@ ntttcp:
     default:
       vm_spec: *default_single_core
       vm_count: 2
-  flags:
-    placement_group_style: closest_supported
 """
 
 
@@ -53,11 +51,10 @@ def Prepare(benchmark_spec):
 
   for vm in vms:
     vm.Install('ntttcp')
-    if vm_util.ShouldRunOnExternalIpAddress():
-      vm.AllowPort(ntttcp.CONTROL_PORT)
-      # get the number of ports needed based on the flags
-      num_ports = max([c.threads for c in ntttcp.ParseConfigList()])
-      vm.AllowPort(ntttcp.BASE_DATA_PORT, ntttcp.BASE_DATA_PORT + num_ports)
+    vm.AllowPort(ntttcp.CONTROL_PORT)
+    # get the number of ports needed based on the flags
+    num_ports = max([c.threads for c in ntttcp.ParseConfigList()])
+    vm.AllowPort(ntttcp.BASE_DATA_PORT, ntttcp.BASE_DATA_PORT + num_ports)
 
 
 def _RunTest(benchmark_spec, sender, receiver, dest_ip, ip_type, conf,

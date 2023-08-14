@@ -31,6 +31,7 @@ import operator
 import pprint
 import sys
 import time
+from typing import List
 import uuid
 
 from absl import flags
@@ -305,11 +306,8 @@ DEFAULT_METADATA_PROVIDERS = [DefaultMetadataProvider()]
 class SamplePublisher(six.with_metaclass(abc.ABCMeta, object)):
   """An object that can publish performance samples."""
 
-  # Time series data is long. Turn this flag off to hide time series data.
-  PUBLISH_CONSOLE_LOG_DATA = True
-
   @abc.abstractmethod
-  def PublishSamples(self, samples: list[pkb_sample.SampleDict]):
+  def PublishSamples(self, samples: List[pkb_sample.SampleDict]):
     """Publishes 'samples'.
 
     PublishSamples will be called exactly once. Calling
@@ -383,8 +381,6 @@ class PrettyPrintStreamPublisher(SamplePublisher):
   Attributes:
     stream: File-like object. Output stream to print samples.
   """
-
-  PUBLISH_CONSOLE_LOG_DATA = False
 
   def __init__(self, stream=None):
     super().__init__()
@@ -462,16 +458,10 @@ class PrettyPrintStreamPublisher(SamplePublisher):
             self._FormatMetadata(benchmark_meta)))
 
       for sample in test_samples:
-        meta = {
-            k: v
-            for k, v in six.iteritems(sample['metadata'])
-            if k not in all_constant_meta
-        }
-        result.write(
-            '  {0:<30s} {1:>15f} {2:<30s}'.format(
-                sample['metric'], sample['value'], sample['unit']
-            )
-        )
+        meta = {k: v for k, v in six.iteritems(sample['metadata'])
+                if k not in all_constant_meta}
+        result.write('  {0:<30s} {1:>15f} {2:<30s}'.format(
+            sample['metric'], sample['value'], sample['unit']))
         if meta:
           result.write(' ({0})'.format(self._FormatMetadata(meta)))
         result.write('\n')
@@ -494,8 +484,6 @@ class LogPublisher(SamplePublisher):
     level: Logging level. Defaults to logging.INFO.
     logger: Logger to publish to. Defaults to the root logger.
   """
-
-  PUBLISH_CONSOLE_LOG_DATA = False
 
   def __init__(self, level=logging.INFO, logger=None):
     super().__init__()
@@ -927,7 +915,6 @@ class SampleCollector(object):
 
   Attributes:
     samples: A list of Sample objects as dicts.
-    samples_for_console: A list of Sample objects to publish to console.
     metadata_providers: A list of MetadataProvider objects. Metadata providers
       to use.  Defaults to DEFAULT_METADATA_PROVIDERS.
     publishers: A list of SamplePublisher objects to publish to.
@@ -941,15 +928,14 @@ class SampleCollector(object):
 
   def __init__(self, metadata_providers=None, publishers=None,
                publishers_from_flags=True, add_default_publishers=True):
-    self.samples: list[pkb_sample.SampleDict] = []
-    self.samples_for_console: list[pkb_sample.SampleDict] = []
+    self.samples: List[pkb_sample.SampleDict] = []
 
     if metadata_providers is not None:
       self.metadata_providers = metadata_providers
     else:
       self.metadata_providers = DEFAULT_METADATA_PROVIDERS
 
-    self.publishers: list[SamplePublisher] = publishers[:] if publishers else []
+    self.publishers: List[SamplePublisher] = publishers[:] if publishers else []
     for publisher_class in EXTERNAL_PUBLISHERS:
       self.publishers.append(publisher_class())
     if publishers_from_flags:
@@ -1045,20 +1031,13 @@ class SampleCollector(object):
       sample['sample_uri'] = str(uuid.uuid4())
       self.samples.append(sample)
 
-      if not s.DisableConsoleLog():
-        self.samples_for_console.append(sample)
-
   def PublishSamples(self):
     """Publish samples via all registered publishers."""
     if not self.samples:
       logging.warning('No samples to publish.')
       return
     for publisher in self.publishers:
-      publisher.PublishSamples(
-          self.samples
-          if publisher.PUBLISH_CONSOLE_LOG_DATA
-          else self.samples_for_console
-      )
+      publisher.PublishSamples(self.samples)
     self.samples = []
 
 

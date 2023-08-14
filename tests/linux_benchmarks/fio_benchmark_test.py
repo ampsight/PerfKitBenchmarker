@@ -41,7 +41,6 @@ ioengine=libaio
 invalidate=1
 direct=1
 runtime=600
-ramp_time=10
 time_based
 filename=/test/filename
 do_verify=0
@@ -70,18 +69,9 @@ numjobs=1"""
         fio_benchmark.GenerateJobFileString(
             self.filename,
             ['sequential_read'],
-            [1, 2],
-            [1],
-            None,
-            None,
-            600,
-            10,
-            True,
-            ['randrepeat=0', 'offset_increment=1k'],
-            1,
-        ),
-        expected_jobfile,
-    )
+            [1, 2], [1],
+            None, None, 600, True, ['randrepeat=0', 'offset_increment=1k']),
+        expected_jobfile)
 
   def testAllScenarios(self):
     expected_jobfile = """
@@ -90,7 +80,6 @@ ioengine=libaio
 invalidate=1
 direct=1
 runtime=600
-ramp_time=10
 time_based
 filename=/test/filename
 do_verify=0
@@ -158,7 +147,7 @@ numjobs=1"""
             self.filename,
             ['all'],
             [1], [1],
-            None, None, 600, 10, True, [], 1),
+            None, None, 600, True, []),
         expected_jobfile)
 
   def testMultipleScenarios(self):
@@ -168,7 +157,6 @@ ioengine=libaio
 invalidate=1
 direct=1
 runtime=600
-ramp_time=10
 time_based
 filename=/test/filename
 do_verify=0
@@ -197,7 +185,7 @@ numjobs=1"""
             self.filename,
             ['sequential_read', 'sequential_write'],
             [1], [1],
-            None, None, 600, 10, True, ['randrepeat=0'], 1),
+            None, None, 600, True, ['randrepeat=0']),
         expected_jobfile)
 
   def testCustomBlocksize(self):
@@ -206,7 +194,7 @@ numjobs=1"""
     job_file = fio_benchmark.GenerateJobFileString(
         self.filename,
         ['sequential_read'],
-        [1], [1], None, units.Unit('megabyte') * 2, 600, 10, True, {}, 1)
+        [1], [1], None, units.Unit('megabyte') * 2, 600, True, {})
 
     self.assertIn('blocksize=2000000B', job_file)
 
@@ -219,7 +207,7 @@ numjobs=1"""
     job_file = fio_benchmark.GenerateJobFileString(
         self.filename,
         ['sequential_read'],
-        [1], [1], None, units.Unit('megabyte') * 2, 600, 10, False, {}, 1)
+        [1], [1], None, units.Unit('megabyte') * 2, 600, False, {})
     self.assertIn('direct=0', job_file)
 
   def testParseGenerateScenario(self):
@@ -229,7 +217,6 @@ ioengine=libaio
 invalidate=1
 direct=1
 runtime=600
-ramp_time=10
 time_based
 filename=/test/filename
 do_verify=0
@@ -244,30 +231,6 @@ blocksize=64M
 iodepth=1
 size=10TB
 numjobs=1
-
-[seq_64M_read_10TB-io-depth-2-num-jobs-1]
-stonewall
-rw=read
-blocksize=64M
-iodepth=2
-size=10TB
-numjobs=1
-
-[seq_64M_read_10TB-io-depth-1-num-jobs-3]
-stonewall
-rw=read
-blocksize=64M
-iodepth=1
-size=10TB
-numjobs=3
-
-[seq_64M_read_10TB-io-depth-2-num-jobs-3]
-stonewall
-rw=read
-blocksize=64M
-iodepth=2
-size=10TB
-numjobs=3
 
 [rand_16k_readwrite_5TB_rwmixread-65-io-depth-1-num-jobs-1]
 stonewall
@@ -276,82 +239,14 @@ rwmixread=65
 blocksize=16k
 iodepth=1
 size=5TB
-numjobs=1
-
-[rand_16k_readwrite_5TB_rwmixread-65-io-depth-2-num-jobs-1]
-stonewall
-rw=randrw
-rwmixread=65
-blocksize=16k
-iodepth=2
-size=5TB
-numjobs=1
-
-[rand_16k_readwrite_5TB_rwmixread-65-io-depth-1-num-jobs-3]
-stonewall
-rw=randrw
-rwmixread=65
-blocksize=16k
-iodepth=1
-size=5TB
-numjobs=3
-
-[rand_16k_readwrite_5TB_rwmixread-65-io-depth-2-num-jobs-3]
-stonewall
-rw=randrw
-rwmixread=65
-blocksize=16k
-iodepth=2
-size=5TB
-numjobs=3"""
+numjobs=1"""
 
     self.assertEqual(
         fio_benchmark.GenerateJobFileString(
             self.filename,
             ['seq_64M_read_10TB', 'rand_16k_readwrite_5TB_rwmixread-65'],
-            [1, 2], [1, 3],
-            None, None, 600, 10, True, ['randrepeat=0'], 1),
-        expected_jobfile)
-
-  def testParseGenerateScenarioWithIodepthNumjobs(self):
-    expected_jobfile = """
-[global]
-ioengine=libaio
-invalidate=1
-direct=1
-runtime=600
-ramp_time=10
-time_based
-filename=/test/filename
-do_verify=0
-verify_fatal=0
-group_reporting=1
-randrepeat=0
-
-[seq_64M_read_10TB-io-depth-1-num-jobs-1]
-stonewall
-rw=read
-blocksize=64M
-iodepth=1
-size=10TB
-numjobs=1
-
-[rand_16k_readwrite_5TB_rwmixread-65-io-depth-4-num-jobs-4]
-stonewall
-rw=randrw
-rwmixread=65
-blocksize=16k
-iodepth=4
-size=5TB
-numjobs=4"""
-
-    self.assertEqual(
-        fio_benchmark.GenerateJobFileString(
-            self.filename,
-            ['seq_64M_read_10TB_iodepth-1_numjobs-1',
-             'rand_16k_readwrite_5TB_iodepth-4_numjobs-4_rwmixread-65'],
-            [1, 2], [1, 3],
-            None, None, 600, 10, True, ['randrepeat=0'], 1),
+            [1], [1],
+            None, None, 600, True, ['randrepeat=0']),
         expected_jobfile)
 
 

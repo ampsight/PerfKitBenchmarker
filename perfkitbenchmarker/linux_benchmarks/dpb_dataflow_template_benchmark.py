@@ -140,9 +140,8 @@ def Run(benchmark_spec):
   end_time = datetime.datetime.now()
 
   # Update metadata after job run to get job id
-  metadata = copy.copy(dpb_service_instance.GetResourceMetadata())
+  metadata = copy.copy(dpb_service_instance.GetMetadata())
   metadata.update({'input_sub': input_pubsub_name})
-  dpb_service_instance.metadata.update(metadata)
 
   run_time = (end_time - start_time).total_seconds()
   results.append(sample.Sample('run_time', run_time, 'seconds', metadata))
@@ -160,7 +159,7 @@ def Run(benchmark_spec):
   for name, value in stats.items():
     results.append(sample.Sample(name, value, 'number', metadata))
 
-  total_cost = dpb_service_instance.CalculateLastJobCost(
+  total_cost = dpb_service_instance.CalculateCost(
       gcp_dpb_dataflow.DATAFLOW_TYPE_STREAMING)
   results.append(sample.Sample('total_cost', total_cost, '$', metadata))
 

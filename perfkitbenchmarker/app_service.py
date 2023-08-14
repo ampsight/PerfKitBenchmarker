@@ -15,30 +15,18 @@ from perfkitbenchmarker.configs import option_decoders
 from perfkitbenchmarker.configs import spec
 from perfkitbenchmarker.linux_packages import http_poller
 
-
 FLAGS = flags.FLAGS
 flags.DEFINE_string('appservice', None, 'Type of app service. e.g. AppEngine')
+flags.DEFINE_string('appservice_region', None,
+                    'Region of deployed app service.')
+flags.DEFINE_string('appservice_backend', None,
+                    'Backend instance type of app service uses.')
 flags.DEFINE_string(
-    'appservice_region', None, 'Region of deployed app service.'
-)
-flags.DEFINE_string(
-    'appservice_backend', None, 'Backend instance type of app service uses.'
-)
-flags.DEFINE_string(
-    'app_runtime',
-    None,
-    'Runtime environment of app service uses. e.g. python, java',
-)
-flags.DEFINE_string(
-    'app_type', None, 'Type of app packages builders should built.'
-)
+    'app_runtime', None, 'Runtime environment of app service uses. '
+    'e.g. python, java')
+flags.DEFINE_string('app_type', None,
+                    'Type of app packages builders should built.')
 flags.DEFINE_integer('appservice_count', 1, 'Copies of applications to launch.')
-APPSERVICE_NAME = flags.DEFINE_string(
-    'appservice_name',
-    '',
-    'Hardcode the name of the serverless app. If set, overrides an otherwise'
-    ' run_uri based name, usually especially for cold starts.',
-)
 
 
 def GetAppServiceSpecClass(service) -> Type['BaseAppServiceSpec']:
@@ -72,12 +60,9 @@ class BaseAppServiceSpec(spec.BaseSpec):
   appservice: str
 
   @classmethod
-  def _ApplyFlags(
-      cls,
-      config_values: MutableMapping[str, Any],
-      flag_values: flags.FlagValues,
-  ):
-    super()._ApplyFlags(config_values, flag_values)
+  def _ApplyFlags(cls, config_values: MutableMapping[str, Any],
+                  flag_values: flags.FlagValues):
+    super(BaseAppServiceSpec, cls)._ApplyFlags(config_values, flag_values)
     if flag_values['appservice_region'].present:
       config_values['appservice_region'] = flag_values.appservice_region
     if flag_values['appservice_backend'].present:
@@ -89,18 +74,18 @@ class BaseAppServiceSpec(spec.BaseSpec):
   def _GetOptionDecoderConstructions(cls) -> Dict[str, Any]:
     result = super(BaseAppServiceSpec, cls)._GetOptionDecoderConstructions()
     result.update({
-        'appservice_region': (
-            option_decoders.StringDecoder,
-            {'default': None, 'none_ok': True},
-        ),
-        'appservice_backend': (
-            option_decoders.StringDecoder,
-            {'default': None, 'none_ok': True},
-        ),
-        'appservice': (
-            option_decoders.StringDecoder,
-            {'default': None, 'none_ok': True},
-        ),
+        'appservice_region': (option_decoders.StringDecoder, {
+            'default': None,
+            'none_ok': True
+        }),
+        'appservice_backend': (option_decoders.StringDecoder, {
+            'default': None,
+            'none_ok': True
+        }),
+        'appservice': (option_decoders.StringDecoder, {
+            'default': None,
+            'none_ok': True
+        })
     })
     return result
 
@@ -145,8 +130,11 @@ class BaseAppService(resource.BaseResource):
   _appservice_counter_lock = threading.Lock()
 
   def __init__(self, base_app_service_spec: BaseAppServiceSpec):
-    super().__init__()
-    self.name: str = self._GenerateName()
+    super(BaseAppService, self).__init__()
+    with self._appservice_counter_lock:
+      self.appservice_number: int = self._appservice_counter
+      self.name: str = 'pkb-%s-%s' % (FLAGS.run_uri, self.appservice_number)
+      BaseAppService._appservice_counter += 1
     self.region: str = base_app_service_spec.appservice_region
     self.backend: str = base_app_service_spec.appservice_backend
     self.builder: Any = None
@@ -157,28 +145,9 @@ class BaseAppService(resource.BaseResource):
     self.metadata.update({
         'backend': self.backend,
         'region': self.region,
-        'concurrency': 'default',
+        'concurrency': 'default'
     })
     self.samples: List[sample.Sample] = []
-
-  def _GenerateName(self) -> str:
-    """Generates a unique name for the AppService.
-
-    Locking the counter variable allows for each created app service name to be
-    unique within the python process.
-
-    Returns:
-      The newly generated name.
-    """
-    with self._appservice_counter_lock:
-      self.appservice_number: int = self._appservice_counter
-      if APPSERVICE_NAME.value:
-        name = APPSERVICE_NAME.value
-      else:
-        name: str = f'pkb-{FLAGS.run_uri}'
-      name += f'-{self.appservice_number}'
-      BaseAppService._appservice_counter += 1
-      return name
 
   def _UpdateDependencies(self):
     """Update dependencies for AppService."""
@@ -194,8 +163,7 @@ class BaseAppService(resource.BaseResource):
         poll_interval=self._POLL_INTERVAL,
         fuzz=0,
         timeout=self.READY_TIMEOUT,
-        retryable_exceptions=(errors.Resource.RetryableCreationError,),
-    )
+        retryable_exceptions=(errors.Resource.RetryableCreationError,))
     def WaitUntilReady():
       if not self._IsReady():
         raise errors.Resource.RetryableCreationError('Not yet ready')
@@ -222,13 +190,9 @@ class BaseAppService(resource.BaseResource):
         )
     )
     self.samples.append(
-        sample.Sample(
-            'update ready latency',
-            self.update_ready_time - self.update_start_time,
-            'seconds',
-            {},
-        )
-    )
+        sample.Sample('update ready latency',
+                      self.update_ready_time - self.update_start_time,
+                      'seconds', {}))
 
   def Invoke(self, args: Any = None) -> http_poller.PollingResponse:
     """Invokes a deployed app instance.
@@ -243,8 +207,7 @@ class BaseAppService(resource.BaseResource):
     return self.poller.Run(
         self.vm,
         self.endpoint,
-        expected_response=self.builder.GetExpectedResponse(),
-    )
+        expected_response=self.builder.GetExpectedResponse())
 
   def _IsReady(self) -> bool:
     """Returns true if the underlying resource is ready.
@@ -257,11 +220,8 @@ class BaseAppService(resource.BaseResource):
       True if the resource was ready in time, False if the wait timed out.
     """
     response = self.Invoke()
-    logging.info(
-        'Polling Endpoint, success: %s, latency: %s',
-        response.success,
-        response.latency,
-    )
+    logging.info('Polling Endpoint, success: %s, latency: %s', response.success,
+                 response.latency)
     return response.latency > 0
 
   def _CreateDependencies(self):
@@ -295,21 +255,13 @@ class BaseAppService(resource.BaseResource):
     if self.builder:
       self.metadata.update(self.builder.GetResourceMetadata())
 
-  def Create(self, restore=False):
-    super().Create(restore)
+  def Create(self):
+    super(BaseAppService, self).Create()
     self.samples.append(
-        sample.Sample(
-            'create latency',
-            self.create_end_time - self.create_start_time,
-            'seconds',
-            {},
-        )
-    )
+        sample.Sample('create latency',
+                      self.create_end_time - self.create_start_time, 'seconds',
+                      {}))
     self.samples.append(
-        sample.Sample(
-            'create ready latency',
-            self.resource_ready_time - self.create_start_time,
-            'seconds',
-            {},
-        )
-    )
+        sample.Sample('create ready latency',
+                      self.resource_ready_time - self.create_start_time,
+                      'seconds', {}))

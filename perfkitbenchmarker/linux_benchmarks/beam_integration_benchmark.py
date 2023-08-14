@@ -150,7 +150,7 @@ def Run(benchmark_spec):
   job_type = BaseDpbService.BEAM_JOB_TYPE
 
   results = []
-  metadata = copy.copy(dpb_service_instance.GetResourceMetadata())
+  metadata = copy.copy(dpb_service_instance.GetMetadata())
 
   start = datetime.datetime.now()
   dpb_service_instance.SubmitJob(

@@ -57,12 +57,10 @@ class TestOsMixin(virtual_machine.BaseOsMixin):
   def PackageCleanup(self):
     pass
 
-  def RemoteCommand(
-      self, command, ignore_failure=False, timeout=None, **kwargs
-  ):
+  def RemoteCommand(self, command, ignore_failure, timeout, **kwargs):
     pass
 
-  def RemoteCopy(self, file_path, remote_path='', copy_to=True):
+  def RemoteCopy(self, file_path, remote_path, copy_to):
     pass
 
   def SetReadAhead(self, num_sectors, devices):
@@ -83,7 +81,7 @@ class TestOsMixin(virtual_machine.BaseOsMixin):
   def WaitForBootCompletion(self):
     pass
 
-  def _WaitForSSH(self, ip_address=None):
+  def _WaitForSSH(self):
     pass
 
   def _Start(self):
@@ -120,10 +118,6 @@ class TestOsMixin(virtual_machine.BaseOsMixin):
 class TestVirtualMachine(TestOsMixin, virtual_machine.BaseVirtualMachine):
   """Test class that has dummy methods for a base virtual machine."""
   CLOUD = 'test_vm_cloud'
-
-  def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
-    self.created = True
 
   def _Create(self):
     pass

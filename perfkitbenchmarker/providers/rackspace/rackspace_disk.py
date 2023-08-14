@@ -25,7 +25,7 @@ import logging
 from absl import flags
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.configs import option_decoders
 from perfkitbenchmarker.providers.rackspace import util
@@ -73,7 +73,7 @@ DISK_METADATA = {
     }
 }
 
-disk.RegisterDiskTypeMap(provider_info.RACKSPACE, DISK_TYPE)
+disk.RegisterDiskTypeMap(providers.RACKSPACE, DISK_TYPE)
 
 
 class RackspaceDiskSpec(disk.BaseDiskSpec):
@@ -84,7 +84,7 @@ class RackspaceDiskSpec(disk.BaseDiskSpec):
     rackspace_region: None or string. Rackspace region to build VM resources.
     rack_profile: None or string. Rack CLI profile configuration.
   """
-  CLOUD = provider_info.RACKSPACE
+  CLOUD = providers.RACKSPACE
 
   @classmethod
   def _ApplyFlags(cls, config_values, flag_values):

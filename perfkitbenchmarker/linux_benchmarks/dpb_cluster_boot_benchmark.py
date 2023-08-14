@@ -19,6 +19,7 @@ from absl import flags
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import errors
+from perfkitbenchmarker import sample
 from perfkitbenchmarker.dpb_service import BaseDpbService
 
 BENCHMARK_NAME = 'dpb_cluster_boot_benchmark'
@@ -96,7 +97,7 @@ def Run(benchmark_spec):
   results = []  # list of the samples that will be returned
   dpb_service_instance = benchmark_spec.dpb_service
 
-  metadata = copy.copy(benchmark_spec.dpb_service.GetResourceMetadata())
+  metadata = copy.copy(benchmark_spec.dpb_service.GetMetadata())
 
   logging.info('metadata %s ', str(metadata))
   logging.info('Resource create_start_time %s ',
@@ -109,6 +110,9 @@ def Run(benchmark_spec):
       dpb_service_instance.create_start_time)
   logging.info('create_time %s ', str(create_time))
 
+  results.append(
+      sample.Sample('dpb_cluster_create_time', create_time, 'seconds',
+                    metadata))
   return results
 
 

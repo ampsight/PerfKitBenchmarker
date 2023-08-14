@@ -49,7 +49,6 @@ flags.DEFINE_enum('benchmark_os_type', None, [LINUX, WINDOWS, CONTAINER],
 MESSAGE = 'message'
 BENCHMARK_LIST = 'benchmark_list'
 STANDARD_SET = 'standard_set'
-COMBO_SET = 'combo_set'
 
 BENCHMARK_SETS = {
     STANDARD_SET: {
@@ -75,13 +74,6 @@ BENCHMARK_SETS = {
             'speccpu2006',
             'sysbench',
             'unixbench',
-        ]
-    },
-    COMBO_SET: {
-        MESSAGE: ('The combo_set is a set of benchmarks that run multiple '
-                  'benchmarks in parallel to measure Cloud performance.'),
-        BENCHMARK_LIST: [
-            'fio_netperf',
         ]
     },
     'arm_set': {
@@ -141,7 +133,6 @@ BENCHMARK_SETS = {
             'cassandra_ycsb',
             'cluster_boot',
             'copy_throughput',
-            'dpdk',
             'fio',
             'gpu_pcie_bandwidth',
             'hadoop_terasort',
@@ -160,7 +151,6 @@ BENCHMARK_SETS = {
             'netperf',
             'object_storage_service',
             'oldisim',
-            'fio_netperf',
             'pgbench',
             'ping',
             'redis_ycsb',

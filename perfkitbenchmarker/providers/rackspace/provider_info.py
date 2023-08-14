@@ -17,9 +17,10 @@
 """
 
 from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 
 
 class RackspaceProviderInfo(provider_info.BaseProviderInfo):
 
   UNSUPPORTED_BENCHMARKS = ['mysql_service']
-  CLOUD = provider_info.RACKSPACE
+  CLOUD = providers.RACKSPACE

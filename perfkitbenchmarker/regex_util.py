@@ -15,7 +15,6 @@
 """Utilities for extracting benchmark results using regular expression."""
 
 import re
-from typing import Union
 
 _IPV4_REGEX = r'[0-9]+(?:\.[0-9]+){3}'
 
@@ -110,7 +109,7 @@ def ExtractIpv4Addresses(text):
   return match
 
 
-def ExtractAllMatches(regex: Union[str, re.Pattern[str]], text, flags=0):
+def ExtractAllMatches(regex, text, flags=0):
   """Extracts all matches from a regular expression matched within 'text'.
 
   Extracts all matches from a regular expression matched within 'text'. Please

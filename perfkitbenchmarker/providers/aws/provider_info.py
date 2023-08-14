@@ -14,8 +14,9 @@
 """AWS provider info."""
 
 from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 
 
 class AWSProviderInfo(provider_info.BaseProviderInfo):
 
-  CLOUD = provider_info.AWS
+  CLOUD = providers.AWS

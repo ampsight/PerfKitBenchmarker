@@ -30,7 +30,7 @@ from perfkitbenchmarker import context
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import network
 from perfkitbenchmarker import placement_group
-from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.aws import aws_placement_group
@@ -44,12 +44,6 @@ _AWS_SUBNET = flags.DEFINE_string(
     'aws_subnet', None,
     'The static AWS subnet id to use.  Set value to "default" to use '
     'default subnet. If unset, creates a new subnet.')
-AWS_ENI_COUNT = flags.DEFINE_integer(
-    'aws_eni_count', 1,
-    'The number of ENIs per instance.')
-AWS_NETWORK_CARD_COUNT = flags.DEFINE_integer(
-    'aws_network_card_count', 1,
-    'The number of network cards per instance.')
 flags.DEFINE_bool('aws_efa', False, 'Whether to use an Elastic Fiber Adapter.')
 flags.DEFINE_string('aws_efa_version', '1.12.1',
                     'Version of AWS EFA to use (must also pass in --aws_efa).')
@@ -70,7 +64,7 @@ NON_PLACEMENT_GROUP_PREFIXES = frozenset(
 class AwsFirewall(network.BaseFirewall):
   """An object representing the AWS Firewall."""
 
-  CLOUD = provider_info.AWS
+  CLOUD = providers.AWS
 
   def __init__(self):
     self.firewall_set = set()
@@ -622,7 +616,7 @@ class _AwsRegionalNetwork(network.BaseNetwork):
   _regional_network_count = 0
   _regional_network_lock = threading.Lock()
 
-  CLOUD = provider_info.AWS
+  CLOUD = providers.AWS
 
   def __repr__(self):
     return '%s(%r)' % (self.__class__, self.__dict__)
@@ -825,7 +819,7 @@ class AwsNetwork(network.BaseNetwork):
     placement_group: An AwsPlacementGroup instance.
   """
 
-  CLOUD = provider_info.AWS
+  CLOUD = providers.AWS
 
   def __repr__(self):
     return '%s(%r)' % (self.__class__, self.__dict__)
@@ -841,7 +835,6 @@ class AwsNetwork(network.BaseNetwork):
     self.regional_network = _AwsRegionalNetwork.GetForRegion(
         self.region, spec.vpc_id)
     self.subnet = None
-    self.subnets = []
     self.vpc_peering = None
 
     # Placement Group
@@ -885,7 +878,6 @@ class AwsNetwork(network.BaseNetwork):
           spec.vpc_id,
           cidr_block=self.regional_network.cidr_block,
           subnet_id=spec.subnet_id)
-      self.subnets = [self.subnet]
 
   @staticmethod
   def _GetNetworkSpecFromVm(vm):
@@ -903,19 +895,17 @@ class AwsNetwork(network.BaseNetwork):
     self.regional_network.Create()
 
     if self.subnet is None:
-      for _ in range(AWS_ENI_COUNT.value):
-        cidr = self.regional_network.vpc.NextSubnetCidrBlock()
-        self.subnet = AwsSubnet(self.zone, self.regional_network.vpc.id,
-                                cidr_block=cidr)
-        self.subnet.Create()
-        self.subnets.append(self.subnet)
+      cidr = self.regional_network.vpc.NextSubnetCidrBlock()
+      self.subnet = AwsSubnet(self.zone, self.regional_network.vpc.id,
+                              cidr_block=cidr)
+      self.subnet.Create()
     if self.placement_group:
       self.placement_group.Create()
 
   def Delete(self):
     """Deletes the network."""
-    for subnet in self.subnets:
-      subnet.Delete()
+    if self.subnet:
+      self.subnet.Delete()
     if self.placement_group:
       self.placement_group.Delete()
     if hasattr(self, 'vpc_peering') and self.vpc_peering:

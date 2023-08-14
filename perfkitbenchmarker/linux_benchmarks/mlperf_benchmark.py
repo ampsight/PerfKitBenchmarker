@@ -183,10 +183,6 @@ def PrepareBenchmark(benchmark_spec, vm=None):
   _UpdateBenchmarkSpecWithFlags(benchmark_spec)
   vm = vm or benchmark_spec.vms[0]
 
-  has_gpu = nvidia_driver.CheckNvidiaGpuExists(vm)
-  if has_gpu:
-    vm.Install('cuda_toolkit')
-
   if (bool(benchmark_spec.tpus) and nvidia_driver.CheckNvidiaGpuExists(vm)):
     raise errors.Config.InvalidValue(
         'Invalid configuration. GPUs and TPUs can not both present in the config.'
@@ -365,6 +361,10 @@ def PrepareRunner(benchmark_spec, vm=None):
                           metric_script)
   else:
     benchmark_spec.model_dir = '/tmp'
+
+    has_gpu = nvidia_driver.CheckNvidiaGpuExists(vm)
+    if has_gpu:
+      vm.Install('cuda_toolkit')
 
     vm.Install('nvidia_docker')
     docker.AddUser(vm)

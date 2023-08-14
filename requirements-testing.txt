@@ -36,4 +36,3 @@ freezegun
 boto3
 google-cloud-pubsub
 requests-mock
-pyfakefs

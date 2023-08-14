@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Provider info for Mesos.
+""" Provider info for Mesos
 
 """
 
 from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 
 
 class MesosProviderInfo(provider_info.BaseProviderInfo):
@@ -29,7 +30,7 @@ class MesosProviderInfo(provider_info.BaseProviderInfo):
                           'sysbench_oltp']
   UNSUPPORTED_BENCHMARKS = ['bonnieplusplus', 'mysql_service']
 
-  CLOUD = provider_info.MESOS
+  CLOUD = providers.MESOS
 
   @classmethod
   def IsBenchmarkSupported(cls, benchmark):

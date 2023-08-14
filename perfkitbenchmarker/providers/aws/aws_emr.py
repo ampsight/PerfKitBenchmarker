@@ -21,7 +21,7 @@ import logging
 
 from absl import flags
 from perfkitbenchmarker import os_types
-from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import spark_service
 from perfkitbenchmarker import virtual_machine
@@ -95,7 +95,7 @@ class AwsEMR(spark_service.BaseSparkService):
     terminated.
   """
 
-  CLOUD = provider_info.AWS
+  CLOUD = providers.AWS
   SPARK_SAMPLE_LOCATION = '/usr/lib/spark/lib/spark-examples.jar'
   SERVICE_NAME = 'emr'
 

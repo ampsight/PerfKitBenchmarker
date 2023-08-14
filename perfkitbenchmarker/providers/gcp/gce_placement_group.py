@@ -25,16 +25,22 @@ from absl import flags
 from perfkitbenchmarker import context
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import placement_group
-from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import providers
 from perfkitbenchmarker.configs import option_decoders
-from perfkitbenchmarker.providers.gcp import flags as gcp_flags
 from perfkitbenchmarker.providers.gcp import util as gcp_util
 
 FLAGS = flags.FLAGS
 
 COLLOCATED = 'COLLOCATED'
-CLUSTERED = 'CLUSTERED'
 AVAILABILITY_DOMAIN = 'availability-domain'
+
+
+flags.DEFINE_integer(
+    'gce_availability_domain_count',
+    0,
+    'Number of fault domains to create for availability-domain placement group',
+    lower_bound=0,
+    upper_bound=8)
 
 
 class GcePlacementGroupSpec(placement_group.BasePlacementGroupSpec):
@@ -46,7 +52,7 @@ class GcePlacementGroupSpec(placement_group.BasePlacementGroupSpec):
       num_vms: Number of VMs to put into the resource group.
   """
 
-  CLOUD = provider_info.GCP
+  CLOUD = providers.GCP
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -73,7 +79,7 @@ class GcePlacementGroupSpec(placement_group.BasePlacementGroupSpec):
 class GcePlacementGroup(placement_group.BasePlacementGroup):
   """Object representing an GCE Placement Group."""
 
-  CLOUD = provider_info.GCP
+  CLOUD = providers.GCP
 
   def __init__(self, gce_placement_group_spec):
     """Init method for GcePlacementGroup.
@@ -99,37 +105,14 @@ class GcePlacementGroup(placement_group.BasePlacementGroup):
 
     self.metadata.update({
         'placement_group_name': self.name,
-        'placement_group_style': self.style,
-        'placement_group_max_distance': (
-            gcp_flags.GCE_PLACEMENT_GROUP_MAX_DISTANCE.value
-        ),
+        'placement_group_style': self.style
     })
 
   def _Create(self):
     """Creates the GCE placement group."""
 
-    cmd = gcp_util.GcloudCommand(
-        self,
-        'compute',
-        'resource-policies',
-        'create',
-        'group-placement',
-        self.name,
-    )
-    if (
-        self.style == CLUSTERED
-        or gcp_flags.GCE_PLACEMENT_GROUP_MAX_DISTANCE.value
-    ):
-      # Only alpha API supported for CLUSTERED and max-distance.
-      cmd = gcp_util.GcloudCommand(
-          self,
-          'alpha',
-          'compute',
-          'resource-policies',
-          'create',
-          'group-placement',
-          self.name,
-      )
+    cmd = gcp_util.GcloudCommand(self, 'compute', 'resource-policies',
+                                 'create', 'group-placement', self.name)
     placement_policy = {
         'format': 'json',
         'region': self.region,
@@ -138,21 +121,12 @@ class GcePlacementGroup(placement_group.BasePlacementGroup):
     if self.style == COLLOCATED:
       placement_policy['collocation'] = self.style
       placement_policy['vm-count'] = self.num_vms
-    elif self.style == CLUSTERED:
-      placement_policy['collocation'] = self.style
-      placement_policy['vm-count'] = self.num_vms
     elif self.style == AVAILABILITY_DOMAIN:
-      placement_policy['availability-domain-count'] = (
-          self.availability_domain_count
-      )
-      self.metadata.update(
-          {'availability_domain_count': self.availability_domain_count}
-      )
+      placement_policy[
+          'availability-domain-count'] = self.availability_domain_count
+      self.metadata.update({
+          'availability_domain_count': self.availability_domain_count})
 
-    if gcp_flags.GCE_PLACEMENT_GROUP_MAX_DISTANCE.value:
-      placement_policy['max-distance'] = (
-          gcp_flags.GCE_PLACEMENT_GROUP_MAX_DISTANCE.value
-      )
     cmd.flags.update(placement_policy)
 
     _, stderr, retcode = cmd.Issue(raise_on_failure=False)
