@@ -24,7 +24,7 @@ from absl import logging
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import linux_packages
 from perfkitbenchmarker import object_storage_service
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.aws import util
 
@@ -39,7 +39,7 @@ _WRITE = 's3:PutObject'
 class S3Service(object_storage_service.ObjectStorageService):
   """Interface to Amazon S3."""
 
-  STORAGE_NAME = providers.AWS
+  STORAGE_NAME = provider_info.AWS
 
   region: str
 
@@ -158,6 +158,27 @@ class S3Service(object_storage_service.ObjectStorageService):
         '--bucket', bucket, '--policy',
         _MakeS3BucketPolicy(bucket, actions)
     ])
+    if object_storage_service.OBJECT_TTL_DAYS.value:
+      # NOTE: buckets created with older APIs may have a different configuration
+      # (e.g. Prefix instead of Filter): This needs to stay updated for new
+      # buckets.
+      config = json.dumps(
+          {
+              'Rules': [{
+                  'Expiration': {
+                      'Days': object_storage_service.OBJECT_TTL_DAYS.value
+                  },
+                  'ID': 'PKB_OBJECT_TTL',
+                  'Filter': {},
+                  'Status': 'Enabled',
+              }]
+          }
+      )
+      vm_util.IssueCommand(util.AWS_PREFIX + [
+          'put-bucket-lifecycle-configuration',
+          '--region', self.region,
+          '--bucket', bucket,
+          '--lifecycle-configuration', config])
 
   def GetDownloadUrl(self, bucket, object_name, use_https=True):
     """See base class."""

@@ -16,35 +16,12 @@
 import logging
 from typing import Any, Dict, List
 from absl import flags
-from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import benchmark_spec
 from perfkitbenchmarker import configs
-from perfkitbenchmarker import linux_packages
 from perfkitbenchmarker import regex_util
 from perfkitbenchmarker import sample
-from perfkitbenchmarker import virtual_machine
+from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.linux_packages import cuda_toolkit
-from perfkitbenchmarker.linux_packages import xgboost
-
-_TREE_METHOD = flags.DEFINE_enum(
-    'xgboost_tree_method', 'gpu_hist', ['gpu_hist', 'hist'],
-    'XGBoost builtin tree methods.')
-_SPARSITY = flags.DEFINE_float(
-    'xgboost_sparsity', 0.0, 'XGBoost sparsity-aware split finding algorithm.')
-_ROWS = flags.DEFINE_integer(
-    'xgboost_rows', 1000000, 'The number of data rows.')
-_COLUMNS = flags.DEFINE_integer(
-    'xgboost_columns', 50, 'The number of data columns.')
-_ITERATIONS = flags.DEFINE_integer(
-    'xgboost_iterations', 500, 'The number of training iterations.')
-_TEST_SIZE = flags.DEFINE_float(
-    'xgboost_test_size', 0.25,
-    'Train-test split for evaluating machine learning algorithms')
-_PARAMS = flags.DEFINE_string(
-    'xgboost_params', None,
-    'Provide additional parameters as a Python dict string, '
-    'e.g. --params \"{\'max_depth\':2}\"')
-
 
 FLAGS = flags.FLAGS
 
@@ -57,19 +34,25 @@ xgboost:
       vm_spec:
         GCP:
           machine_type: n1-standard-4
-          gpu_type: t4
-          gpu_count: 1
           zone: us-east1-c
-          image_family: tf-latest-gpu-gvnic
+          image_family: common-cu113
           image_project: deeplearning-platform-release
+          boot_disk_size: 200
         AWS:
           machine_type: g4dn.xlarge
           zone: us-east-1a
+          boot_disk_size: 200
         Azure:
           machine_type: Standard_NC4as_T4_v3
           zone: eastus
-          image: microsoft-dsvm:ubuntu-1804:1804-gen2:latest
+          image: microsoft-dsvm:ubuntu-hpc:2004:latest
+          boot_disk_size: 200
 """
+
+_USE_GPU = flags.DEFINE_boolean(
+    'xgboost_use_gpu', True, 'Run XGBoost using GPU.'
+)
+CODE_PATH = '/scratch/xgboost_ray'
 
 
 def GetConfig(user_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -91,49 +74,52 @@ def Prepare(bm_spec: benchmark_spec.BenchmarkSpec) -> None:
     bm_spec: The benchmark specification
   """
   vm = bm_spec.vms[0]
-  cuda_toolkit.EnrollSigningKey(vm)
-  vm.Install('xgboost')
+  if _USE_GPU.value:
+    vm.Install('cuda_toolkit')
+  vm.RemoteCommand('git clone https://github.com/ray-project/xgboost_ray.git')
+  vm.RemoteCommand(
+      f'{FLAGS.xgboost_env} python3 -m pip install -r'
+      ' xgboost_ray/requirements/test-requirements.txt'
+  )
+  vm.RemoteCommand(f'{FLAGS.xgboost_env} python3 -m pip install xgboost_ray')
+  vm.RemoteCommand(
+      f'{FLAGS.xgboost_env} python3'
+      ' xgboost_ray/xgboost_ray/tests/release/create_test_data.py'
+      ' /tmp/classification.parquet --seed 1234 --num-rows 1000000 --num-cols'
+      ' 40 --num-partitions 100 --num-classes 2'
+  )
+  vm_util.ReplaceText(
+      vm,
+      r'ray.init\(address=\"auto\"\)',
+      'pass',
+      'xgboost_ray/xgboost_ray/tests/release/benchmark_cpu_gpu.py',
+  )
 
 
-def _MetadataFromFlags(vm: virtual_machine.BaseVirtualMachine) -> [str, Any]:
-  """Returns metadata dictionary from flag settings."""
-  return {
-      'tree_method': _TREE_METHOD.value,
-      'sparsity': _SPARSITY.value,
-      'rows': _ROWS.value,
-      'columns': _COLUMNS.value,
-      'iterations': _ITERATIONS.value,
-      'test_size': _TEST_SIZE.value,
-      'params': _PARAMS.value,
-      'xgboost_version': xgboost.GetXgboostVersion(vm),
-  }
-
-
-def _CollectGpuSamples(
-    vm: virtual_machine.BaseVirtualMachine) -> List[sample.Sample]:
+def Run(bm_spec: benchmark_spec.BenchmarkSpec) -> List[sample.Sample]:
   """Run XGBoost on the cluster.
 
   Args:
-    vm: The virtual machine to run the benchmark.
+    bm_spec: The benchmark specification
 
   Returns:
     A list of sample.Sample objects.
   """
+  vm = bm_spec.vms[0]
   cmd = [
-      f'{FLAGS.xgboost_env}',
+      FLAGS.xgboost_env,
       'python3',
-      f'{linux_packages.INSTALL_DIR}/xgboost/tests/benchmark/benchmark_tree.py',
-      f'--tree_method={_TREE_METHOD.value}',
-      f'--sparsity={_SPARSITY.value}',
-      f'--rows={_ROWS.value}',
-      f'--columns={_COLUMNS.value}',
-      f'--iterations={_ITERATIONS.value}',
-      f'--test_size={_TEST_SIZE.value}',
+      'xgboost_ray/xgboost_ray/tests/release/benchmark_cpu_gpu.py',
+      '1',
+      '10',
+      '20',
+      '--gpu' if _USE_GPU.value else '',
+      '--file',
+      '/tmp/classification.parquet',
   ]
-  if _PARAMS.value:
-    cmd.append(f'--params="{_PARAMS.value}"')
-  metadata = _MetadataFromFlags(vm)
-  metadata.update(cuda_toolkit.GetMetadata(vm))
+  metadata = {}
+  if _USE_GPU.value:
+    metadata.update(cuda_toolkit.GetMetadata(vm))
   metadata['command'] = ' '.join(cmd)
 
   stdout, stderr, exit_code = vm.RemoteCommandWithReturnCode(
@@ -141,12 +127,9 @@ def _CollectGpuSamples(
   if exit_code:
     logging.warning('Error with getting XGBoost stats: %s', stderr)
   training_time = regex_util.ExtractFloat(
-      r'Train Time: ([\d\.]+) seconds', stdout)
-  return sample.Sample('training_time', training_time, 'seconds', metadata)
-
-
-def Run(bm_spec: benchmark_spec.BenchmarkSpec) -> List[sample.Sample]:
-  return background_tasks.RunThreaded(_CollectGpuSamples, bm_spec.vms)
+      r'TRAIN TIME TAKEN: ([\d\.]+) seconds', stdout
+  )
+  return [sample.Sample('training_time', training_time, 'seconds', metadata)]
 
 
 def Cleanup(bm_spec: benchmark_spec.BenchmarkSpec) -> None:

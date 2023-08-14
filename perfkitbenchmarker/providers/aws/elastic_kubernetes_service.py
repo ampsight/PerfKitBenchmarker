@@ -27,7 +27,7 @@ from typing import Any, Dict
 from absl import flags
 from perfkitbenchmarker import container_service
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.aws import aws_disk
 from perfkitbenchmarker.providers.aws import aws_virtual_machine
@@ -39,13 +39,18 @@ FLAGS = flags.FLAGS
 class EksCluster(container_service.KubernetesCluster):
   """Class representing an Elastic Kubernetes Service cluster."""
 
-  CLOUD = providers.AWS
+  CLOUD = provider_info.AWS
 
   def __init__(self, spec):
-    super(EksCluster, self).__init__(spec)
     # EKS requires a region and optionally a list of one or zones.
     # Interpret the zone as a comma separated list of zones or a region.
-    self.control_plane_zones = self.zone and self.zone.split(',')
+    self.control_plane_zones = (
+        spec.vm_spec.zone and spec.vm_spec.zone.split(','))
+    # Do this before super, because commas in zones confuse EC2 virtual machines
+    if len(self.control_plane_zones) > 1:
+      # This will become self.zone
+      spec.vm_spec.zone = self.control_plane_zones[0]
+    super().__init__(spec)
     if not self.control_plane_zones:
       raise errors.Config.MissingOption(
           'container_cluster.vm_spec.AWS.zone is required.')

@@ -23,14 +23,20 @@ import abc
 import dataclasses
 import datetime
 import logging
+import os
+import shutil
+import tempfile
 from typing import Dict, List, Optional, Type
 
 from absl import flags
+import jinja2
 from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import container_service
 from perfkitbenchmarker import context
+from perfkitbenchmarker import data
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import resource
+from perfkitbenchmarker import sample
 from perfkitbenchmarker import units
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.linux_packages import hadoop
@@ -39,6 +45,16 @@ from perfkitbenchmarker.providers.aws import s3
 from perfkitbenchmarker.providers.aws import util as aws_util
 from perfkitbenchmarker.providers.gcp import gcs
 from perfkitbenchmarker.providers.gcp import util as gcp_util
+import yaml
+
+# Job types that are supported on the dpb service backends
+_PYSPARK_JOB_TYPE = 'pyspark'
+_SPARKSQL_JOB_TYPE = 'spark-sql'
+_SPARK_JOB_TYPE = 'spark'
+_HADOOP_JOB_TYPE = 'hadoop'
+_DATAFLOW_JOB_TYPE = 'dataflow'
+_BEAM_JOB_TYPE = 'beam'
+_FLINK_JOB_TYPE = 'flink'
 
 flags.DEFINE_string(
     'static_dpb_service_instance', None,
@@ -78,8 +94,39 @@ flags.DEFINE_string(
 )
 flags.DEFINE_bool(
     'dpb_export_job_stats', False,
-    'Exports job stats such as CPU usage and cost. Enabled by default, but not '
+    'Exports job stats such as CPU usage and cost. Disabled by default and not '
     'necessarily implemented on all services.')
+flags.DEFINE_enum(
+    'dpb_job_type',
+    None,
+    [
+        _PYSPARK_JOB_TYPE,
+        _SPARKSQL_JOB_TYPE,
+        _SPARK_JOB_TYPE,
+        _HADOOP_JOB_TYPE,
+        _BEAM_JOB_TYPE,
+        _DATAFLOW_JOB_TYPE,
+        _FLINK_JOB_TYPE,
+    ],
+    'The type of the job to be run on the backends.',
+)
+_HARDWARE_HOURLY_COST = flags.DEFINE_float(
+    'dpb_hardware_hourly_cost', None,
+    'Hardware hourly USD cost of running the DPB cluster. Set it along with '
+    '--dpb_service_premium_hourly_cost to publish cost estimate metrics.'
+)
+_SERVICE_PREMIUM_HOURLY_COST = flags.DEFINE_float(
+    'dpb_service_premium_hourly_cost', None,
+    'Hardware hourly USD cost of running the DPB cluster. Set it along with '
+    '--dpb_hardware_hourly_cost to publish cost estimate metrics.'
+)
+_DYNAMIC_ALLOCATION = flags.DEFINE_bool(
+    'dpb_dynamic_allocation', True,
+    'True by default. Set it to False to disable dynamic allocation and assign '
+    'all cluster executors to an incoming job. Setting this off is only '
+    'supported by Dataproc and EMR (non-serverless versions).'
+)
+
 
 FLAGS = flags.FLAGS
 
@@ -96,6 +143,7 @@ GLUE = 'glue'
 UNMANAGED_DPB_SVC_YARN_CLUSTER = 'unmanaged_dpb_svc_yarn_cluster'
 UNMANAGED_SPARK_CLUSTER = 'unmanaged_spark_cluster'
 KUBERNETES_SPARK_CLUSTER = 'kubernetes_spark_cluster'
+KUBERNETES_FLINK_CLUSTER = 'kubernetes_flink_cluster'
 UNMANAGED_SERVICES = [
     UNMANAGED_DPB_SVC_YARN_CLUSTER,
     UNMANAGED_SPARK_CLUSTER,
@@ -150,14 +198,16 @@ class BaseDpbService(resource.BaseResource):
   GCS_FS = 'gs'
   S3_FS = 's3'
 
+  SUPPORTS_NO_DYNALLOC = False
+
   # Job types that are supported on the dpb service backends
-  PYSPARK_JOB_TYPE = 'pyspark'
-  SPARKSQL_JOB_TYPE = 'spark-sql'
-  SPARK_JOB_TYPE = 'spark'
-  HADOOP_JOB_TYPE = 'hadoop'
-  DATAFLOW_JOB_TYPE = 'dataflow'
-  BEAM_JOB_TYPE = 'beam'
-  FLINK_JOB_TYPE = 'flink'
+  PYSPARK_JOB_TYPE = _PYSPARK_JOB_TYPE
+  SPARKSQL_JOB_TYPE = _SPARKSQL_JOB_TYPE
+  SPARK_JOB_TYPE = _SPARK_JOB_TYPE
+  HADOOP_JOB_TYPE = _HADOOP_JOB_TYPE
+  DATAFLOW_JOB_TYPE = _DATAFLOW_JOB_TYPE
+  BEAM_JOB_TYPE = _BEAM_JOB_TYPE
+  FLINK_JOB_TYPE = _FLINK_JOB_TYPE
 
   def _JobJars(self) -> Dict[str, Dict[str, str]]:
     """Known mappings of jars in the cluster used by GetExecutionJar."""
@@ -191,9 +241,17 @@ class BaseDpbService(resource.BaseResource):
       self.bucket = 'pkb-' + FLAGS.run_uri
       self.manage_bucket = True
     self.dpb_service_zone = FLAGS.dpb_service_zone
-    self.dpb_version = dpb_service_spec.version
-    self.dpb_service_type = 'unknown'
+    self.dpb_service_type = self.SERVICE_TYPE
     self.storage_service = None
+    if not self.SUPPORTS_NO_DYNALLOC and not _DYNAMIC_ALLOCATION.value:
+      raise errors.Setup.InvalidFlagConfigurationError(
+          'Dynamic allocation off is not supported for the current DPB '
+          f'Service: {type(self).__name__}.'
+      )
+    self._InitializeMetadata()
+
+  def GetDpbVersion(self) -> Optional[str]:
+    return self.spec.version
 
   @property
   def base_dir(self):
@@ -344,10 +402,9 @@ class BaseDpbService(resource.BaseResource):
         job_type=BaseDpbService.HADOOP_JOB_TYPE,
         properties=properties)
 
-  def GetMetadata(self):
-    """Return a dictionary of the metadata for this cluster."""
-    pretty_version = self.dpb_version or 'default'
-    basic_data = {
+  def _InitializeMetadata(self) -> None:
+    pretty_version = self.GetDpbVersion()
+    self.metadata = {
         'dpb_service':
             self.dpb_service_type,
         'dpb_version':
@@ -369,10 +426,9 @@ class BaseDpbService(resource.BaseResource):
         'dpb_job_properties':
             ','.join('{}={}'.format(k, v)
                      for k, v in self.GetJobProperties().items()),
-        'dpb_cluster_properties':
-            ','.join(FLAGS.dpb_cluster_properties),
+        'dpb_cluster_properties': ','.join(self.GetClusterProperties()),
+        'dpb_dynamic_allocation': _DYNAMIC_ALLOCATION.value,
     }
-    return basic_data
 
   def _CreateDependencies(self):
     """Creates a bucket to use with the cluster."""
@@ -413,6 +469,25 @@ class BaseDpbService(resource.BaseResource):
     if start_time > end_time:
       raise ValueError('start_time cannot be later than the end_time')
     return (end_time - start_time).total_seconds()
+
+  def GetClusterProperties(self) -> list[str]:
+    """Gets cluster props in the format of the dpb_cluster_properties flag.
+
+    Note that this might return an empty list if both --dpb_dynamic_allocation
+    and --dpb_cluster_properties are unset.
+
+    Returns:
+      A list of cluster properties, with each element being in the same format
+      the --dpb_cluster_properties flag uses.
+    """
+    properties = []
+    if not _DYNAMIC_ALLOCATION.value:
+      properties.extend([
+          'spark:spark.executor.instances=9999',
+          'spark:spark.dynamicAllocation.enabled=false',
+      ])
+    properties.extend(FLAGS.dpb_cluster_properties)
+    return properties
 
   def GetJobProperties(self) -> Dict[str, str]:
     """Parse the dpb_job_properties_flag."""
@@ -456,12 +531,122 @@ class BaseDpbService(resource.BaseResource):
     """Gets service wrapper scripts to upload alongside benchmark scripts."""
     return []
 
-  def CalculateCost(self) -> Optional[float]:
+  def CalculateLastJobCost(self) -> Optional[float]:
     """Returns the cost of last job submitted.
 
     Returns:
       A float representing the cost in dollars or None if not implemented.
     """
+    return None
+
+  def GetClusterDuration(self) -> Optional[float]:
+    """Gets how much time the cluster has been running in seconds.
+
+    This default implementation just returns None. Override in subclasses if
+    needed.
+
+    Returns:
+      A float representing the number of seconds the cluster has been running or
+      None if it cannot be obtained.
+    """
+    return None
+
+  def GetClusterCost(self) -> Optional[float]:
+    """Gets the cost of running the cluster if applicable.
+
+    Default implementation returns the sum of cluster hardware cost and service
+    premium cost.
+
+    Guaranteed to be called after the cluster has been shut down if applicable.
+
+    Returns:
+      A float representing the cost in dollars or None if not implemented.
+    """
+    hardware_cost = self.GetClusterHardwareCost()
+    premium_cost = self.GetClusterPremiumCost()
+    if hardware_cost is None or premium_cost is None:
+      return None
+    return hardware_cost + premium_cost
+
+  def GetClusterHardwareCost(self) -> Optional[float]:
+    """Computes the hardware cost with --dpb_hardware_hourly_cost value.
+
+    Default implementation multiplies --dpb_hardware_hourly_cost with the value
+    returned by GetClusterDuration().
+
+    Returns:
+      A float representing the cost in dollars or None if not implemented.
+    """
+    # pylint: disable-next=assignment-from-none
+    cluster_duration = self.GetClusterDuration()
+    if cluster_duration is None or _HARDWARE_HOURLY_COST.value is None:
+      return None
+    return cluster_duration / 3600 * _HARDWARE_HOURLY_COST.value
+
+  def GetClusterPremiumCost(self) -> Optional[float]:
+    """Computes the premium cost with --dpb_service_premium_hourly_cost value.
+
+    Default implementation multiplies --dpb_service_premium_hourly_cost with the
+    value returned by GetClusterDuration().
+
+    Returns:
+      A float representing the cost in dollars or None if not implemented.
+    """
+    # pylint: disable-next=assignment-from-none
+    cluster_duration = self.GetClusterDuration()
+    if cluster_duration is None or _SERVICE_PREMIUM_HOURLY_COST.value is None:
+      return None
+    return cluster_duration / 3600 * _SERVICE_PREMIUM_HOURLY_COST.value
+
+  def GetSamples(self) -> list[sample.Sample]:
+    """Gets samples with service statistics."""
+    samples = []
+    metrics: dict[str, tuple[Optional[float], str]] = {
+        'dpb_cluster_create_time': (self.GetClusterCreateTime(), 'seconds'),
+        'dpb_cluster_duration': (self.GetClusterDuration(), 'seconds'),
+        'dpb_cluster_hardware_cost': (self.GetClusterHardwareCost(), '$'),
+        'dpb_cluster_premium_cost': (self.GetClusterPremiumCost(), '$'),
+        'dpb_cluster_total_cost': (self.GetClusterCost(), '$'),
+        'dpb_cluster_hardware_hourly_cost': (
+            _HARDWARE_HOURLY_COST.value,
+            '$/hour',
+        ),
+        'dpb_cluster_premium_hourly_cost': (
+            _SERVICE_PREMIUM_HOURLY_COST.value,
+            '$/hour',
+        ),
+    }
+    for metric, value_unit_tuple in metrics.items():
+      value, unit = value_unit_tuple
+      if value is not None:
+        samples.append(
+            sample.Sample(metric, value, unit, self.GetResourceMetadata())
+        )
+    return samples
+
+
+class DpbServiceServerlessMixin:
+  """Mixin with default methods dpb services without managed infrastructure."""
+
+  def _Create(self) -> None:
+    pass
+
+  def _Delete(self) -> None:
+    pass
+
+  def GetClusterCreateTime(self) -> Optional[float]:
+    return None
+
+  def GetClusterDuration(self) -> Optional[float]:
+    return None
+
+  def GetClusterCost(self) -> Optional[float]:
+    return None
+
+  def GetClusterHardwareCost(self) -> Optional[float]:
+    return None
+
+  def GetClusterPremiumCost(self) -> Optional[float]:
     return None
 
 
@@ -544,11 +729,10 @@ class UnmanagedDpbServiceYarnCluster(UnmanagedDpbService):
 
   def __init__(self, dpb_service_spec):
     super(UnmanagedDpbServiceYarnCluster, self).__init__(dpb_service_spec)
-    #  Dictionary to hold the cluster vms.
-    self.dpb_service_type = UNMANAGED_DPB_SVC_YARN_CLUSTER
-    # Set DPB version as Hadoop version for metadata
-    self.dpb_version = hadoop.HadoopVersion()
     self.cloud = dpb_service_spec.worker_group.cloud
+
+  def GetDpbVersion(self) -> Optional[str]:
+    return str(hadoop.HadoopVersion())
 
   def _Create(self):
     """Create an un-managed yarn cluster."""
@@ -635,10 +819,10 @@ class UnmanagedDpbSparkCluster(UnmanagedDpbService):
     super(UnmanagedDpbSparkCluster, self).__init__(dpb_service_spec)
     #  Dictionary to hold the cluster vms.
     self.vms = {}
-    self.dpb_service_type = UNMANAGED_SPARK_CLUSTER
-    # Set DPB version as Spark version for metadata
-    self.dpb_version = f'spark_{spark.SparkVersion()}'
     self.cloud = dpb_service_spec.worker_group.cloud
+
+  def GetDpbVersion(self) -> Optional[str]:
+    return f'spark_{spark.SparkVersion()}'
 
   def _Create(self):
     """Create an un-managed yarn cluster."""
@@ -725,9 +909,6 @@ class KubernetesSparkCluster(BaseDpbService):
 
   def __init__(self, dpb_service_spec):
     super().__init__(dpb_service_spec)
-    self.dpb_service_type = self.SERVICE_TYPE
-    # Set DPB version as Spark version for metadata
-    self.dpb_version = 'spark_' + FLAGS.spark_version
 
     benchmark_spec = context.GetThreadBenchmarkSpec()
     self.k8s_cluster = benchmark_spec.container_cluster
@@ -764,6 +945,9 @@ class KubernetesSparkCluster(BaseDpbService):
       raise errors.Config.InvalidValue(
           f'Cluster type {KUBERNETES_SPARK_CLUSTER} requires at least 2 nodes.'
           f'Found {self.k8s_cluster.num_nodes}.')
+
+  def GetDpbVersion(self) -> Optional[str]:
+    return 'spark_' + FLAGS.spark_version
 
   def _Create(self):
     """Create docker image for cluster."""
@@ -900,6 +1084,200 @@ class KubernetesSparkCluster(BaseDpbService):
     raise NotImplementedError('container.WaitForExit is a blocking command.')
 
 
+class KubernetesFlinkCluster(BaseDpbService):
+  """Object representing a Kubernetes dpb service flink cluster."""
+
+  CLOUD = container_service.KUBERNETES
+  SERVICE_TYPE = KUBERNETES_FLINK_CLUSTER
+
+  FLINK_JOB_MANAGER_SERVICE = 'flink-jobmanager'
+  DEFAULT_FLINK_IMAGE = 'flink'
+
+  def __init__(self, dpb_service_spec):
+    super().__init__(dpb_service_spec)
+
+    benchmark_spec = context.GetThreadBenchmarkSpec()
+    self.k8s_cluster = benchmark_spec.container_cluster
+    assert self.k8s_cluster
+    assert self.k8s_cluster.CLUSTER_TYPE == container_service.KUBERNETES
+    self.cloud = self.k8s_cluster.CLOUD
+    self.container_registry = benchmark_spec.container_registry
+    assert self.container_registry
+
+    self.flink_jobmanagers = []
+    self.image = self.DEFAULT_FLINK_IMAGE
+
+    if self.cloud == 'GCP':
+      self.region = gcp_util.GetRegionFromZone(self.k8s_cluster.zone)
+      self.storage_service = gcs.GoogleCloudStorageService()
+      self.persistent_fs_prefix = 'gs://'
+    else:
+      raise errors.Config.InvalidValue(
+          f'Unsupported Cloud provider {self.cloud}')
+
+    self.storage_service.PrepareService(location=self.region)
+
+    if self.k8s_cluster.num_nodes < 2:
+      raise errors.Config.InvalidValue(
+          f'Cluster type {KUBERNETES_FLINK_CLUSTER} requires at least 2 nodes.'
+          f'Found {self.k8s_cluster.num_nodes}.')
+
+  def GetDpbVersion(self) -> Optional[str]:
+    return self.spec.version or self.DEFAULT_FLINK_IMAGE
+
+  def _CreateConfigMapDir(self):
+    """Returns a TemporaryDirectory containing files in the ConfigMap."""
+    temp_directory = tempfile.TemporaryDirectory()
+    # Create flink-conf.yaml to configure flink.
+    flink_conf_filename = os.path.join(temp_directory.name, 'flink-conf.yaml')
+    with open(flink_conf_filename, 'w') as flink_conf_file:
+      yaml.dump(
+          self.GetJobProperties(), flink_conf_file, default_flow_style=False
+      )
+      flink_conf_file.close()
+    # Create log4j-console.properties for logging configuration.
+    logging_property_file = data.ResourcePath(
+        'container/flink/log4j-console.properties'
+    )
+    logging_property_filename = os.path.join(
+        temp_directory.name, 'log4j-console.properties'
+    )
+    shutil.copyfile(logging_property_file, logging_property_filename)
+    return temp_directory
+
+  def _GenerateConfig(self, config_file, **kwargs):
+    """Returns a temporary config file."""
+    filename = data.ResourcePath(config_file)
+    environment = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    with open(filename) as template_file, vm_util.NamedTemporaryFile(
+        mode='w', suffix='.yaml', dir=vm_util.GetTempDir(), delete=False
+    ) as rendered_template:
+      config = environment.from_string(template_file.read()).render(kwargs)
+      rendered_template.write(config)
+      rendered_template.close()
+      logging.info('Finish generating config file %s', rendered_template.name)
+      return rendered_template.name
+
+  def _Create(self):
+    logging.info('Should have created k8s cluster by now.')
+    # Create docker image for containers
+    assert self.k8s_cluster.resource_ready_time
+    assert self.container_registry.resource_ready_time
+    logging.info(self.k8s_cluster)
+    logging.info(self.container_registry)
+
+    logging.info('Building Flink image.')
+    if FLAGS.container_remote_build_config is None:
+      FLAGS.container_remote_build_config = self._GenerateConfig(
+          'docker/flink/cloudbuild.yaml.j2',
+          dpb_job_jarfile=FLAGS.dpb_job_jarfile,
+          base_image=self.GetDpbVersion(),
+          full_tag=self.container_registry.GetFullRegistryTag(self.image),
+      )
+    self.image = self.container_registry.GetOrBuild(self.image)
+
+    logging.info('Configuring Kubernetes Flink Cluster.')
+    with self._CreateConfigMapDir() as config_dir:
+      self.k8s_cluster.CreateConfigMap('default-config', config_dir)
+
+  def _GetJobManagerName(self):
+    return f'flink-jobmanager-{len(self.flink_jobmanagers)}'
+
+  def GetJobProperties(self) -> Dict[str, str]:
+    node_cpu = self.k8s_cluster.node_num_cpu
+    node_memory_mb = self.k8s_cluster.node_memory_allocatable.m_as(
+        units.mebibyte)
+    # Reserve 512 MB for system daemons
+    node_memory_mb -= 512
+    node_memory_mb = int(node_memory_mb)
+
+    # Common flink properties
+    properties = {
+        'jobmanager.rpc.address': self.FLINK_JOB_MANAGER_SERVICE,
+        'blob.server.port': 6124,
+        'jobmanager.rpc.port': 6123,
+        'taskmanager.rpc.port': 6122,
+        'queryable-state.proxy.ports': 6125,
+        'jobmanager.memory.process.size': f'{node_memory_mb}m',
+        'taskmanager.memory.process.size': f'{node_memory_mb}m',
+        'taskmanager.numberOfTaskSlots': node_cpu,
+        'parallelism.default': node_cpu * (self.k8s_cluster.num_nodes - 1),
+        'execution.attached': True,
+    }
+    # User specified properties
+    properties.update(super().GetJobProperties())
+    return properties
+
+  def SubmitJob(
+      self,
+      jarfile=None,
+      classname=None,
+      pyspark_file=None,
+      query_file=None,
+      job_poll_interval=None,
+      job_stdout_file=None,
+      job_arguments=None,
+      job_files=None,
+      job_jars=None,
+      job_py_files=None,
+      job_type=None,
+      properties=None,
+  ):
+    """Submit a data processing job to the backend."""
+    job_manager_name = self._GetJobManagerName()
+    job_properties = self.GetJobProperties()
+    start_time = datetime.datetime.now()
+    self.k8s_cluster.ApplyManifest(
+        'container/flink/flink-job-and-deployment.yaml.j2',
+        job_manager_name=job_manager_name,
+        job_manager_service=self.FLINK_JOB_MANAGER_SERVICE,
+        classname=classname,
+        job_arguments=','.join(job_arguments),
+        image=self.image,
+        task_manager_replicas=self.k8s_cluster.num_nodes - 1,
+        task_manager_rpc_port=job_properties.get('taskmanager.rpc.port'),
+        job_manager_rpc_port=job_properties.get('jobmanager.rpc.port'),
+        blob_server_port=job_properties.get('blob.server.port'),
+        queryable_state_proxy_ports=job_properties.get(
+            'queryable-state.proxy.ports'
+        ),
+    )
+    stdout, _, _ = container_service.RunKubectlCommand(
+        ['get', 'pod', f'--selector=job-name={job_manager_name}', '-o', 'yaml']
+    )
+    pods = yaml.safe_load(stdout)['items']
+    if len(pods) <= 0:
+      raise JobSubmissionError('No pod was created for the job.')
+    container = container_service.KubernetesPod(pods[0]['metadata']['name'])
+    self.flink_jobmanagers.append(container)
+    try:
+      container.WaitForExit()
+    except container_service.ContainerException as e:
+      raise JobSubmissionError() from e
+    end_time = datetime.datetime.now()
+
+    if job_stdout_file:
+      with open(job_stdout_file, 'w') as f:
+        f.write(container.GetLogs())
+
+    return JobResult(run_time=(end_time - start_time).total_seconds())
+
+  @staticmethod
+  def CheckPrerequisites(benchmark_config):
+    del benchmark_config  # Unused
+    # Make sure dpb_job_jarfile is provided when using flink
+    assert FLAGS.dpb_job_jarfile
+    # dpb_cluster_properties is to be supported
+    assert not FLAGS.dpb_cluster_properties
+
+  def _GetCompletedJob(self, job_id: str) -> Optional[JobResult]:
+    """container.WaitForExit is blocking so this is not meaningful."""
+    raise NotImplementedError('container.WaitForExit is a blocking command.')
+
+  def _Delete(self):
+    pass
+
+
 def GetDpbServiceClass(cloud: str,
                        dpb_service_type: str) -> Optional[Type[BaseDpbService]]:
   """Gets the Data Processing Backend class corresponding to 'service_type'.
@@ -916,7 +1294,7 @@ def GetDpbServiceClass(cloud: str,
   """
   if dpb_service_type in UNMANAGED_SERVICES:
     cloud = 'Unmanaged'
-  elif dpb_service_type == KUBERNETES_SPARK_CLUSTER:
+  elif dpb_service_type in [KUBERNETES_SPARK_CLUSTER, KUBERNETES_FLINK_CLUSTER]:
     cloud = container_service.KUBERNETES
   return resource.GetResourceClass(
       BaseDpbService, CLOUD=cloud, SERVICE_TYPE=dpb_service_type)

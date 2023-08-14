@@ -18,13 +18,14 @@ import json
 import os.path
 import unittest
 from absl import flags
+from absl.testing import flagsaver
 from absl.testing import parameterized
 import mock
 
 from perfkitbenchmarker import benchmark_spec
 from perfkitbenchmarker import context
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.configs import benchmark_config_spec
 from perfkitbenchmarker.providers.aws import aws_disk
@@ -282,7 +283,7 @@ class AwsVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
     super(AwsVirtualMachineTestCase, self).setUp()
-    FLAGS.cloud = providers.AWS
+    FLAGS.cloud = provider_info.AWS
     FLAGS.run_uri = 'aaaaaa'
     FLAGS.temp_dir = 'tmp'
     p = mock.patch('perfkitbenchmarker.providers.aws.'
@@ -377,6 +378,15 @@ class AwsVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
           ),
           'expected_error': errors.Resource.CreationInternalError,
       },
+      {
+          'testcase_name': 'instance_invalid_keypair_notfound_error',
+          'stderr': (
+              'An error occurred (InvalidKeyPair.NotFound) when calling the '
+              'RunInstances operation: The key pair "perfkit-key-test_run_uri" '
+              'does not exist'
+          ),
+          'expected_error': errors.Benchmarks.KnownIntermittentError,
+      }
   )
   def testVMCreationError(self, stderr, expected_error):
     vm_util.IssueCommand.side_effect = [(None, stderr, None)]
@@ -443,6 +453,37 @@ class AwsVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
     state_reason = {'Code': 'shutting-down-test'}
     response['Reservations'][0]['Instances'][0]['StateReason'] = state_reason
     util.IssueRetryableCommand.side_effect = [(json.dumps(response), None)]
+    self.assertFalse(self.vm._Exists())
+
+  @flagsaver.flagsaver(collect_delete_samples='true')
+  def testInstanceExistsRetryWithFlag(self):
+    shutting_down_response = json.loads(self.response)
+    shutting_down_response['Reservations'][0]['Instances'][0]['State'][
+        'Name'
+    ] = 'shutting-down'
+    shutting_down_response['Reservations'][0]['Instances'][0]['StateReason'] = {
+        'Code': 'shutting-down-retry-test'
+    }
+
+    # Update the response to mock the VM moving from 'shutting-down' to
+    # 'terminated'
+    terminated_response = json.loads(self.response)
+    terminated_response['Reservations'][0]['Instances'][0]['State'][
+        'Name'
+    ] = 'terminated'
+    terminated_response['Reservations'][0]['Instances'][0]['StateReason'] = {
+        'Code': 'terminated-test'
+    }
+
+    # The first response should prompt a retry of Exists, leading to the
+    # second response.
+    util.IssueRetryableCommand.side_effect = [
+        (json.dumps(shutting_down_response), None),
+        (json.dumps(terminated_response), None),
+    ]
+
+    # When measuring time to delete, Exists should return False upon seeing the
+    # second response, indicating that the VM is terminated.
     self.assertFalse(self.vm._Exists())
 
   @mock.patch.object(util, 'FormatTagSpecifications')

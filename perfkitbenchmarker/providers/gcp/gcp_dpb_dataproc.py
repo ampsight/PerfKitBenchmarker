@@ -22,14 +22,14 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from absl import flags
 from perfkitbenchmarker import data
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import flag_util
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.linux_packages import aws_credentials
 from perfkitbenchmarker.providers.gcp import gcp_dpb_dataproc_serverless_prices
@@ -61,10 +61,7 @@ class GcpDpbBaseDataproc(dpb_service.BaseDpbService):
 
   def __init__(self, dpb_service_spec):
     super().__init__(dpb_service_spec)
-    self.dpb_service_type = self.SERVICE_TYPE
     self.project = FLAGS.project
-    if FLAGS.dpb_dataproc_image_version:
-      self.dpb_version = FLAGS.dpb_dataproc_image_version
     if not self.dpb_service_zone:
       raise errors.Setup.InvalidSetupError(
           'dpb_service_zone must be provided, for provisioning.')
@@ -72,7 +69,12 @@ class GcpDpbBaseDataproc(dpb_service.BaseDpbService):
     self.storage_service = gcs.GoogleCloudStorageService()
     self.storage_service.PrepareService(location=self.region)
     self.persistent_fs_prefix = 'gs://'
-    self._cluster_create_time = None
+    self._cluster_create_time: Optional[float] = None
+    self._cluster_ready_time: Optional[float] = None
+    self._cluster_delete_time: Optional[float] = None
+
+  def GetDpbVersion(self) -> Optional[str]:
+    return FLAGS.dpb_dataproc_image_version or super().GetDpbVersion()
 
   @staticmethod
   def _ParseTime(state_time: str) -> datetime.datetime:
@@ -138,8 +140,9 @@ class GcpDpbDataproc(GcpDpbBaseDataproc):
     project: ID of the project.
   """
 
-  CLOUD = providers.GCP
+  CLOUD = provider_info.GCP
   SERVICE_TYPE = 'dataproc'
+  SUPPORTS_NO_DYNALLOC = True
 
   def __init__(self, dpb_service_spec):
     super().__init__(dpb_service_spec)
@@ -156,7 +159,15 @@ class GcpDpbDataproc(GcpDpbBaseDataproc):
     Returns:
       A float representing the creation time in seconds or None.
     """
-    return self._cluster_create_time
+    return self._cluster_ready_time - self._cluster_create_time
+
+  def GetClusterDuration(self) -> Optional[float]:
+    if (
+        self._cluster_create_time is not None
+        and self._cluster_delete_time is not None
+    ):
+      return self._cluster_delete_time - self._cluster_create_time
+    return None
 
   def _Create(self):
     """Creates the cluster."""
@@ -202,10 +213,16 @@ class GcpDpbDataproc(GcpDpbBaseDataproc):
                        self.spec.worker_group.vm_spec.num_local_ssds)
         # This will actually be used for storage
         self.dpb_hdfs_type = 'Local SSD'
+      # Set SSD interface
+      if self.spec.worker_group.vm_spec.ssd_interface:
+        self._AddToCmd(cmd, '{0}-local-ssd-interface'.format(role),
+                       self.spec.worker_group.vm_spec.ssd_interface)
+        # This will actually be used for storage
+        self.dpb_hdfs_type = 'Local SSD'
     # Set zone
     cmd.flags['zone'] = self.dpb_service_zone
-    if self.dpb_version:
-      cmd.flags['image-version'] = self.dpb_version
+    if self.GetDpbVersion():
+      cmd.flags['image-version'] = self.GetDpbVersion()
 
     if FLAGS.gcp_dataproc_image:
       cmd.flags['image'] = FLAGS.gcp_dataproc_image
@@ -214,8 +231,8 @@ class GcpDpbDataproc(GcpDpbBaseDataproc):
     if FLAGS.gcloud_scopes:
       cmd.flags['scopes'] = ','.join(re.split(r'[,; ]', FLAGS.gcloud_scopes))
 
-    if FLAGS.dpb_cluster_properties:
-      cmd.flags['properties'] = ','.join(FLAGS.dpb_cluster_properties)
+    if self.GetClusterProperties():
+      cmd.flags['properties'] = ','.join(self.GetClusterProperties())
 
     if FLAGS.dpb_initialization_actions:
       cmd.flags['initialization-actions'] = FLAGS.dpb_initialization_actions
@@ -225,7 +242,7 @@ class GcpDpbDataproc(GcpDpbBaseDataproc):
     # generally happy using pre-existing networks for Dataproc. Just use the
     # underlying flag instead.
     if FLAGS.gce_network_name:
-      cmd.flags['network'] = FLAGS.gce_network_name
+      cmd.flags['network'] = FLAGS.gce_network_name[0]
 
     metadata = util.GetDefaultTags()
     metadata.update(flag_util.ParseKeyValuePairs(FLAGS.gcp_instance_metadata))
@@ -233,14 +250,18 @@ class GcpDpbDataproc(GcpDpbBaseDataproc):
     cmd.flags['labels'] = util.MakeFormattedDefaultTags()
     timeout = 900  # 15 min
     stdout, stderr, retcode = cmd.Issue(timeout=timeout, raise_on_failure=False)
-    self._cluster_create_time = self._ParseClusterCreateTime(stdout)
+    self._cluster_create_time, self._cluster_ready_time = (
+        self._ParseClusterCreateTime(stdout)
+    )
     if retcode:
       util.CheckGcloudResponseKnownFailures(stderr, retcode)
       raise errors.Resource.CreationError(stderr)
 
   @classmethod
-  def _ParseClusterCreateTime(cls, stdout: str) -> Optional[float]:
-    """Parses the cluster create time from a raw API response."""
+  def _ParseClusterCreateTime(
+      cls, stdout: str
+  ) -> Tuple[Optional[float], Optional[float]]:
+    """Parses the cluster create & ready time from a raw API response."""
     try:
       creation_data = json.loads(stdout)
     except json.JSONDecodeError:
@@ -251,25 +272,45 @@ class GcpDpbDataproc(GcpDpbBaseDataproc):
         status_history) == 1 and status_history[0]['state'] == 'CREATING'
     if not can_parse:
       logging.warning('Unable to parse cluster creation duration.')
-      return None
-    creation_start = cls._ParseTime(status_history[0]['stateStartTime'])
-    creation_end = cls._ParseTime(creation_data['status']['stateStartTime'])
-    return (creation_end - creation_start).total_seconds()
+      return None, None
+    creation_start = (
+        cls._ParseTime(status_history[0]['stateStartTime'])
+        .replace(tzinfo=datetime.timezone.utc)
+        .timestamp()
+    )
+    creation_end = (
+        cls._ParseTime(creation_data['status']['stateStartTime'])
+        .replace(tzinfo=datetime.timezone.utc)
+        .timestamp()
+    )
+    return creation_start, creation_end
 
   def _Delete(self):
     """Deletes the cluster."""
     cmd = self.DataprocGcloudCommand('clusters', 'delete', self.cluster_id)
-    cmd.Issue(raise_on_failure=False)
+    stdout, _, _ = cmd.Issue(raise_on_failure=False)
+    try:
+      response = json.loads(stdout)
+    except ValueError:
+      return
+    status = response.get('metadata', {}).get('status', {})
+    if status.get('state') == 'DONE':
+      delete_done_start_time_str = status.get('stateStartTime')
+      self._cluster_delete_time = (
+          self._ParseTime(delete_done_start_time_str)
+          .replace(tzinfo=datetime.timezone.utc)
+          .timestamp()
+      )
 
   def _GetCluster(self) -> Optional[Dict[str, Any]]:
-    """Get the cluster resource in a dict."""
+    """Gets the cluster resource in a dict."""
     cmd = self.DataprocGcloudCommand('clusters', 'describe', self.cluster_id)
     stdout, _, retcode = cmd.Issue(raise_on_failure=False)
     if not retcode:
       return json.loads(stdout)
 
   def _Exists(self):
-    """Check to see whether the cluster exists."""
+    """Checks to see whether the cluster exists."""
     return self._GetCluster() is not None
 
   def SubmitJob(self,
@@ -368,7 +409,7 @@ class GcpDpbDpgke(GcpDpbDataproc):
   cluster with managed infrastructure.
   """
 
-  CLOUD = providers.GCP
+  CLOUD = provider_info.GCP
   SERVICE_TYPE = 'dataproc_gke'
 
   def __init__(self, dpb_service_spec):
@@ -403,28 +444,34 @@ class GcpDpbDpgke(GcpDpbDataproc):
     if self.project is not None:
       cmd.flags['project'] = self.project
     cmd.flags['image-version'] = self.spec.version
-    if FLAGS.dpb_cluster_properties:
-      cmd.flags['properties'] = ','.join(FLAGS.dpb_cluster_properties)
+    if self.GetClusterProperties():
+      cmd.flags['properties'] = ','.join(self.GetClusterProperties())
     timeout = 900  # 15 min
     logging.info('Issuing command to create dpgke cluster. Flags %s, Args %s',
                  cmd.flags, cmd.args)
     stdout, stderr, retcode = cmd.Issue(timeout=timeout, raise_on_failure=False)
-    self._cluster_create_time = self._ParseClusterCreateTime(stdout)
+    self._cluster_create_time, self._cluster_delete_time = (
+        self._ParseClusterCreateTime(stdout)
+    )
     if retcode:
       util.CheckGcloudResponseKnownFailures(stderr, retcode)
       raise errors.Resource.CreationError(stderr)
 
 
-class GcpDpbDataprocServerless(GcpDpbBaseDataproc):
+class GcpDpbDataprocServerless(
+    dpb_service.DpbServiceServerlessMixin, GcpDpbBaseDataproc
+):
   """Resource that allows spawning serverless Dataproc Jobs."""
 
-  CLOUD = providers.GCP
+  CLOUD = provider_info.GCP
   SERVICE_TYPE = 'dataproc_serverless'
 
   def __init__(self, dpb_service_spec):
     super().__init__(dpb_service_spec)
     self._job_counter = 0
     self.batch_name = f'{self.cluster_id}-{self._job_counter}'
+    self.dpb_hdfs_type = 'HDD'
+    self._FillMetadata()
 
   def SubmitJob(self,
                 jarfile=None,
@@ -475,10 +522,10 @@ class GcpDpbDataprocServerless(GcpDpbBaseDataproc):
       cmd.flags['py-files'] = ','.join(job_py_files)
 
     if FLAGS.gce_network_name:
-      cmd.flags['network'] = FLAGS.gce_network_name
+      cmd.flags['network'] = FLAGS.gce_network_name[0]
 
-    if self.dpb_version:
-      cmd.flags['version'] = self.dpb_version
+    if self.GetDpbVersion():
+      cmd.flags['version'] = self.GetDpbVersion()
     if FLAGS.gcp_dataproc_image:
       cmd.flags['container-image'] = FLAGS.gcp_dataproc_image
 
@@ -522,17 +569,6 @@ class GcpDpbDataprocServerless(GcpDpbBaseDataproc):
         run_time=(done_time - start_time).total_seconds(),
         pending_time=(start_time - pending_time).total_seconds())
 
-  def _Create(self):
-    # Since there's no managed infrastructure, this is a no-op.
-    pass
-
-  def _Delete(self):
-    # Since there's no managed infrastructure, this is a no-op.
-    pass
-
-  def GetClusterCreateTime(self) -> Optional[float]:
-    return None
-
   def GetJobProperties(self) -> Dict[str, str]:
     result = {}
     if self.spec.dataproc_serverless_core_count:
@@ -548,18 +584,27 @@ class GcpDpbDataprocServerless(GcpDpbBaseDataproc):
       result['spark.dynamicAllocation.maxExecutors'] = (
           self.spec.dataproc_serverless_max_executors)
     if self.spec.worker_group.disk_spec.disk_size:
-      result['spark.dataproc.driver.disk_size'] = (
+      result['spark.dataproc.driver.disk.size'] = (
           f'{self.spec.worker_group.disk_spec.disk_size}g'
       )
-      result['spark.dataproc.executor.disk_size'] = (
+      result['spark.dataproc.executor.disk.size'] = (
           f'{self.spec.worker_group.disk_spec.disk_size}g'
+      )
+    if self.spec.dataproc_serverless_memory:
+      result['spark.driver.memory'] = f'{self.spec.dataproc_serverless_memory}m'
+      result['spark.executor.memory'] = (
+          f'{self.spec.dataproc_serverless_memory}m')
+    if self.spec.dataproc_serverless_memory_overhead:
+      result['spark.driver.memoryOverhead'] = (
+          f'{self.spec.dataproc_serverless_memory_overhead}m'
+      )
+      result['spark.executor.memoryOverhead'] = (
+          f'{self.spec.dataproc_serverless_memory_overhead}m'
       )
     result.update(super().GetJobProperties())
     return result
 
-  def GetMetadata(self):
-    basic_data = super().GetMetadata()
-
+  def _FillMetadata(self) -> None:
     if self.spec.dataproc_serverless_core_count:
       cluster_shape = (
           f'dataproc-serverless-{self.spec.dataproc_serverless_core_count}')
@@ -574,24 +619,28 @@ class GcpDpbDataprocServerless(GcpDpbBaseDataproc):
     if initial_executors == min_executors == max_executors:
       cluster_size = initial_executors
 
-    return {
-        'dpb_service': basic_data['dpb_service'],
-        'dpb_version': basic_data['dpb_version'],
-        'dpb_service_version': basic_data['dpb_service_version'],
-        'dpb_batch_id': basic_data['dpb_cluster_id'],
+    self.metadata = {
+        'dpb_service': self.metadata['dpb_service'],
+        'dpb_version': self.metadata['dpb_version'],
+        'dpb_service_version': self.metadata['dpb_service_version'],
+        'dpb_batch_id': self.metadata['dpb_cluster_id'],
         'dpb_cluster_shape': cluster_shape,
         'dpb_cluster_size': cluster_size,
         'dpb_cluster_min_executors': min_executors,
         'dpb_cluster_max_executors': max_executors,
         'dpb_cluster_initial_executors': initial_executors,
         'dpb_cores_per_node': self.spec.dataproc_serverless_core_count,
-        'dpb_hdfs_type': 'default-disk',
-        'dpb_disk_size': basic_data['dpb_disk_size'],
-        'dpb_service_zone': basic_data['dpb_service_zone'],
-        'dpb_job_properties': basic_data['dpb_job_properties'],
+        'dpb_memory_per_node':
+            self.spec.dataproc_serverless_memory or 'default',
+        'dpb_memory_overhead_per_node':
+            self.spec.dataproc_serverless_memory_overhead or 'default',
+        'dpb_hdfs_type': self.metadata['dpb_hdfs_type'],
+        'dpb_disk_size': self.metadata['dpb_disk_size'],
+        'dpb_service_zone': self.metadata['dpb_service_zone'],
+        'dpb_job_properties': self.metadata['dpb_job_properties'],
     }
 
-  def CalculateCost(self):
+  def CalculateLastJobCost(self):
     fetch_batch_cmd = self.DataprocGcloudCommand('batches', 'describe',
                                                  self.batch_name)
     @vm_util.Retry(
@@ -642,7 +691,7 @@ class GcpDpbDataprocFlink(GcpDpbDataproc):
   cluster with managed infrastructure.
   """
 
-  CLOUD = providers.GCP
+  CLOUD = provider_info.GCP
   SERVICE_TYPE = 'dataproc_flink'
 
   def _Create(self):
@@ -668,8 +717,10 @@ class GcpDpbDataprocFlink(GcpDpbDataproc):
                 job_type=None,
                 properties=None):
     """See base class."""
-    assert job_type == dpb_service.BaseDpbService.FLINK_JOB_TYPE, (
-        'Unsupported job type {}'.format(job_type))
+    assert job_type in [
+        dpb_service.BaseDpbService.FLINK_JOB_TYPE,
+        dpb_service.BaseDpbService.BEAM_JOB_TYPE,
+    ], 'Unsupported job type {}'.format(job_type)
     logging.info('Running presubmit script...')
     start_time = datetime.datetime.now()
     self.ExecuteOnMaster(data.ResourcePath(DATAPROC_FLINK_PRESUBMIT_SCRIPT),
@@ -679,7 +730,11 @@ class GcpDpbDataprocFlink(GcpDpbDataproc):
     job_script_args = []
     job_script_args.append('-c {}'.format(classname))
     job_script_args.append('--')
-    job_script_args.extend(job_arguments)
+    if job_type == dpb_service.BaseDpbService.BEAM_JOB_TYPE:
+      job_script_args.append('--runner=FlinkRunner')
+      job_script_args.extend(job_arguments)
+    else:
+      job_script_args.extend([arg.replace('=', ' ') for arg in job_arguments])
     self.ExecuteOnMaster(data.ResourcePath(DATAPROC_FLINK_TRIGGER_SCRIPT),
                          job_script_args)
     done_time = datetime.datetime.now()

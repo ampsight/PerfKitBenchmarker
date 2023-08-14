@@ -44,6 +44,7 @@ One data soruce of note is Google BigQuery using
 https://github.com/GoogleCloudPlatform/spark-bigquery-connector.
 """
 
+from collections.abc import MutableMapping
 import json
 import logging
 import os
@@ -55,6 +56,7 @@ from perfkitbenchmarker import configs
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import dpb_sparksql_benchmark_helper
 from perfkitbenchmarker import errors
+from perfkitbenchmarker import object_storage_service
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import temp_dir
 
@@ -139,9 +141,14 @@ def CheckPrerequisites(benchmark_config):
     logging.warning(
         'You did not specify --dpb_sparksql_data, --bigquery_tables, '
         'or dpb_sparksql_database. You will probably not have data to query!')
-  if not FLAGS.dpb_sparksql_order:
+  if bool(FLAGS.dpb_sparksql_order) == bool(FLAGS.dpb_sparksql_streams):
     raise errors.Config.InvalidValue(
-        'You must specify the queries to run with --dpb_sparksql_order')
+        'You must specify the queries to run with either --dpb_sparksql_order '
+        'or --dpb_sparksql_streams (but not both).')
+  if FLAGS.dpb_sparksql_simultaneous and FLAGS.dpb_sparksql_streams:
+    raise errors.Config.InvalidValue(
+        '--dpb_sparksql_simultaneous is not compatible with '
+        '--dpb_sparksql_streams.')
 
 
 def Prepare(benchmark_spec):
@@ -155,7 +162,11 @@ def Prepare(benchmark_spec):
   """
   cluster = benchmark_spec.dpb_service
   storage_service = cluster.storage_service
+
+  start_time = time.time()
   dpb_sparksql_benchmark_helper.Prepare(benchmark_spec)
+  end_time = time.time()
+  benchmark_spec.queries_and_script_upload_time = end_time - start_time
 
   # Copy to HDFS
   if FLAGS.dpb_sparksql_data and FLAGS.dpb_sparksql_copy_to_hdfs:
@@ -189,7 +200,9 @@ def Prepare(benchmark_spec):
           'Copying tables into HDFS failed') from e
 
   # Create external Hive tables
+  benchmark_spec.hive_tables_creation_time = None
   if FLAGS.dpb_sparksql_create_hive_tables:
+    start_time = time.time()
     try:
       result = cluster.SubmitJob(
           pyspark_file='/'.join([
@@ -204,6 +217,8 @@ def Prepare(benchmark_spec):
       raise errors.Benchmarks.PrepareException(
           'Creating tables from {}/* failed'.format(
               benchmark_spec.data_dir)) from e
+    end_time = time.time()
+    benchmark_spec.hive_tables_creation_time = end_time - start_time
 
 
 def Run(benchmark_spec):
@@ -220,8 +235,20 @@ def Run(benchmark_spec):
   """
   cluster = benchmark_spec.dpb_service
   storage_service = cluster.storage_service
-  metadata = benchmark_spec.dpb_service.GetMetadata()
+  metadata = _GetSampleMetadata(benchmark_spec)
 
+  # Run PySpark Spark SQL Runner
+  report_dir, job_result = _RunQueries(benchmark_spec)
+
+  results = _GetQuerySamples(storage_service, report_dir, metadata)
+  results += _GetGlobalSamples(results, cluster, job_result, metadata)
+  results += _GetPrepareSamples(benchmark_spec, metadata)
+  return results
+
+
+def _GetSampleMetadata(benchmark_spec):
+  """Gets metadata dict to be attached to exported benchmark samples/metrics."""
+  metadata = benchmark_spec.dpb_service.GetResourceMetadata()
   metadata['benchmark'] = dpb_sparksql_benchmark_helper.BENCHMARK_NAMES[
       FLAGS.dpb_sparksql_query]
   if FLAGS.bigquery_record_format:
@@ -233,14 +260,31 @@ def Run(benchmark_spec):
   if FLAGS.dpb_sparksql_data_compression:
     metadata['data_compression'] = FLAGS.dpb_sparksql_data_compression
 
-  # Run PySpark Spark SQL Runner
+  if FLAGS.dpb_sparksql_simultaneous:
+    metadata['run_type'] = 'SIMULTANEOUS'
+  elif FLAGS.dpb_sparksql_streams:
+    metadata['run_type'] = 'THROUGHPUT'
+  else:
+    metadata['run_type'] = 'POWER'
+  return metadata
+
+
+def _RunQueries(benchmark_spec) -> tuple[str, dpb_service.JobResult]:
+  """Runs queries. Returns storage path with metrics and JobResult object."""
+  cluster = benchmark_spec.dpb_service
+  storage_service = cluster.storage_service
   report_dir = '/'.join([cluster.base_dir, f'report-{int(time.time()*1000)}'])
-  args = [
-      '--sql-scripts',
-      ','.join(benchmark_spec.staged_queries),
-      '--report-dir',
-      report_dir,
-  ]
+  args = ['--sql-scripts-dir', benchmark_spec.query_dir]
+  if FLAGS.dpb_sparksql_simultaneous:
+    # Assertion true bc of --dpb_sparksql_simultaneous and
+    # --dpb_sparksql_streams being mutually exclusive.
+    assert len(benchmark_spec.query_streams) == 1
+    for query in benchmark_spec.query_streams[0]:
+      args += ['--sql-scripts', query]
+  else:
+    for stream in benchmark_spec.query_streams:
+      args += ['--sql-scripts', ','.join(stream)]
+  args += ['--report-dir', report_dir]
   if FLAGS.dpb_sparksql_database:
     args += ['--database', FLAGS.dpb_sparksql_database]
   table_metadata = _GetTableMetadata(benchmark_spec)
@@ -256,8 +300,8 @@ def Run(benchmark_spec):
     args += ['--enable-hive', 'True']
   if FLAGS.dpb_sparksql_table_cache:
     args += ['--table-cache', FLAGS.dpb_sparksql_table_cache]
-  if FLAGS.dpb_sparksql_simultaneous:
-    args += ['--simultaneous', 'True']
+  if dpb_sparksql_benchmark_helper.DUMP_SPARK_CONF.value:
+    args += ['--dump-spark-conf', os.path.join(cluster.base_dir, 'spark-conf')]
   jars = []
   if FLAGS.spark_bigquery_connector:
     jars.append(FLAGS.spark_bigquery_connector)
@@ -268,7 +312,15 @@ def Run(benchmark_spec):
       job_arguments=args,
       job_jars=jars,
       job_type=dpb_service.BaseDpbService.PYSPARK_JOB_TYPE)
+  return report_dir, job_result
 
+
+def _GetQuerySamples(
+    storage_service: object_storage_service.ObjectStorageService,
+    report_dir: str,
+    base_metadata: MutableMapping[str, str]
+) -> list[sample.Sample]:
+  """Get Sample objects from metrics storage path."""
   # Spark can only write data to directories not files. So do a recursive copy
   # of that directory and then search it for the collection of JSON files with
   # the results.
@@ -285,9 +337,7 @@ def Run(benchmark_spec):
   if not report_files:
     raise errors.Benchmarks.RunError('Job report not found.')
 
-  results = []
-  run_times = {}
-  passing_queries = set()
+  samples = []
   for report_file in report_files:
     with open(report_file, 'r') as file:
       for line in file:
@@ -295,36 +345,86 @@ def Run(benchmark_spec):
         logging.info('Timing: %s', result)
         query_id = dpb_sparksql_benchmark_helper.GetQueryId(result['script'])
         assert query_id
-        passing_queries.add(query_id)
-        metadata_copy = metadata.copy()
+        metadata_copy = base_metadata.copy()
         metadata_copy['query'] = query_id
-        results.append(
+        if FLAGS.dpb_sparksql_streams:
+          metadata_copy['stream'] = result['stream']
+        samples.append(
             sample.Sample('sparksql_run_time', result['duration'], 'seconds',
                           metadata_copy))
-        run_times[query_id] = result['duration']
+  return samples
 
-  metadata['failing_queries'] = ','.join(
-      sorted(set(FLAGS.dpb_sparksql_order) - passing_queries))
 
-  results.append(
+def _GetGlobalSamples(
+    query_samples: list[sample.Sample],
+    cluster: dpb_service.BaseDpbService,
+    job_result: dpb_service.JobResult,
+    metadata: MutableMapping[str, str]) -> list[sample.Sample]:
+  """Gets samples that summarize the whole benchmark run."""
+
+  run_times = {}
+  passing_queries = {}
+  for s in query_samples:
+    query_id = s.metadata['query']
+    passing_queries.setdefault(s.metadata.get('stream', 0), set()).add(query_id)
+    run_times[query_id] = s.value
+
+  samples = []
+  if FLAGS.dpb_sparksql_streams:
+    for i, stream in enumerate(dpb_sparksql_benchmark_helper.GetStreams()):
+      metadata[f'failing_queries_stream_{i}'] = ','.join(
+          sorted(set(stream) - passing_queries.get(i, set())))
+  else:
+    all_passing_queries = set()
+    for stream_passing_queries in passing_queries.values():
+      all_passing_queries.update(stream_passing_queries)
+    metadata['failing_queries'] = ','.join(
+        sorted(set(FLAGS.dpb_sparksql_order) - all_passing_queries))
+
+  cluster.metadata.update(metadata)
+
+  # TODO(user): Compute aggregated time for each query across streams and
+  # iterations.
+  samples.append(
       sample.Sample('sparksql_total_wall_time', job_result.wall_time, 'seconds',
                     metadata))
-  results.append(
+  samples.append(
       sample.Sample('sparksql_geomean_run_time',
                     sample.GeoMean(run_times.values()), 'seconds', metadata))
-  cluster_create_time = cluster.GetClusterCreateTime()
-  if cluster_create_time is not None:
-    results.append(
-        sample.Sample('dpb_cluster_create_time', cluster_create_time, 'seconds',
-                      metadata))
-  results.append(sample.Sample('dpb_sparksql_job_pending',
+  samples.append(sample.Sample('dpb_sparksql_job_pending',
                                job_result.pending_time, 'seconds', metadata))
   if FLAGS.dpb_export_job_stats:
-    run_cost = cluster.CalculateCost()
+    run_cost = cluster.CalculateLastJobCost()
     if run_cost is not None:
-      results.append(
+      samples.append(
           sample.Sample('sparksql_run_cost', run_cost, '$', metadata))
-  return results
+  return samples
+
+
+def _GetPrepareSamples(
+    benchmark_spec, metadata: MutableMapping[str, str]
+) -> list[sample.Sample]:
+  """Gets samples for Prepare stage statistics."""
+  samples = []
+  if benchmark_spec.queries_and_script_upload_time is not None:
+    samples.append(
+        sample.Sample(
+            'queries_and_script_upload_time',
+            benchmark_spec.queries_and_script_upload_time,
+            'seconds',
+            metadata,
+        )
+    )
+  if benchmark_spec.hive_tables_creation_time is not None:
+    samples.append(
+        sample.Sample(
+            'hive_tables_creation_time',
+            benchmark_spec.hive_tables_creation_time,
+            'seconds',
+            metadata,
+        )
+    )
+  return samples
 
 
 def _GetDistCpMetadata(base_dir: str, subdirs: List[str], extra_metadata=None):

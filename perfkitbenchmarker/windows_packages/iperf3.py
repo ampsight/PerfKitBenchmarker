@@ -19,49 +19,66 @@ import multiprocessing
 import ntpath
 from absl import flags
 from perfkitbenchmarker import background_tasks
+from perfkitbenchmarker import flag_util
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import vm_util
 from six.moves import range
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_integer('max_bandwidth_mb', 500,
-                     'The maximum bandwidth, in megabytes, to test in a '
-                     'UDP stream.')
+flags.DEFINE_integer(
+    'max_bandwidth_mb',
+    500,
+    'The maximum bandwidth, in megabytes, to test in a UDP stream.',
+)
 
-flags.DEFINE_integer('min_bandwidth_mb', 100,
-                     'The minimum bandwidth, in megabytes, to test in a '
-                     'UDP stream.')
+flags.DEFINE_integer(
+    'min_bandwidth_mb',
+    100,
+    'The minimum bandwidth, in megabytes, to test in a UDP stream.',
+)
 
-flags.DEFINE_integer('bandwidth_step_mb', 100,
-                     'The amount of megabytes to increase bandwidth in each '
-                     'UDP stream test.')
+flags.DEFINE_integer(
+    'bandwidth_step_mb',
+    100,
+    'The amount of megabytes to increase bandwidth in each UDP stream test.',
+)
 
-flags.DEFINE_integer('udp_stream_seconds', 3,
-                     'The amount of time to run the UDP stream test.')
+flags.DEFINE_integer(
+    'udp_stream_seconds', 3, 'The amount of time to run the UDP stream test.'
+)
 
-flags.DEFINE_integer('udp_client_threads', 1,
-                     'Number of parallel client threads to run.')
+flags.DEFINE_integer(
+    'udp_client_threads', 1, 'Number of parallel client threads to run.'
+)
 
-flags.DEFINE_integer('udp_buffer_len', 100,
-                     'UDP packet size in bytes.')
+flags.DEFINE_integer('udp_buffer_len', 100, 'UDP packet size in bytes.')
 
-flags.DEFINE_integer('tcp_stream_seconds', 3,
-                     'The amount of time to run the TCP stream test.')
+flags.DEFINE_integer(
+    'tcp_stream_seconds', 3, 'The amount of time to run the TCP stream test.'
+)
 
-flags.DEFINE_integer('tcp_number_of_streams', 10,
-                     'The number of parrallel streams to run in the TCP test.')
+flag_util.DEFINE_integerlist(
+    'tcp_number_of_streams',
+    flag_util.IntegerList([16]),
+    'The number of parrallel streams to run in the TCP test.',
+    module_name=__name__,
+)
 
 flags.DEFINE_float(
-    'socket_buffer_size', None,
+    'socket_buffer_size',
+    None,
     'The socket buffer size in megabytes. If None is '
-    'specified then the socket buffer size will not be set.')
+    'specified then the socket buffer size will not be set.',
+)
 
-flags.DEFINE_bool('run_tcp', True,
-                  'setting to false will disable the run of the TCP test')
+flags.DEFINE_bool(
+    'run_tcp', True, 'setting to false will disable the run of the TCP test'
+)
 
-flags.DEFINE_bool('run_udp', False,
-                  'setting to true will enable the run of the UDP test')
+flags.DEFINE_bool(
+    'run_udp', False, 'setting to true will enable the run of the UDP test'
+)
 
 IPERF3_DIR = 'iperf-3.1.3-win64'
 IPERF3_ZIP = IPERF3_DIR + '.zip'
@@ -79,47 +96,56 @@ def Install(vm):
   vm.UnzipFile(zip_path, vm.temp_dir)
 
 
-def RunIperf3TCPMultiStream(sending_vm, receiving_vm, use_internal_ip=True):
+def RunIperf3TCPMultiStream(
+    sending_vm, receiving_vm, num_streams, use_internal_ip=True
+):
   """Run a multi-stream TCP bandwidth between two VMs.
 
   Args:
     sending_vm: The client VM that will send the TCP packets.
     receiving_vm: The server VM that will receive the UDP packets.
-    use_internal_ip: if true, the private network will be used for the test.
-                     if false, the external network will be used for the test.
+    num_streams: Number of TCP streams.
+    use_internal_ip: if true, the private network will be used for the test. if
+      false, the external network will be used for the test.
 
   Returns:
     List of sample objects each representing a single metric on a single run.
   """
 
   receiver_ip = (
-      receiving_vm.internal_ip if use_internal_ip else receiving_vm.ip_address)
+      receiving_vm.internal_ip if use_internal_ip else receiving_vm.ip_address
+  )
 
   socket_buffer_string = ''
   if FLAGS.socket_buffer_size:
     socket_buffer_string = ' -w {socket_buffer}M '.format(
-        socket_buffer=FLAGS.socket_buffer_size)
+        socket_buffer=FLAGS.socket_buffer_size
+    )
 
-  sender_args = ('--client {ip} --port {port} -t {time} -P {num_streams} -f m '
-                 ' {socket_buffer_arg} > {out_file}').format(
-                     ip=receiver_ip,
-                     port=IPERF3_TCP_PORT,
-                     time=FLAGS.tcp_stream_seconds,
-                     num_streams=FLAGS.tcp_number_of_streams,
-                     socket_buffer_arg=socket_buffer_string,
-                     out_file=IPERF3_OUT_FILE)
+  sender_args = (
+      '--client {ip} --port {port} -t {time} -P {num_streams} -f m '
+      ' {socket_buffer_arg} > {out_file}'
+  ).format(
+      ip=receiver_ip,
+      port=IPERF3_TCP_PORT,
+      time=FLAGS.tcp_stream_seconds,
+      num_streams=num_streams,
+      socket_buffer_arg=socket_buffer_string,
+      out_file=IPERF3_OUT_FILE,
+  )
 
   output = _RunIperf3ServerClientPair(sending_vm, sender_args, receiving_vm)
 
-  return ParseTCPMultiStreamOutput(output, sending_vm, receiving_vm,
-                                   FLAGS.tcp_number_of_streams, use_internal_ip)
+  return ParseTCPMultiStreamOutput(
+      output, sending_vm, receiving_vm, num_streams, use_internal_ip
+  )
 
 
 def _RunIperf3(vm, options):
   iperf3_exec_dir = ntpath.join(vm.temp_dir, IPERF3_DIR)
-  command = ('cd {iperf3_exec_dir}; '
-             '.\\iperf3.exe {options}').format(
-                 iperf3_exec_dir=iperf3_exec_dir, options=options)
+  command = ('cd {iperf3_exec_dir}; .\\iperf3.exe {options}').format(
+      iperf3_exec_dir=iperf3_exec_dir, options=options
+  )
   vm.RemoteCommand(command, timeout=FLAGS.tcp_stream_seconds + 30)
 
 
@@ -143,24 +169,23 @@ def _RunIperf3ServerClientPair(sending_vm, sender_args, receiving_vm):
   receiver_args = '--server -1'
 
   server_process = multiprocessing.Process(
-      name='server',
-      target=_RunIperf3,
-      args=(receiving_vm, receiver_args))
+      name='server', target=_RunIperf3, args=(receiving_vm, receiver_args)
+  )
   server_process.start()
 
   receiving_vm.WaitForProcessRunning('iperf3', 3)
 
   client_process = multiprocessing.Process(
-      name='client',
-      target=_RunIperf3,
-      args=(sending_vm, sender_args))
+      name='client', target=_RunIperf3, args=(sending_vm, sender_args)
+  )
   client_process.start()
 
   server_process.join()
   client_process.join()
 
   cat_command = 'cd {iperf3_exec_dir}; cat {out_file}'.format(
-      iperf3_exec_dir=iperf3_exec_dir, out_file=IPERF3_OUT_FILE)
+      iperf3_exec_dir=iperf3_exec_dir, out_file=IPERF3_OUT_FILE
+  )
   command_out, _ = sending_vm.RemoteCommand(cat_command)
 
   return command_out
@@ -172,8 +197,8 @@ def RunIperf3UDPStream(sending_vm, receiving_vm, use_internal_ip=True):
   Args:
     sending_vm: The client VM that will send the UDP packets.
     receiving_vm: The server VM that will receive the UDP packets.
-    use_internal_ip: if true, the private network will be used for the test.
-                     if false, the external network will be used for the test.
+    use_internal_ip: if true, the private network will be used for the test. if
+      false, the external network will be used for the test.
 
   Returns:
     List of sample objects each representing a single metric on a single run.
@@ -182,45 +207,53 @@ def RunIperf3UDPStream(sending_vm, receiving_vm, use_internal_ip=True):
 
   def _RunIperf3UDP(vm, options):
     command = 'cd {iperf3_exec_dir}; .\\iperf3.exe {options}'.format(
-        iperf3_exec_dir=iperf3_exec_dir,
-        options=options)
+        iperf3_exec_dir=iperf3_exec_dir, options=options
+    )
     vm.RemoteCommand(command)
 
-  receiver_ip = (receiving_vm.internal_ip if use_internal_ip
-                 else receiving_vm.ip_address)
+  receiver_ip = (
+      receiving_vm.internal_ip if use_internal_ip else receiving_vm.ip_address
+  )
 
   samples = []
 
-  for bandwidth in range(FLAGS.min_bandwidth_mb,
-                         FLAGS.max_bandwidth_mb,
-                         FLAGS.bandwidth_step_mb):
-    sender_args = ('--client {server_ip} --udp -t {duration} -P {num_threads} '
-                   '-b {bandwidth}M -l {buffer_len} > {out_file}'.format(
-                       server_ip=receiver_ip,
-                       duration=FLAGS.udp_stream_seconds,
-                       num_threads=FLAGS.udp_client_threads,
-                       bandwidth=bandwidth,
-                       buffer_len=FLAGS.udp_buffer_len,
-                       out_file=IPERF3_OUT_FILE))
+  for bandwidth in range(
+      FLAGS.min_bandwidth_mb, FLAGS.max_bandwidth_mb, FLAGS.bandwidth_step_mb
+  ):
+    sender_args = (
+        '--client {server_ip} --udp -t {duration} -P {num_threads} '
+        '-b {bandwidth}M -l {buffer_len} > {out_file}'.format(
+            server_ip=receiver_ip,
+            duration=FLAGS.udp_stream_seconds,
+            num_threads=FLAGS.udp_client_threads,
+            bandwidth=bandwidth,
+            buffer_len=FLAGS.udp_buffer_len,
+            out_file=IPERF3_OUT_FILE,
+        )
+    )
 
     # the "-1" flag will cause the server to exit after performing a single
     # test. This is necessary because the RemoteCommand call will not return
     # until the command completes, even if it is run as a daemon.
     receiver_args = '--server -1'
 
-    process_args = [(_RunIperf3UDP, (receiving_vm, receiver_args), {}),
-                    (_RunIperf3UDP, (sending_vm, sender_args), {})]
+    process_args = [
+        (_RunIperf3UDP, (receiving_vm, receiver_args), {}),
+        (_RunIperf3UDP, (sending_vm, sender_args), {}),
+    ]
 
     background_tasks.RunParallelProcesses(process_args, 200, 1)
 
     # retrieve the results and parse them
     cat_command = 'cd {iperf3_exec_dir}; cat {out_file}'.format(
-        iperf3_exec_dir=iperf3_exec_dir,
-        out_file=IPERF3_OUT_FILE)
+        iperf3_exec_dir=iperf3_exec_dir, out_file=IPERF3_OUT_FILE
+    )
     command_out, _ = sending_vm.RemoteCommand(cat_command)
     samples.extend(
-        GetUDPStreamSamples(sending_vm, receiving_vm, command_out, bandwidth,
-                            use_internal_ip))
+        GetUDPStreamSamples(
+            sending_vm, receiving_vm, command_out, bandwidth, use_internal_ip
+        )
+    )
 
   return samples
 
@@ -270,8 +303,9 @@ def RunIperf3UDPStream(sending_vm, receiving_vm, use_internal_ip=True):
 # iperf Done.
 
 
-def ParseTCPMultiStreamOutput(results, sending_vm, receiving_vm, num_streams,
-                              internal_ip_used):
+def ParseTCPMultiStreamOutput(
+    results, sending_vm, receiving_vm, num_streams, internal_ip_used
+):
   """Turns the 'results' into a list of samples.
 
   Args:
@@ -280,7 +314,7 @@ def ParseTCPMultiStreamOutput(results, sending_vm, receiving_vm, num_streams,
     receiving_vm: vm where the server is run.
     num_streams: number of TCP streams.
     internal_ip_used: for the metadata, lets the user know if it was the
-                      internal or external IP used in the test.
+      internal or external IP used in the test.
 
   Returns:
     List of samples representing the results.
@@ -309,7 +343,8 @@ def ParseTCPMultiStreamOutput(results, sending_vm, receiving_vm, num_streams,
     bandwidth = line_data[5]
     units = line_data[6]
     samples.append(
-        sample.Sample('Bandwidth', float(bandwidth), units, metadata))
+        sample.Sample('Bandwidth', float(bandwidth), units, metadata)
+    )
 
   return samples
 
@@ -329,15 +364,18 @@ def ParseTCPMultiStreamOutput(results, sending_vm, receiving_vm, num_streams,
 # iperf Done.
 
 
-def GetUDPStreamSamples(sending_vm, receiving_vm, results, bandwidth,
-                        internal_ip_used):
+def GetUDPStreamSamples(
+    sending_vm, receiving_vm, results, bandwidth, internal_ip_used
+):
   """Parses Iperf3 results and outputs samples for PKB.
 
   Args:
+    sending_vm: vm where the client is run.
+    receiving_vm: vm where the server is run.
     results: string containing iperf3 output.
     bandwidth: the bandwidth used in the test
     internal_ip_used: for the metadata, lets the user know if it was the
-                      internal or external IP used in the test.
+      internal or external IP used in the test.
 
   Returns:
     List of samples.
@@ -367,17 +405,16 @@ def GetUDPStreamSamples(sending_vm, receiving_vm, results, bandwidth,
       'receiving_zone': receiving_vm.zone,
       'sending_machine_type': sending_vm.machine_type,
       'sending_zone': sending_vm.zone,
-      'internal_ip_used': internal_ip_used
+      'internal_ip_used': internal_ip_used,
   }
 
   # Get the percentage of packets lost.
   loss_rate = round(lost * 100.0 / total, 3)
   samples = [
-      sample.Sample('Loss Rate', loss_rate, 'Percent',
-                    metadata),
-      sample.Sample('Bandwidth Achieved', bandwidth_achieved, 'Mbits/sec',
-                    metadata),
-      sample.Sample('Jitter', jitter, 'ms',
-                    metadata),
+      sample.Sample('Loss Rate', loss_rate, 'Percent', metadata),
+      sample.Sample(
+          'Bandwidth Achieved', bandwidth_achieved, 'Mbits/sec', metadata
+      ),
+      sample.Sample('Jitter', jitter, 'ms', metadata),
   ]
   return samples

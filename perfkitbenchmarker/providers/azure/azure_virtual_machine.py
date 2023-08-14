@@ -30,6 +30,7 @@ import collections
 import itertools
 import json
 import logging
+import ntpath
 import posixpath
 import re
 import threading
@@ -41,7 +42,7 @@ from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import linux_virtual_machine
 from perfkitbenchmarker import placement_group
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
@@ -112,6 +113,11 @@ AZURE_ARM_TYPES = [
     r'(Standard_E[0-9]+pd?s_v5)',
 ]
 
+CONFIDENTIAL_MILAN_TYPES = [
+    r'(Standard_DC[0-9]+as?d?s_v5)',
+    r'(Standard_EC[0-9]+as?d?s_v5)'
+]
+
 FIVE_MINUTE_TIMEOUT = 300
 
 
@@ -127,7 +133,7 @@ class AzureVmSpec(virtual_machine.BaseVmSpec):
     low_priority: boolean. True if the VM should be low-priority, else False.
   """
 
-  CLOUD = providers.AZURE
+  CLOUD = provider_info.AZURE
 
   def __init__(self, *args, **kwargs):
     super(AzureVmSpec, self).__init__(*args, **kwargs)
@@ -323,7 +329,13 @@ class AzureNIC(resource.BaseResource):
     ] + self.resource_group.args)
 
     response = json.loads(stdout)
-    return response['ipConfigurations'][0]['privateIpAddress']
+    ip_config = response['ipConfigurations'][0]
+    # Azure CLI used privateIpAddress between versions 1.2.0 and 2.45.0
+    # https://learn.microsoft.com/en-us/cli/azure/release-notes-azure-cli?toc=%2Fcli%2Fazure%2Ftoc.json&bc=%2Fcli%2Fazure%2Fbreadcrumb%2Ftoc.json#network
+    for key in ('privateIPAddress', 'privateIpAddress'):
+      if key in ip_config:
+        return ip_config[key]
+    raise KeyError('No known private IP address key found.')
 
   def _Delete(self):
     self._deleted = True
@@ -517,7 +529,7 @@ def _MachineTypeIsArm(machine_type):
 
 class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
   """Object representing an Azure Virtual Machine."""
-  CLOUD = providers.AZURE
+  CLOUD = provider_info.AZURE
 
   _lock = threading.Lock()
   # TODO(user): remove host groups & hosts as globals -> create new spec
@@ -542,7 +554,10 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.num_vms_per_host = vm_spec.num_vms_per_host
     self.network = azure_network.AzureNetwork.GetNetwork(self)
     self.firewall = azure_network.AzureFirewall.GetFirewall()
-    self.max_local_disks = NUM_LOCAL_VOLUMES.get(self.machine_type) or 1
+    if azure_disk.HasTempDrive(self.machine_type):
+      self.max_local_disks = NUM_LOCAL_VOLUMES.get(self.machine_type, 1)
+    else:
+      self.max_local_disks = 0
     self._lun_counter = itertools.count()
     self._deleted = False
     self.resource_group = azure_network.GetResourceGroup()
@@ -550,15 +565,24 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     # Configure NIC
     if self.assign_external_ip:
       public_ip_name = self.name + '-public-ip'
-      self.public_ip = AzurePublicIPAddress(self.region, self.availability_zone,
-                                            public_ip_name)
+      self.public_ip = AzurePublicIPAddress(
+          self.region, self.availability_zone, public_ip_name
+      )
     else:
       public_ip_name = None
       self.public_ip = None
-    self.nic = AzureNIC(self.network, self.name + '-nic',
-                        public_ip_name, vm_spec.accelerated_networking)
+    self.nic = AzureNIC(
+        self.network,
+        self.name + '-nic',
+        public_ip_name,
+        vm_spec.accelerated_networking,
+    )
 
     self.storage_account = self.network.storage_account
+    self.machine_type_is_confidential = any(
+        re.search(machine_series, self.machine_type)
+        for machine_series in CONFIDENTIAL_MILAN_TYPES
+    )
     arm_arch = 'neoverse-n1' if _MachineTypeIsArm(self.machine_type) else None
     if arm_arch:
       self.host_arch = arm_arch
@@ -575,6 +599,8 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
         self.image = type(self).ARM_IMAGE_URN
       else:
         raise errors.Benchmarks.UnsupportedConfigError('No Azure ARM image.')
+    elif self.machine_type_is_confidential:
+      self.image = type(self).CONFIDENTIAL_IMAGE_URN
     else:
       self.image = type(self).IMAGE_URN
 
@@ -632,10 +658,18 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
 
   def _Create(self):
     """See base class."""
+    disk_size_args = []
     if self.os_disk.disk_size:
       disk_size_args = ['--os-disk-size-gb', str(self.os_disk.disk_size)]
-    else:
-      disk_size_args = []
+
+    confidential_args = []
+    if self.machine_type_is_confidential:
+      confidential_args = [
+          '--enable-vtpm', 'true',
+          '--enable-secure-boot', 'true',
+          '--security-type', 'ConfidentialVM',
+          '--os-disk-security-encryption-type', 'VMGuestStateOnly',
+      ]
 
     tags = {}
     tags.update(self.vm_metadata)
@@ -644,19 +678,30 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
 
     create_cmd = (
         [
-            azure.AZURE_PATH, 'vm', 'create',
-            '--location', self.region,
-            '--image', self.image,
-            '--size', self.machine_type,
-            '--admin-username', self.user_name,
-            '--storage-sku', self.os_disk.disk_type,
-            '--name', self.name
+            azure.AZURE_PATH,
+            'vm',
+            'create',
+            '--location',
+            self.region,
+            '--image',
+            self.image,
+            '--size',
+            self.machine_type,
+            '--admin-username',
+            self.user_name,
+            '--storage-sku',
+            f'os={self.os_disk.disk_type}',
+            '--name',
+            self.name,
         ]  # pyformat: disable
         + disk_size_args
+        + confidential_args
         + self.resource_group.args
         + self.nic.args
         + tag_args
     )
+    if self.boot_startup_script:
+      create_cmd.extend(['--custom-data', self.boot_startup_script])
 
     if self._RequiresUltraDisk():
       self.ultra_ssd_enabled = True
@@ -831,9 +876,9 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
         if self.local_disk_counter > self.max_local_disks:
           raise errors.Error('Not enough local disks.')
       else:
-        # Remote disk numbers start at max_local disks, Azure does not separate
-        # local disk and system disk.
-        disk_number = self.remote_disk_counter + self.max_local_disks
+        # Remote disk numbers start at 1 + max_local disks (0 is the system disk
+        # and local disks occupy [1, max_local_disks]).
+        disk_number = self.remote_disk_counter + 1 + self.max_local_disks
         self.remote_disk_counter += 1
       lun = next(self._lun_counter)
       data_disk = azure_disk.AzureDisk(disk_spec, self, lun)
@@ -971,6 +1016,7 @@ class Ubuntu2004BasedAzureVirtualMachine(AzureVirtualMachine,
                                          linux_virtual_machine.Ubuntu2004Mixin):
   GEN2_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-focal:20_04-lts-gen2:latest'
   IMAGE_URN = 'Canonical:0001-com-ubuntu-server-focal:20_04-lts:latest'
+  CONFIDENTIAL_IMAGE_URN = 'Canonical:0001-com-ubuntu-confidential-vm-focal:20_04-lts-cvm:latest'
   ARM_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-focal:20_04-lts-arm64:latest'
 
 
@@ -978,6 +1024,7 @@ class Ubuntu2204BasedAzureVirtualMachine(AzureVirtualMachine,
                                          linux_virtual_machine.Ubuntu2204Mixin):
   GEN2_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest'
   IMAGE_URN = 'Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest'
+  CONFIDENTIAL_IMAGE_URN = 'Canonical:0001-com-ubuntu-confidential-vm-jammy:22_04-lts-cvm:latest'
   ARM_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-jammy:22_04-lts-arm64:latest'
 
 
@@ -1065,6 +1112,47 @@ class BaseWindowsAzureVirtualMachine(AzureVirtualMachine,
         event.get('EventType') == 'Preempt' for event in events)
     if self.spot_early_termination:
       logging.info('Spotted early termination on %s', self)
+
+  def DownloadPreprovisionedData(
+      self, install_path, module_name, filename,
+      timeout=FIVE_MINUTE_TIMEOUT
+  ):
+    """Downloads a data file from Azure blob storage with pre-provisioned data.
+
+    Use --azure_preprovisioned_data_bucket to specify the name of the account.
+
+    Note: Azure blob storage does not allow underscores in the container name,
+    so this method replaces any underscores in module_name with dashes.
+    Make sure that the same convention is used when uploading the data
+    to Azure blob storage. For example: when uploading data for
+    'module_name' to Azure, create a container named 'benchmark-name'.
+
+    Args:
+      install_path: The install path on this VM.
+      module_name: Name of the module associated with this data file.
+      filename: The name of the file that was downloaded.
+      timeout: Timeout value for downloading preprovisionedData, Five minutes
+      by default.
+    """
+    # TODO(deitz): Add retry logic.
+    temp_local_path = vm_util.GetTempDir()
+    vm_util.IssueCommand(
+        GenerateDownloadPreprovisionedDataCommand(
+            temp_local_path, module_name, filename
+        ).split('&')[-1].split(),
+        timeout=timeout,
+    )
+    self.PushFile(
+        vm_util.PrependTempDir(filename),
+        ntpath.join(install_path, filename)
+    )
+    vm_util.IssueCommand(['rm', vm_util.PrependTempDir(filename)])
+
+  def ShouldDownloadPreprovisionedData(self, module_name, filename):
+    """Returns whether or not preprovisioned data is available."""
+    return FLAGS.azure_preprovisioned_data_bucket and vm_util.IssueCommand(
+        GenerateStatPreprovisionedDataCommand(
+            module_name, filename).split(' '), raise_on_failure=False)[-1] == 0
 
 
 # Azure seems to have dropped support for 2012 Server Core. It is neither here:

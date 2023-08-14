@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Relational DB class.
+
+This is the base implementation of all relational db.
+"""
 
 import abc
 import re
-
 from absl import flags
+from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import sql_engine_utils
@@ -124,7 +128,7 @@ SERVER_GCE_SSD_INTERFACE = flags.DEFINE_enum(
     'The ssd interface for GCE local SSD.')
 
 
-BACKUP_TIME_REGULAR_EXPRESSION = '^\d\d\:\d\d$'
+BACKUP_TIME_REGULAR_EXPRESSION = r'^\d\d\:\d\d$'
 flags.register_validator(
     'db_backup_start_time',
     lambda value: re.search(BACKUP_TIME_REGULAR_EXPRESSION, value) is not None,
@@ -210,7 +214,9 @@ class BaseRelationalDb(resource.BaseResource):
     self.instance_id = 'pkb-db-instance-' + FLAGS.run_uri
     self.port = self.GetDefaultPort()
     self.is_managed_db = self.IS_MANAGED
+    self.endpoint = ''
     self.replica_endpoint = ''
+    self.client_vms = []
 
   @property
   def client_vm(self):
@@ -230,47 +236,60 @@ class BaseRelationalDb(resource.BaseResource):
       raise RelationalDbPropertyNotSetError('client_vm is not set')
     return self._client_vm
 
+  # TODO(user): add support for multiple client VMs
   @client_vm.setter
   def client_vm(self, client_vm):
     self._client_vm = client_vm
 
+  def _GetDbConnectionProperties(
+      self,
+  ) -> sql_engine_utils.DbConnectionProperties:
+    return sql_engine_utils.DbConnectionProperties(
+        self.spec.engine,
+        self.spec.engine_version,
+        self.endpoint,
+        self.port,
+        self.spec.database_username,
+        self.spec.database_password,
+    )
+
+  # TODO(user): Deprecate in favor of client_vms_query_tools
   @property
   def client_vm_query_tools(self):
-    if not hasattr(self, '_client_vm_query_tools'):
-      connection_properties = sql_engine_utils.DbConnectionProperties(
-          self.spec.engine, self.spec.engine_version, self.endpoint, self.port,
-          self.spec.database_username, self.spec.database_password)
-      self._client_vm_query_tools = sql_engine_utils.GetQueryToolsByEngine(
-          self.client_vm, connection_properties)
-    return self._client_vm_query_tools
+    return self.client_vms_query_tools[0]
+
+  @property
+  def client_vms_query_tools(self) -> list[sql_engine_utils.ISQLQueryTools]:
+    connection_properties = self._GetDbConnectionProperties()
+    tools = [
+        sql_engine_utils.GetQueryToolsByEngine(vm, connection_properties)
+        for vm in self.client_vms
+    ]
+    return [t for t in tools if t is not None]
 
   @property
   def client_vm_query_tools_for_replica(self):
     """Query tools to make custom queries on replica."""
-    if not hasattr(self, '_client_vm_query_tools_for_replica'):
-      if not self.replica_endpoint:
-        raise ValueError('Database does not have replica.')
-      connection_properties = sql_engine_utils.DbConnectionProperties(
-          self.spec.engine, self.spec.engine_version, self.replica_endpoint,
-          self.port, self.spec.database_username, self.spec.database_password)
-      self._client_vm_query_tools_for_replica = sql_engine_utils.GetQueryToolsByEngine(
-          self.client_vm, connection_properties)
-    return self._client_vm_query_tools_for_replica
+    if not self.replica_endpoint:
+      raise ValueError('Database does not have replica.')
+    connection_properties = sql_engine_utils.DbConnectionProperties(
+        self.spec.engine,
+        self.spec.engine_version,
+        self.replica_endpoint,
+        self.port,
+        self.spec.database_username,
+        self.spec.database_password,
+    )
+    return sql_engine_utils.GetQueryToolsByEngine(
+        self.client_vm, connection_properties
+    )
 
   def SetVms(self, vm_groups):
-    self.client_vm = vm_groups['clients' if 'clients' in
-                               vm_groups else 'default'][0]
-
-  @property
-  def endpoint(self):
-    """Endpoint of the database server (exclusing port)."""
-    if not hasattr(self, '_endpoint'):
-      raise RelationalDbPropertyNotSetError('endpoint not set')
-    return self._endpoint
-
-  @endpoint.setter
-  def endpoint(self, endpoint):
-    self._endpoint = endpoint
+    self.client_vms = vm_groups[
+        'clients' if 'clients' in vm_groups else 'default'
+    ]
+    # TODO(user): Remove this after moving to multiple client VMs.
+    self.client_vm = self.client_vms[0]
 
   @property
   def port(self):
@@ -322,8 +341,9 @@ class BaseRelationalDb(resource.BaseResource):
       metadata.update({
           'memory': self.spec.db_spec.memory,
       })
-    elif hasattr(self.spec.db_spec, 'tier') and (hasattr(
-        self.spec.db_spec, 'compute_units')):
+    elif hasattr(self.spec.db_spec, 'tier') and (
+        hasattr(self.spec.db_spec, 'compute_units')
+    ):
       metadata.update({
           'tier': self.spec.db_spec.tier,
       })
@@ -357,6 +377,11 @@ class BaseRelationalDb(resource.BaseResource):
           'db_flags': FLAGS.db_flags,
       })
 
+    if hasattr(self.spec, 'db_tier'):
+      metadata.update({
+          'db_tier': self.spec.db_tier,
+      })
+
     return metadata
 
   @abc.abstractmethod
@@ -369,9 +394,26 @@ class BaseRelationalDb(resource.BaseResource):
     Returns: default version as a string for the given engine.
     """
 
+  def _SetEndpoint(self):
+    """Set the DB endpoint for this instance during _PostCreate."""
+    pass
+
   def _PostCreate(self):
     if self.spec.db_flags:
       self._ApplyDbFlags()
+    self._SetEndpoint()
+    background_tasks.RunThreaded(
+        lambda client_query_tools: client_query_tools.InstallPackages(),
+        self.client_vms_query_tools,
+    )
+
+  def UpdateCapacityForLoad(self) -> None:
+    """Updates infrastructure to the correct capacity for loading."""
+    pass
+
+  def UpdateCapacityForRun(self) -> None:
+    """Updates infrastructure to the correct capacity for running."""
+    pass
 
   def _ApplyDbFlags(self):
     """Apply Flags on the database."""
@@ -386,11 +428,20 @@ class BaseRelationalDb(resource.BaseResource):
                                 'engine {0}'.format(engine))
     return DEFAULT_PORTS[engine]
 
+  def CreateDatabase(self, database_name: str) -> tuple[str, str]:
+    """Creates the database."""
+    return self.client_vms_query_tools[0].CreateDatabase(database_name)
+
+  def DeleteDatabase(self, database_name: str) -> tuple[str, str]:
+    """Deletes the database."""
+    return self.client_vms_query_tools[0].DeleteDatabase(database_name)
+
   def Failover(self):
     """Fail over the database.  Throws exception if not high available."""
     if not self.spec.high_availability:
-      raise Exception('Attempt to fail over a database that isn\'t marked '
-                      'as high available')
+      raise RuntimeError(
+          "Attempt to fail over a database that isn't marked as high available"
+      )
     self._FailoverHA()
 
   def _FailoverHA(self):

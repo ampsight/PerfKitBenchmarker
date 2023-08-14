@@ -19,13 +19,13 @@ Clusters can be created and deleted.
 import collections
 import json
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from absl import flags
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.aws import aws_disk
 from perfkitbenchmarker.providers.aws import aws_dpb_emr_serverless_prices
@@ -60,10 +60,10 @@ DATAPROC_TO_EMR_CONF_FILES = {
 }
 
 
-def _GetClusterConfiguration():
+def _GetClusterConfiguration(cluster_properties: list[str]) -> str:
   """Return a JSON string containing dpb_cluster_properties."""
   properties = collections.defaultdict(lambda: {})
-  for entry in FLAGS.dpb_cluster_properties:
+  for entry in cluster_properties:
     file, kv = entry.split(':')
     key, value = kv.split('=')
     if file not in DATAPROC_TO_EMR_CONF_FILES:
@@ -99,12 +99,12 @@ class AwsDpbEmr(dpb_service.BaseDpbService):
     dpb_version: EMR version to use.
   """
 
-  CLOUD = providers.AWS
+  CLOUD = provider_info.AWS
   SERVICE_TYPE = 'emr'
+  SUPPORTS_NO_DYNALLOC = True
 
   def __init__(self, dpb_service_spec):
     super(AwsDpbEmr, self).__init__(dpb_service_spec)
-    self.dpb_service_type = AwsDpbEmr.SERVICE_TYPE
     self.project = None
     self.cmd_prefix = list(util.AWS_PREFIX)
     if self.dpb_service_zone:
@@ -119,11 +119,15 @@ class AwsDpbEmr(dpb_service.BaseDpbService):
     self.storage_service.PrepareService(self.region)
     self.persistent_fs_prefix = 's3://'
     self.bucket_to_delete = None
-    self.dpb_version = FLAGS.dpb_emr_release_label or self.dpb_version
-    self._cluster_create_time = None
-    if not self.dpb_version:
+    self._cluster_create_time: Optional[float] = None
+    self._cluster_ready_time: Optional[float] = None
+    self._cluster_delete_time: Optional[float] = None
+    if not self.GetDpbVersion():
       raise errors.Setup.InvalidSetupError(
           'dpb_service.version must be provided.')
+
+  def GetDpbVersion(self) -> Optional[str]:
+    return FLAGS.dpb_emr_release_label or super().GetDpbVersion()
 
   def GetClusterCreateTime(self) -> Optional[float]:
     """Returns the cluster creation time.
@@ -135,7 +139,15 @@ class AwsDpbEmr(dpb_service.BaseDpbService):
     Returns:
       A float representing the creation time in seconds or None.
     """
-    return self._cluster_create_time
+    return self._cluster_ready_time - self._cluster_create_time
+
+  def GetClusterDuration(self) -> Optional[float]:
+    if (
+        self._cluster_create_time is not None
+        and self._cluster_delete_time is not None
+    ):
+      return self._cluster_delete_time - self._cluster_create_time
+    return None
 
   @staticmethod
   def CheckPrerequisites(benchmark_config):
@@ -192,7 +204,7 @@ class AwsDpbEmr(dpb_service.BaseDpbService):
 
     # Spark SQL needs to access Hive
     cmd = self.cmd_prefix + ['emr', 'create-cluster', '--name', name,
-                             '--release-label', self.dpb_version,
+                             '--release-label', self.GetDpbVersion(),
                              '--use-default-roles',
                              '--instance-groups',
                              json.dumps(instance_groups),
@@ -210,8 +222,11 @@ class AwsDpbEmr(dpb_service.BaseDpbService):
     ]
     cmd += ['--ec2-attributes', ','.join(ec2_attributes)]
 
-    if FLAGS.dpb_cluster_properties:
-      cmd += ['--configurations', _GetClusterConfiguration()]
+    if self.GetClusterProperties():
+      cmd += [
+          '--configurations',
+          _GetClusterConfiguration(self.GetClusterProperties()),
+      ]
 
     stdout, _, _ = vm_util.IssueCommand(cmd)
     result = json.loads(stdout)
@@ -257,6 +272,14 @@ class AwsDpbEmr(dpb_service.BaseDpbService):
     if retcode != 0:
       return False
     result = json.loads(stdout)
+    end_datetime = (
+        result.get('Cluster', {})
+        .get('Status', {})
+        .get('Timeline', {})
+        .get('EndDateTime')
+    )
+    if end_datetime is not None:
+      self._cluster_delete_time = end_datetime
     if result['Cluster']['Status']['State'] in INVALID_STATES:
       return False
     else:
@@ -273,20 +296,22 @@ class AwsDpbEmr(dpb_service.BaseDpbService):
     # TODO(saksena): Handle error outcomees when spinning up emr clusters
     is_ready = result['Cluster']['Status']['State'] == READY_STATE
     if is_ready:
-      self._cluster_create_time = self._ParseClusterCreateTime(result)
+      self._cluster_create_time, self._cluster_ready_time = (
+          self._ParseClusterCreateTime(result)
+      )
     return is_ready
 
   @classmethod
-  def _ParseClusterCreateTime(cls, data) -> Optional[float]:
-    """Parses the cluster create time from an API response dict."""
-    creation_ts = None
-    ready_ts = None
+  def _ParseClusterCreateTime(
+      cls, data: dict[str, Any]
+  ) -> tuple[Optional[float], Optional[float]]:
+    """Parses the cluster create & ready time from an API response dict."""
     try:
       creation_ts = data['Cluster']['Status']['Timeline']['CreationDateTime']
       ready_ts = data['Cluster']['Status']['Timeline']['ReadyDateTime']
-      return ready_ts - creation_ts
+      return creation_ts, ready_ts
     except (LookupError, TypeError):
-      return None
+      return None, None
 
   def _GetCompletedJob(self, job_id):
     """See base class."""
@@ -408,7 +433,7 @@ class AwsDpbEmr(dpb_service.BaseDpbService):
     step_id = result['StepIds'][0]
     return self._WaitForJob(step_id, EMR_TIMEOUT, job_poll_interval)
 
-  def DistributedCopy(self, source, destination):
+  def DistributedCopy(self, source, destination, properties=None):
     """Method to copy data using a distributed job on the cluster."""
     job_arguments = ['s3-dist-cp']
     job_arguments.append('--src={}'.format(source))
@@ -419,7 +444,9 @@ class AwsDpbEmr(dpb_service.BaseDpbService):
         job_type=dpb_service.BaseDpbService.HADOOP_JOB_TYPE)
 
 
-class AwsDpbEmrServerless(dpb_service.BaseDpbService):
+class AwsDpbEmrServerless(
+    dpb_service.DpbServiceServerlessMixin, dpb_service.BaseDpbService
+):
   """Resource that allows spawning EMR Serverless Jobs.
 
   Pre-initialization capacity is not supported yet.
@@ -428,14 +455,13 @@ class AwsDpbEmrServerless(dpb_service.BaseDpbService):
   https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html
   """
 
-  CLOUD = providers.AWS
+  CLOUD = provider_info.AWS
   SERVICE_TYPE = 'emr_serverless'
 
   def __init__(self, dpb_service_spec):
     # TODO(odiego): Refactor the AwsDpbEmr and AwsDpbEmrServerless into a
     # hierarchy or move common code to a parent class.
     super().__init__(dpb_service_spec)
-    self.dpb_service_type = self.SERVICE_TYPE
     self.project = None
     self.cmd_prefix = list(util.AWS_PREFIX)
     if self.dpb_service_zone:
@@ -448,7 +474,7 @@ class AwsDpbEmrServerless(dpb_service.BaseDpbService):
     self.storage_service.PrepareService(self.region)
     self.persistent_fs_prefix = 's3://'
     self._cluster_create_time = None
-    if not self.dpb_version:
+    if not self.GetDpbVersion():
       raise errors.Setup.InvalidSetupError(
           'dpb_service.version must be provided. Versions follow the format: '
           '"emr-x.y.z" and are listed at '
@@ -458,14 +484,6 @@ class AwsDpbEmrServerless(dpb_service.BaseDpbService):
 
     # Last job run cost
     self._run_cost = None
-
-  def _Create(self):
-    # Since there's no managed infrastructure, this is a no-op.
-    pass
-
-  def _Delete(self):
-    # Since there's no managed infrastructure, this is a no-op.
-    pass
 
   def SubmitJob(self,
                 jarfile=None,
@@ -505,7 +523,7 @@ class AwsDpbEmrServerless(dpb_service.BaseDpbService):
     # Create the application.
     stdout, _, _ = vm_util.IssueCommand(self.cmd_prefix + [
         'emr-serverless', 'create-application',
-        '--release-label', self.dpb_version,
+        '--release-label', self.GetDpbVersion(),
         '--name', self.cluster_id,
         '--type', application_type,
         '--tags', json.dumps(util.MakeDefaultTags()),
@@ -539,7 +557,7 @@ class AwsDpbEmrServerless(dpb_service.BaseDpbService):
     return self._WaitForJob(
         (application_id, job_run_id), EMR_TIMEOUT, job_poll_interval)
 
-  def CalculateCost(self) -> Optional[float]:
+  def CalculateLastJobCost(self) -> Optional[float]:
     return self._run_cost
 
   def GetJobProperties(self) -> Dict[str, str]:

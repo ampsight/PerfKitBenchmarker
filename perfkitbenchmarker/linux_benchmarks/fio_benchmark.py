@@ -19,7 +19,6 @@ Quick howto: http://www.bluestop.org/fio/HOWTO.txt
 """
 
 
-import collections
 import json
 import logging
 import posixpath
@@ -154,6 +153,10 @@ flag_util.DEFINE_units('fio_blocksize', None,
 flags.DEFINE_integer('fio_runtime', 600,
                      'The number of seconds to run each fio job for.',
                      lower_bound=1)
+flags.DEFINE_integer('fio_ramptime', 10,
+                     'The number of seconds to run the specified workload '
+                     'before logging any performance numbers',
+                     lower_bound=0)
 flags.DEFINE_list('fio_parameters', ['randrepeat=0'],
                   'Parameters to apply to all PKB generated fio jobs. Each '
                   'member of the list should be of the form "param=value".')
@@ -176,24 +179,33 @@ flags.DEFINE_integer('fio_log_hist_msec', 1000,
                      'Same as fio_log_avg_msec, but logs entries for '
                      'completion latency histograms. If set to 0, histogram '
                      'logging is disabled.')
-flags.DEFINE_boolean(  # TODO(user): Add support for simultaneous read.
-    'fio_write_against_multiple_clients', False,
-    'Whether to run fio against multiple clients. Only applicable '
-    'when running fio against network mounts and rw=write.')
 flags.DEFINE_integer('fio_command_timeout_sec', None,
                      'Timeout for fio commands in seconds.')
 flags.DEFINE_enum('fio_rng', 'tausworthe64',
                   ['tausworthe', 'lfsr', 'tausworthe64'],
                   'Which RNG to use for 4k Random IOPS.')
+flags.DEFINE_enum('fio_ioengine', 'libaio', ['libaio', 'windowsaio'],
+                  'Defines how the job issues I/O to the file')
+_FIO_RATE_BANDWIDTH_LIMIT = flags.DEFINE_string(
+    'fio_rate_bandwidth_limit',
+    None,
+    'The bandwidth cap in bytes/sec. For example, using '
+    'rate=1m caps bandwidth to 1MiB/sec.',
+)
+_FIO_INCLUDE_LATENCY_PERCENTILES = flags.DEFINE_boolean(
+    'fio_include_latency_percentiles',
+    True,
+    'Whether to include FIO latency stats.',
+)
 _DIRECT_IO = flags.DEFINE_boolean(
     'fio_direct', True,
     'Whether to use O_DIRECT to bypass OS cache. This is strongly '
     'recommended, but not supported by all files.')
 
 
-FLAGS_IGNORED_FOR_CUSTOM_JOBFILE = {
-    'fio_generate_scenarios', 'fio_io_depths', 'fio_runtime',
-    'fio_blocksize', 'fio_num_jobs', 'fio_parameters'}
+FLAGS_IGNORED_FOR_CUSTOM_JOBFILE = frozenset({
+    'fio_generate_scenarios', 'fio_io_depths', 'fio_runtime', 'fio_ramptime',
+    'fio_blocksize', 'fio_num_jobs', 'fio_parameters'})
 
 
 def AgainstDevice():
@@ -224,10 +236,11 @@ def FillDevice(vm, disk, fill_size, exec_path):
     exec_path: string path to the fio executable
   """
 
-  command = (('%s --filename=%s --ioengine=libaio '
-              '--name=fill-device --blocksize=512k --iodepth=64 '
-              '--rw=write --direct=1 --size=%s') %
-             (exec_path, disk.GetDevicePath(), fill_size))
+  command = (
+      f'{exec_path} --filename={disk.GetDevicePath()} '
+      f'--ioengine={FLAGS.fio_ioengine} --name=fill-device '
+      f'--blocksize=512k --iodepth=64 --rw=write --direct=1 --size={fill_size}'
+  )
 
   vm.RobustRemoteCommand(command)
 
@@ -246,10 +259,11 @@ fio:
 
 JOB_FILE_TEMPLATE = """
 [global]
-ioengine=libaio
+ioengine={{ioengine}}
 invalidate=1
 direct={{direct}}
 runtime={{runtime}}
+ramp_time={{ramptime}}
 time_based
 filename={{filename}}
 do_verify=0
@@ -259,10 +273,8 @@ group_reporting=1
 {{parameter}}
 {%- endfor %}
 {%- for scenario in scenarios %}
-{%- for numjob in numjobs %}
-{%- for iodepth in iodepths %}
 
-[{{scenario['name']}}-io-depth-{{iodepth}}-num-jobs-{{numjob}}]
+[{{scenario['name']}}-io-depth-{{scenario['iodepth']}}-num-jobs-{{scenario['numjobs']}}]
 stonewall
 rw={{scenario['rwkind']}}
 {%- if scenario['rwmixread'] is defined %}
@@ -279,11 +291,21 @@ blocksize={{scenario['blocksize']}}
 {%- elif scenario['bssplit'] is defined %}
 bssplit={{scenario['bssplit']}}
 {%- endif%}
-iodepth={{iodepth}}
+iodepth={{scenario['iodepth']}}
 size={{scenario['size']}}
-numjobs={{numjob}}
-{%- endfor %}
-{%- endfor %}
+numjobs={{scenario['numjobs']}}
+{%- if scenario['rate'] is defined %}
+rate={{scenario['rate']}}
+{%- endif%}
+{%- if scenario['iodepth_batch_submit'] is defined %}
+iodepth_batch_submit={{scenario['iodepth_batch_submit']}}
+{%- endif%}
+{%- if scenario['iodepth_batch_complete_max'] is defined %}
+iodepth_batch_complete_max={{scenario['iodepth_batch_complete_max']}}
+{%- endif%}
+{%- if scenario['numa_cpu_nodes'] is defined %}
+numa_cpu_nodes={{scenario['numa_cpu_nodes']}}
+{%- endif%}
 {%- endfor %}
 """
 
@@ -329,6 +351,8 @@ FIO_KNOWN_FIELDS_IN_JINJA = [
     'rwmixread',
     'rwmixwrite',
     'fsync',
+    'iodepth',  # overrides --fio_io_depths
+    'numjobs',  # overrides --fio_num_jobs
 ]
 
 
@@ -428,7 +452,8 @@ def GetScenarioFromScenarioString(scenario_string):
 
 def GenerateJobFileString(filename, scenario_strings,
                           io_depths, num_jobs, working_set_size,
-                          block_size, runtime, direct, parameters):
+                          block_size, runtime, ramptime, direct, parameters,
+                          numa_node_count=1):
   """Make a string with our fio job file.
 
   Args:
@@ -439,8 +464,11 @@ def GenerateJobFileString(filename, scenario_strings,
     working_set_size: int or None. If int, the size of the working set in GB.
     block_size: Quantity or None. If quantity, the block size to use.
     runtime: int. The number of seconds to run each job.
+    ramptime: int. The number of seconds to run the specified workload before
+      logging any performance numbers.
     direct: boolean. Whether to use direct IO.
     parameters: list. Other fio parameters to be applied to all jobs.
+    numa_node_count: int. Number of NUMA nodes.
 
   Returns:
     The contents of a fio job file, as a string.
@@ -456,6 +484,7 @@ def GenerateJobFileString(filename, scenario_strings,
                          if working_set_size else '100%')
   blocksize_override = (str(int(block_size.m_as(units.byte))) + 'B'
                         if block_size else None)
+  should_use_scenario_iodepth_numjobs = True
 
   for scenario in scenarios:
     # per legacy behavior, the block size parameter
@@ -468,20 +497,62 @@ def GenerateJobFileString(filename, scenario_strings,
     if 'size' not in scenario:
       scenario['size'] = default_size_string
 
-  job_file_template = jinja2.Template(JOB_FILE_TEMPLATE,
-                                      undefined=jinja2.StrictUndefined)
+    if 'iodepth' not in scenario or 'numjobs' not in scenario:
+      should_use_scenario_iodepth_numjobs = False
 
-  # the template creates a cross product of all
-  # (scenario X io_depths X num_jobs)
-  # which allows a single run to produce all of these metrics
-  return str(job_file_template.render(
-      runtime=runtime,
-      filename=filename,
-      scenarios=scenarios,
-      iodepths=io_depths,
-      numjobs=num_jobs,
-      direct=int(direct),
-      parameters=parameters))
+  jinja_scenarios = []
+  if should_use_scenario_iodepth_numjobs:
+    # All scenarios supply iodepth and numjobs.
+    # Remove iodepth and numjobs from scenario name to prevent redundancy.
+    for scenario in scenarios:
+      scenario['name'] = scenario['name'].replace(
+          f'_iodepth-{scenario["iodepth"]}', '')
+      scenario['name'] = scenario['name'].replace(
+          f'_numjobs-{scenario["numjobs"]}', '')
+
+    jinja_scenarios = scenarios  # scenarios already includes iodepth, numjobs
+  else:
+    # preserve functionality of creating a cross product of all
+    # (scenario X io_depths X num_jobs)
+    # which allows a single run to produce all of these metrics
+    for scenario in scenarios:
+      for num_job in num_jobs:
+        for io_depth in io_depths:
+          scenario_copy = scenario.copy()
+          scenario_copy['iodepth'] = io_depth
+          scenario_copy['numjobs'] = num_job
+          jinja_scenarios.append(scenario_copy)
+
+  # Use NUMA-aware configs to better represent modern workloads such as
+  # databases. Following best practices suggested by
+  # https://cloud.google.com/compute/docs/disks/benchmark-hyperdisk-performance#prepare_for_testing.
+  # The following ensures proper use of NUMA locality. HdX NVME-to-CPU not
+  # used in the 1-NUMA case.
+  for scenario in jinja_scenarios:
+    if _FIO_RATE_BANDWIDTH_LIMIT.value:
+      scenario['rate'] = _FIO_RATE_BANDWIDTH_LIMIT.value
+    if numa_node_count > 1:
+      scenario['iodepth_batch_submit'] = scenario['iodepth']
+      scenario['iodepth_batch_complete_max'] = scenario['iodepth']
+      scenario['numa_cpu_nodes'] = ','.join(
+          [str(numa_node) for numa_node in range(numa_node_count)]
+      )
+
+  job_file_template = jinja2.Template(
+      JOB_FILE_TEMPLATE, undefined=jinja2.StrictUndefined
+  )
+
+  return str(
+      job_file_template.render(
+          ioengine=FLAGS.fio_ioengine,
+          runtime=runtime,
+          ramptime=ramptime,
+          filename=filename,
+          scenarios=jinja_scenarios,
+          direct=int(direct),
+          parameters=parameters,
+      )
+  )
 
 
 FILENAME_PARAM_REGEXP = re.compile('filename\s*=.*$', re.MULTILINE)
@@ -508,7 +579,8 @@ def ProcessedJobFileString(fio_jobfile_contents, remove_filename):
 def GetOrGenerateJobFileString(job_file_path, scenario_strings,
                                against_device, disk, io_depths,
                                num_jobs, working_set_size, block_size,
-                               runtime, direct, parameters, job_file_contents):
+                               runtime, ramptime, direct, parameters,
+                               job_file_contents, numa_node_count=1):
   """Get the contents of the fio job file we're working with.
 
   This will either read the user's job file, if given, or generate a
@@ -528,9 +600,12 @@ def GetOrGenerateJobFileString(job_file_path, scenario_strings,
       in GB.
     block_size: Quantity or None. If Quantity, the block size to use.
     runtime: int. The number of seconds to run each job.
+    ramptime: int. The number of seconds to run the specified workload before
+      logging any performance numbers.
     direct: boolean. Whether to use direct IO.
     parameters: list. Other fio parameters to apply to all jobs.
     job_file_contents: string contents of fio job.
+    numa_node_count: int. Number of NUMA nodes.
 
   Returns:
     A string containing a fio job file.
@@ -554,7 +629,8 @@ def GetOrGenerateJobFileString(job_file_path, scenario_strings,
 
     return GenerateJobFileString(filename, scenario_strings, io_depths,
                                  num_jobs, working_set_size, block_size,
-                                 runtime, direct, parameters)
+                                 runtime, ramptime, direct, parameters,
+                                 numa_node_count)
 
 
 NEED_SIZE_MESSAGE = ('You must specify the working set size when using '
@@ -615,6 +691,12 @@ def CheckPrerequisites(benchmark_config):
 
 
 def Prepare(benchmark_spec):
+  """Prepare VM's in benchmark_spec to run FIO.
+
+  Args:
+    benchmark_spec: The benchmarks specification.
+
+  """
   exec_path = fio.GetFioExec()
   vms = benchmark_spec.vms
   background_tasks.RunThreaded(lambda vm: PrepareWithExec(vm, exec_path), vms)
@@ -659,16 +741,25 @@ def PrepareWithExec(vm, exec_path):
     vm.FormatDisk(disk.GetDevicePath(), disk_spec.disk_type)
     vm.MountDisk(disk.GetDevicePath(), disk.mount_point,
                  disk_spec.disk_type, disk.mount_options, disk.fstab_options)
-  if FLAGS.fio_write_against_multiple_clients:
-    vm.RemoteCommand('sudo rm -rf %s/%s' % (disk.mount_point, vm.name))
-    vm.RemoteCommand('sudo mkdir -p %s/%s' % (disk.mount_point, vm.name))
 
 
 def Run(benchmark_spec):
   """Spawn fio on vm(s) and gather results."""
+  vms = benchmark_spec.vms
+  return RunFioOnVMs(vms)
+
+
+def RunFioOnVMs(vms):
+  """Spawn fio on vm(s) and gather results.
+
+  Args:
+    vms: A list of VMs to run FIO on.
+
+  Returns:
+    A list of sample.Sample objects.
+  """
   fio_exe = fio.GetFioExec()
   default_job_file_contents = GetFileAsString(data.ResourcePath('fio.job'))
-  vms = benchmark_spec.vms
   samples = []
 
   path = REMOTE_JOB_FILE_PATH
@@ -680,39 +771,11 @@ def Run(benchmark_spec):
       item.metadata['machine_instance'] = i
     samples.extend(samples_list[i])
 
-  if FLAGS.fio_write_against_multiple_clients and samples:
-    metrics = collections.defaultdict(list)
-    for item in samples:
-      # example metric: 'filestore-bandwidth:write:bandwidth'
-      metrics[item.metric.split(':', 1)[-1]].append(item.value)
-
-    samples.append(
-        sample.Sample('Total_write_throughput', sum(metrics['write:bandwidth']),
-                      'KB/s'))
-    samples.append(
-        sample.Sample('Total_write_iops', sum(metrics['write:iops']), 'ops'))
-    earliest_start = min(metrics['start_time'])
-    latest_start = max(metrics['start_time'])
-    earliest_end = min(metrics['end_time'])
-    latest_end = max(metrics['end_time'])
-    # Invalid run if the start and end times don't overlap 95%.
-    nonoverlap_percent = (latest_end - earliest_end + latest_start -
-                          earliest_start) / (
-                              earliest_end - latest_start)
-    valid_run = (nonoverlap_percent < 0.05)
-    for item in samples:
-      item.metadata['valid_run'] = valid_run
-      item.metadata['nonoverlap_percentage'] = nonoverlap_percent
-  for item in samples:
-    item.metadata['fio_target_mode'] = FLAGS.fio_target_mode
-    item.metadata['fio_fill_size'] = FLAGS.fio_fill_size
-    item.metadata['fio_rng'] = FLAGS.fio_rng
-
   return samples
 
 
 def RunWithExec(vm, exec_path, remote_job_file_path, job_file_contents):
-  """Spawn fio and gather the results.
+  """Spawn fio and gather the results. Used by Windows FIO as well.
 
   Args:
     vm: vm to run the benchmark on.
@@ -727,9 +790,7 @@ def RunWithExec(vm, exec_path, remote_job_file_path, job_file_contents):
 
   disk = vm.scratch_disks[0]
   mount_point = disk.mount_point
-  if FLAGS.fio_write_against_multiple_clients:
-    mount_point = '%s/%s' % (disk.mount_point, vm.name)
-    logging.info('FIO mount point changed to %s', mount_point)
+  numa_node_count = vm.numa_node_count or 1
 
   job_file_string = GetOrGenerateJobFileString(
       FLAGS.fio_jobfile,
@@ -741,9 +802,11 @@ def RunWithExec(vm, exec_path, remote_job_file_path, job_file_contents):
       FLAGS.fio_working_set_size,
       FLAGS.fio_blocksize,
       FLAGS.fio_runtime,
+      FLAGS.fio_ramptime,
       _DIRECT_IO.value,
       FLAGS.fio_parameters,
-      job_file_contents)
+      job_file_contents,
+      numa_node_count)
   job_file_path = vm_util.PrependTempDir(vm.name + LOCAL_JOB_FILE_SUFFIX)
   with open(job_file_path, 'w') as job_file:
     job_file.write(job_file_string)
@@ -753,9 +816,13 @@ def RunWithExec(vm, exec_path, remote_job_file_path, job_file_contents):
   vm.PushFile(job_file_path, remote_job_file_path)
 
   if AgainstDevice():
+    if 'filename' in job_file_string:
+      filename_parameter = ''
+    else:
+      filename_parameter = f'--filename={disk.GetDevicePath()}'
     fio_command = (f'{exec_path} --output-format=json '
                    f'--random_generator={FLAGS.fio_rng} '
-                   f'--filename={disk.GetDevicePath()} {remote_job_file_path}')
+                   f'{filename_parameter} {remote_job_file_path}')
   else:
     fio_command = (f'{exec_path} --output-format=json '
                    f'--random_generator={FLAGS.fio_rng} '
@@ -789,13 +856,25 @@ def RunWithExec(vm, exec_path, remote_job_file_path, job_file_contents):
       bin_vals += [fio.ComputeHistogramBinVals(
           vm, '%s_clat_hist.%s.log' % (
               log_file_base, idx + 1)) for idx in range(num_logs)]
-  samples = fio.ParseResults(job_file_string, json.loads(stdout),
-                             log_file_base=log_file_base, bin_vals=bin_vals)
+  samples = fio.ParseResults(
+      job_file_string,
+      json.loads(stdout),
+      log_file_base=log_file_base,
+      bin_vals=bin_vals,
+      skip_latency_individual_stats=(
+          not _FIO_INCLUDE_LATENCY_PERCENTILES.value
+          ),
+  )
 
   samples.append(
       sample.Sample('start_time', start_time, 'sec', samples[0].metadata))
   samples.append(
       sample.Sample('end_time', end_time, 'sec', samples[0].metadata))
+
+  for item in samples:
+    item.metadata['fio_target_mode'] = FLAGS.fio_target_mode
+    item.metadata['fio_fill_size'] = FLAGS.fio_fill_size
+    item.metadata['fio_rng'] = FLAGS.fio_rng
 
   return samples
 
@@ -807,7 +886,11 @@ def Cleanup(benchmark_spec):
     benchmark_spec: The benchmark specification. Contains all data that is
         required to run the benchmark.
   """
-  vm = benchmark_spec.vms[0]
+  vms = benchmark_spec.vms
+  background_tasks.RunThreaded(CleanupVM, vms)
+
+
+def CleanupVM(vm):
   logging.info('FIO Cleanup up on %s', vm)
   vm.RemoveFile(REMOTE_JOB_FILE_PATH)
   if not AgainstDevice() and not FLAGS.fio_jobfile:

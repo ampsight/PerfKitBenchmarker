@@ -17,7 +17,7 @@ from absl import flags
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import linux_virtual_machine
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.configs import option_decoders
@@ -32,7 +32,7 @@ INSTANCE_EXISTS_STATUSES = frozenset(
 
 
 class OciVmSpec(virtual_machine.BaseVmSpec):
-    CLOUD = providers.OCI
+    CLOUD = provider_info.OCI
 
     def __init__(self, *args, **kwargs):
         self.num_local_ssds: int = None
@@ -86,7 +86,7 @@ class OciVmSpec(virtual_machine.BaseVmSpec):
 
 
 class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
-    CLOUD = providers.OCI
+    CLOUD = provider_info.OCI
 
     _counter_lock = threading.Lock()
     _counter = itertools.count()
@@ -273,6 +273,12 @@ class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
         self.MountDisk(data_disk.GetDevicePath(), disk_spec.mount_point,
                        disk.LOCAL, data_disk.mount_options,
                        data_disk.fstab_options)
+        
+    def AllowPort(self, start_port, end_port=None, source_range=None):
+
+        # TODO: Potentially replace for case where firewall skip flag is in place
+        super(OciVirtualMachine, self).AllowPort(start_port, end_port, source_range)
+
 
 class Ubuntu2204BasedOCIVirtualMachine(OciVirtualMachine,
                                        linux_virtual_machine.Ubuntu2204Mixin):

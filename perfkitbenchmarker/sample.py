@@ -13,6 +13,7 @@
 # limitations under the License.
 """A performance sample class."""
 
+import calendar
 import collections
 import datetime
 import math
@@ -21,8 +22,12 @@ from typing import Any, Dict, List, NewType
 
 import numpy as np
 from perfkitbenchmarker import errors
+import pytz
 
 PERCENTILES_LIST = 0.1, 1, 5, 10, 50, 90, 95, 99, 99.9
+
+# Add this flag to the metadata to hide logging to console.
+DISABLE_CONSOLE_LOG = 'disable_console_log'
 
 _SAMPLE_FIELDS = 'metric', 'value', 'unit', 'metadata', 'timestamp'
 
@@ -155,6 +160,20 @@ class Sample(collections.namedtuple('Sample', _SAMPLE_FIELDS)):
         return False
     return True
 
+  def DisableConsoleLog(self) -> bool:
+    """Disable log to console when this return True."""
+
+    # Disable Console log is set as a metadata rather than a field
+    # is due to the current structure of samples class.
+    # Adding extra field to a sample might break serialization of some publisher
+    # pipeline as they expect certain format.
+    # Modyfing asdict function is also not enough because when we pickle
+    # the samples,
+    return (
+        DISABLE_CONSOLE_LOG in self.metadata
+        and self.metadata[DISABLE_CONSOLE_LOG]
+    )
+
   def asdict(self)-> Dict[str, Any]:  # pylint:disable=invalid-name
     """Converts the Sample to a dictionary."""
     return self._asdict()
@@ -281,4 +300,7 @@ def CreateTimeSeriesSample(values: List[Any],
 
 
 def ConvertDateTimeToUnixMs(date: datetime.datetime):
-  return time.mktime(date.timetuple()) * 1000
+  # calendar.timegm assumes the time is from UTC.
+  # Convert the datetime to UTC timezone first.
+  date_utc = date.astimezone(pytz.utc)
+  return calendar.timegm(date_utc.timetuple()) * 1000

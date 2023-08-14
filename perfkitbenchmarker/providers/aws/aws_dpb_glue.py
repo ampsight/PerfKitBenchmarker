@@ -15,7 +15,7 @@ from absl import flags
 
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.aws import aws_dpb_glue_prices
 from perfkitbenchmarker.providers.aws import s3
@@ -30,10 +30,12 @@ def _ModuleFromPyFilename(py_filename):
   return os.path.splitext(os.path.basename(py_filename))[0]
 
 
-class AwsDpbGlue(dpb_service.BaseDpbService):
+class AwsDpbGlue(
+    dpb_service.DpbServiceServerlessMixin, dpb_service.BaseDpbService
+):
   """Resource that allows spawning serverless AWS Glue Jobs."""
 
-  CLOUD = providers.AWS
+  CLOUD = provider_info.AWS
   SERVICE_TYPE = 'glue'
   SPARK_SQL_GLUE_WRAPPER_SCRIPT = (
       'spark_sql_test_scripts/spark_sql_glue_wrapper.py'
@@ -41,7 +43,6 @@ class AwsDpbGlue(dpb_service.BaseDpbService):
 
   def __init__(self, dpb_service_spec):
     super().__init__(dpb_service_spec)
-    self.dpb_service_type = self.SERVICE_TYPE
     self.project = None
     self.cmd_prefix = list(util.AWS_PREFIX)
     if not self.dpb_service_zone:
@@ -58,6 +59,7 @@ class AwsDpbGlue(dpb_service.BaseDpbService):
 
     # Last job run cost
     self._run_cost = None
+    self._FillMetadata()
 
   @property
   def _glue_script_wrapper_url(self):
@@ -111,6 +113,7 @@ class AwsDpbGlue(dpb_service.BaseDpbService):
 
     # Create job definition
     job_name = f'{self.cluster_id}-{self._job_counter}'
+    self.metadata['dpb_job_id'] = job_name
     self._job_counter += 1
     glue_command = {}
     glue_default_args = {}
@@ -136,7 +139,7 @@ class AwsDpbGlue(dpb_service.BaseDpbService):
         '--role', self.role,
         '--command', json.dumps(glue_command),
         '--default-arguments', json.dumps(glue_default_args),
-        '--glue-version', self.dpb_version,
+        '--glue-version', self.GetDpbVersion(),
         '--number-of-workers', str(self.spec.worker_count),
         '--worker-type', self.spec.worker_group.vm_spec.machine_type,
 
@@ -155,10 +158,6 @@ class AwsDpbGlue(dpb_service.BaseDpbService):
     return self._WaitForJob((job_name, job_run_id), GLUE_TIMEOUT,
                             job_poll_interval)
 
-  def _Create(self):
-    # Since there's no managed infrastructure, this is a no-op.
-    pass
-
   def _Delete(self):
     """Deletes Glue Jobs created to avoid quota issues."""
     for i in range(self._job_counter):
@@ -172,11 +171,9 @@ class AwsDpbGlue(dpb_service.BaseDpbService):
         f'--job-name={job_name}'
     ], raise_on_failure=False)
 
-  def GetClusterCreateTime(self) -> Optional[float]:
-    return None
-
-  def GetMetadata(self):
-    basic_data = super().GetMetadata()
+  def _FillMetadata(self) -> None:
+    """Gets a dict to initialize this DPB service instance's metadata."""
+    basic_data = self.metadata
 
     # Disk size in GB as specified in
     # https://docs.aws.amazon.com/glue/latest/dg/add-job.html#:~:text=Own%20Custom%20Scripts.-,Worker%20type,-The%20following%20worker
@@ -184,11 +181,10 @@ class AwsDpbGlue(dpb_service.BaseDpbService):
     dpb_disk_size = disk_size_by_worker_type.get(
         self.spec.worker_group.vm_spec.machine_type, 'Unknown')
 
-    return {
+    self.metadata = {
         'dpb_service': basic_data['dpb_service'],
         'dpb_version': basic_data['dpb_version'],
         'dpb_service_version': basic_data['dpb_service_version'],
-        'dpb_job_id': f"{basic_data['dpb_cluster_id']}-{self._job_counter - 1}",
         'dpb_cluster_shape': basic_data['dpb_cluster_shape'],
         'dpb_cluster_size': basic_data['dpb_cluster_size'],
         'dpb_hdfs_type': 'default-disk',
@@ -201,7 +197,7 @@ class AwsDpbGlue(dpb_service.BaseDpbService):
     """Gets service wrapper scripts to upload alongside benchmark scripts."""
     return [self.SPARK_SQL_GLUE_WRAPPER_SCRIPT]
 
-  def CalculateCost(self) -> Optional[float]:
+  def CalculateLastJobCost(self) -> Optional[float]:
     return self._run_cost
 
   def _ComputeJobRunCost(

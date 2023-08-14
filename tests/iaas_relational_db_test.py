@@ -17,8 +17,10 @@ import unittest
 from unittest import mock
 
 from absl import flags
-from perfkitbenchmarker import iaas_relational_db
+from perfkitbenchmarker import mysql_iaas_relational_db
+from perfkitbenchmarker import postgres_iaas_relational_db
 from perfkitbenchmarker import relational_db_spec
+from perfkitbenchmarker import sqlserver_iaas_relational_db
 from tests import pkb_common_test_case
 
 FLAGS = flags.FLAGS
@@ -31,7 +33,53 @@ def CreateTestLinuxVm():
   return pkb_common_test_case.TestLinuxVirtualMachine(vm_spec=vm_spec)
 
 
-class FakeRelationalDb(iaas_relational_db.IAASRelationalDb):
+class FakeMysqlRelationalDb(mysql_iaas_relational_db.MysqlIAASRelationalDb):
+
+  def GetEndpoint(self):
+    pass
+
+  def GetPort(self):
+    pass
+
+  def _Create(self):
+    pass
+
+  def _Delete(self):
+    pass
+
+  def GetDefaultEngineVersion(self, _):
+    pass
+
+  def _FailoverHA(self):
+    pass
+
+
+class FakePostgresRelationalDb(
+    postgres_iaas_relational_db.PostgresIAASRelationalDb
+):
+
+  def GetEndpoint(self):
+    pass
+
+  def GetPort(self):
+    pass
+
+  def _Create(self):
+    pass
+
+  def _Delete(self):
+    pass
+
+  def GetDefaultEngineVersion(self, _):
+    pass
+
+  def _FailoverHA(self):
+    pass
+
+
+class FakeSQLServerRelationalDb(
+    sqlserver_iaas_relational_db.SQLServerIAASRelationalDb
+):
 
   def GetEndpoint(self):
     pass
@@ -116,10 +164,10 @@ class RelationalDbUnmanagedTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testMakePostgresClientCommand(self):
     FLAGS['use_managed_db'].parse(False)
-    db = FakeRelationalDb(self.postgres_spec)
+    db = FakePostgresRelationalDb(self.postgres_spec)
     db.endpoint = '1.1.1.1'
     db.port = db.GetDefaultPort()
-    db.client_vm = CreateTestLinuxVm()
+    db.SetVms({'default': [CreateTestLinuxVm()]})
     db.server_vm = CreateTestLinuxVm()
     self.assertEqual(
         db.client_vm_query_tools.MakeSqlCommand(
@@ -129,10 +177,10 @@ class RelationalDbUnmanagedTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testIssuePostgresClientCommand(self):
     FLAGS['use_managed_db'].parse(False)
-    db = FakeRelationalDb(self.postgres_spec)
+    db = FakePostgresRelationalDb(self.postgres_spec)
     db.endpoint = '1.1.1.1'
     db.port = db.GetDefaultPort()
-    db.client_vm = CreateTestLinuxVm()
+    db.SetVms({'default': [CreateTestLinuxVm()]})
     db.server_vm = CreateTestLinuxVm()
     with mock.patch.object(db.client_vm, 'RemoteCommand') as remote_command:
       db.client_vm_query_tools.IssueSqlCommand('Select 1', database_name='abc')
@@ -149,10 +197,10 @@ class RelationalDbUnmanagedTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testIssuePostgresClientCommandWithSessionVariables(self):
     FLAGS['use_managed_db'].parse(False)
-    db = FakeRelationalDb(self.postgres_spec)
+    db = FakePostgresRelationalDb(self.postgres_spec)
     db.endpoint = '1.1.1.1'
     db.port = db.GetDefaultPort()
-    db.client_vm = CreateTestLinuxVm()
+    db.SetVms({'default': [CreateTestLinuxVm()]})
     db.server_vm = CreateTestLinuxVm()
     with mock.patch.object(db.client_vm, 'RemoteCommand') as remote_command:
       db.client_vm_query_tools.IssueSqlCommand(
@@ -173,8 +221,8 @@ class RelationalDbUnmanagedTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testMakePostgresServerCommand(self):
     FLAGS['use_managed_db'].parse(False)
-    db = FakeRelationalDb(self.postgres_spec)
-    db.client_vm = CreateTestLinuxVm()
+    db = FakePostgresRelationalDb(self.postgres_spec)
+    db.SetVms({'default': [CreateTestLinuxVm()]})
     db.server_vm = CreateTestLinuxVm()
     db.endpoint = '1.1.1.1'
     db.port = db.GetDefaultPort()
@@ -186,8 +234,8 @@ class RelationalDbUnmanagedTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testMakeMysqlCientCommand(self):
     FLAGS['use_managed_db'].parse(False)
-    db = FakeRelationalDb(self.mysql_spec)
-    db.client_vm = CreateTestLinuxVm()
+    db = FakeMysqlRelationalDb(self.mysql_spec)
+    db.SetVms({'default': [CreateTestLinuxVm()]})
     db.server_vm = CreateTestLinuxVm()
     db.endpoint = '1.1.1.1'
     db.port = db.GetDefaultPort()
@@ -198,8 +246,8 @@ class RelationalDbUnmanagedTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testMakeMysqlCommandWithLocalHost(self):
     FLAGS['use_managed_db'].parse(False)
-    db = FakeRelationalDb(self.mysql_spec)
-    db.client_vm = CreateTestLinuxVm()
+    db = FakeMysqlRelationalDb(self.mysql_spec)
+    db.SetVms({'default': [CreateTestLinuxVm()]})
     db.server_vm = CreateTestLinuxVm()
     db.endpoint = '1.1.1.1'
     db.port = db.GetDefaultPort()
@@ -210,8 +258,8 @@ class RelationalDbUnmanagedTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testMakeSqlserverCommand(self):
     FLAGS['use_managed_db'].parse(False)
-    db = FakeRelationalDb(self.sqlserver_spec)
-    db.client_vm = CreateTestLinuxVm()
+    db = FakeSQLServerRelationalDb(self.sqlserver_spec)
+    db.SetVms({'default': [CreateTestLinuxVm()]})
     db.server_vm = CreateTestLinuxVm()
     db.endpoint = '1.1.1.1'
     db.port = db.GetDefaultPort()
@@ -222,8 +270,8 @@ class RelationalDbUnmanagedTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testMakeSqlserverCommandWithLocalHost(self):
     FLAGS['use_managed_db'].parse(False)
-    db = FakeRelationalDb(self.sqlserver_spec)
-    db.client_vm = CreateTestLinuxVm()
+    db = FakeSQLServerRelationalDb(self.sqlserver_spec)
+    db.SetVms({'default': [CreateTestLinuxVm()]})
     db.server_vm = CreateTestLinuxVm()
     db.endpoint = '1.1.1.1'
     db.port = db.GetDefaultPort()
@@ -235,16 +283,16 @@ class RelationalDbUnmanagedTestCase(pkb_common_test_case.PkbCommonTestCase):
   def testInstallMYSQLServer(self):
     FLAGS['use_managed_db'].parse(False)
     FLAGS['innodb_buffer_pool_size'].parse(100)
-    db = FakeRelationalDb(self.mysql_spec)
+    db = FakeMysqlRelationalDb(self.mysql_spec)
     db.endpoint = '1.1.1.1'
     db.port = db.GetDefaultPort()
-    db.client_vm = CreateTestLinuxVm()
+    db.SetVms({'default': [CreateTestLinuxVm()]})
     db.server_vm = CreateTestLinuxVm()
     db.server_vm.IS_REBOOTABLE = False
     db.client_vm.IS_REBOOTABLE = False
     db.server_vm.GetScratchDir = mock.MagicMock(return_value='scratch')
     with mock.patch.object(db.server_vm, 'RemoteCommand') as remote_command:
-      db._InstallMySQLServer()
+      db._SetupLinuxUnmanagedDatabase()
     command = [
         mock.call('chmod 755 scratch'),
         mock.call('sudo service None stop'),

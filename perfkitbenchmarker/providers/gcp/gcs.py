@@ -26,7 +26,7 @@ from perfkitbenchmarker import errors
 from perfkitbenchmarker import linux_packages
 from perfkitbenchmarker import object_storage_service
 from perfkitbenchmarker import os_types
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import temp_dir
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.gcp import util
@@ -42,9 +42,9 @@ WRITER = 'objectCreator'
 flags.DEFINE_string('google_cloud_sdk_version', None,
                     'Use a particular version of the Google Cloud SDK, e.g.: '
                     '103.0.0')
-flags.DEFINE_enum('gcs_client', GCS_CLIENT_BOTO,
+flags.DEFINE_enum('gcs_client', GCS_CLIENT_PYTHON,
                   [GCS_CLIENT_PYTHON, GCS_CLIENT_BOTO],
-                  'The GCS client library to use (default boto).')
+                  'The GCS client library to use (default python).')
 
 FLAGS = flags.FLAGS
 
@@ -52,7 +52,7 @@ FLAGS = flags.FLAGS
 class GoogleCloudStorageService(object_storage_service.ObjectStorageService):
   """Interface to Google Cloud Storage."""
 
-  STORAGE_NAME = providers.GCP
+  STORAGE_NAME = provider_info.GCP
 
   location: str
 
@@ -70,6 +70,9 @@ class GoogleCloudStorageService(object_storage_service.ObjectStorageService):
       command.extend(['-c', FLAGS.object_storage_storage_class])
     if FLAGS.project:
       command.extend(['-p', FLAGS.project])
+    if object_storage_service.OBJECT_TTL_DAYS.value:
+      command.extend(
+          ['--retention', f'{object_storage_service.OBJECT_TTL_DAYS.value}d'])
     command.extend(['gs://%s' % bucket])
 
     _, stderr, ret_code = vm_util.IssueCommand(command, raise_on_failure=False)

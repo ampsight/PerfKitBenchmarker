@@ -33,7 +33,7 @@ from google.cloud.monitoring_v3 import types
 from perfkitbenchmarker import beam_benchmark_helper
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import temp_dir
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.gcp import gcs
@@ -106,12 +106,11 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
   Requires a local java installation to run Dataflow.
   """
 
-  CLOUD = providers.GCP
+  CLOUD = provider_info.GCP
   SERVICE_TYPE = 'dataflow'
 
   def __init__(self, dpb_service_spec):
     super(GcpDpbDataflow, self).__init__(dpb_service_spec)
-    self.dpb_service_type = self.SERVICE_TYPE
     self.project = FLAGS.project
     self.job_id = None
     self.job_metrics = None
@@ -122,6 +121,7 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     self.storage_service = gcs.GoogleCloudStorageService()
     self.storage_service.PrepareService(location=self.region)
     self.persistent_fs_prefix = 'gs://'
+    self._FillMetadata()
 
   def _GetTempLocation(self) -> str:
     if FLAGS.dpb_dataflow_temp_location is None:
@@ -240,14 +240,12 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     self.job_id = match.group(1)
     logging.info('Dataflow job ID: %s', self.job_id)
 
-  def GetMetadata(self):
-    """Return a dictionary of the metadata for this cluster."""
-    basic_data = super(GcpDpbDataflow, self).GetMetadata()
-    basic_data['dpb_dataflow_runner'] = FLAGS.dpb_dataflow_runner
-    basic_data['dpb_dataflow_sdk'] = FLAGS.dpb_dataflow_sdk
-    basic_data['dpb_job_id'] = self.job_id
-    basic_data['dpb_dataflow_enable_prime'] = FLAGS.dpb_dataflow_enable_prime
-    return basic_data
+  def _FillMetadata(self) -> None:
+    """Get a dict to initialize this DPB service instance's metadata."""
+    self.metadata['dpb_dataflow_runner'] = FLAGS.dpb_dataflow_runner
+    self.metadata['dpb_dataflow_sdk'] = FLAGS.dpb_dataflow_sdk
+    self.metadata['dpb_job_id'] = self.job_id
+    self.metadata['dpb_dataflow_enable_prime'] = FLAGS.dpb_dataflow_enable_prime
 
   def GetJobStatus(self):
     cmd = util.GcloudCommand(self, 'dataflow', 'jobs', 'show', self.job_id)
@@ -271,10 +269,11 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     # and/or BillableStreamingDataProcessed when applicable
     return stats
 
-  def CalculateCost(self, pricing_type=DATAFLOW_TYPE_BATCH):
+  def CalculateLastJobCost(self, pricing_type=DATAFLOW_TYPE_BATCH):
     if pricing_type not in (DATAFLOW_TYPE_BATCH, DATAFLOW_TYPE_STREAMING):
       raise ValueError(
-          f'Invalid type provided to CalculateCost(): {pricing_type}')
+          f'Invalid type provided to CalculateLastJobCost(): {pricing_type}'
+      )
 
     # For some reason, pytype doesn't play well with functools.cached_property
     # pytype: disable=unsupported-operands

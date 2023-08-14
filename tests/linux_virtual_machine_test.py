@@ -26,10 +26,12 @@ import mock
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import linux_virtual_machine
 from perfkitbenchmarker import os_types
-from perfkitbenchmarker import pkb
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import test_util
+from perfkitbenchmarker import vm_util
+from tests import matchers
 from tests import pkb_common_test_case
+
 
 FLAGS = flags.FLAGS
 
@@ -134,7 +136,7 @@ class TestSysctl(pkb_common_test_case.PkbCommonTestCase):
     with mock.patch.object(vm, 'RemoteCommand') as remote_command:
       vm.DoSysctls()
 
-    self.assertEqual(sorted(remote_command.call_args_list), sorted(calls))
+    self.assertCountEqual(remote_command.call_args_list, calls)
 
   def testSysctl(self):
     self.runTest(
@@ -142,7 +144,8 @@ class TestSysctl(pkb_common_test_case.PkbCommonTestCase):
         [mock.call('sudo bash -c \'echo "vm.dirty_background_ratio=10" >> '
                    '/etc/sysctl.conf\''),
          mock.call('sudo bash -c \'echo "vm.dirty_ratio=25" >> '
-                   '/etc/sysctl.conf\'')])
+                   '/etc/sysctl.conf\''),
+         mock.call('sudo sysctl -p')])
 
   def testNoSysctl(self):
     self.runTest([],
@@ -258,7 +261,7 @@ class TestLsCpu(unittest.TestCase, test_util.SamplesTestMixin):
 
   def testRecordLscpuOutputLinux(self):
     vm = self.CreateVm(os_types.DEFAULT, self.LsCpuText(self.LSCPU_DATA))
-    samples = pkb._CreateLscpuSamples([vm])
+    samples = linux_virtual_machine.CreateLscpuSamples([vm])
     vm.RemoteCommand.assert_called_with('lscpu')
     self.assertEqual(1, len(samples))
     metadata = {'node_name': vm.name}
@@ -268,7 +271,7 @@ class TestLsCpu(unittest.TestCase, test_util.SamplesTestMixin):
 
   def testRecordLscpuOutputNonLinux(self):
     vm = self.CreateVm(os_types.WINDOWS, '')
-    samples = pkb._CreateLscpuSamples([vm])
+    samples = linux_virtual_machine.CreateLscpuSamples([vm])
     self.assertEqual(0, len(samples))
     vm.RemoteCommand.assert_not_called()
 
@@ -310,7 +313,7 @@ class TestLsCpu(unittest.TestCase, test_util.SamplesTestMixin):
 
   def testProcCpuSamples(self):
     vm = self.CreateVm(os_types.DEFAULT, self.PROC_CPU_TEXT)
-    samples = pkb._CreateProcCpuSamples([vm])
+    samples = linux_virtual_machine.CreateProcCpuSamples([vm])
     proccpu_metadata = {
         'cpu family': '6',
         'node_name': 'pkb-test',
@@ -328,6 +331,103 @@ class TestLsCpu(unittest.TestCase, test_util.SamplesTestMixin):
         sample.Sample('proccpu_mapping', 0, '', proccpu_mapping_metadata)
     ]
     self.assertSampleListsEqualUpToTimestamp(expected_samples, samples)
+
+
+class TestRemoteCommand(pkb_common_test_case.PkbCommonTestCase):
+  """Test class for testing linux_virtual_machine.RemoteCommand internals."""
+
+  def setUp(self):
+    super().setUp()
+    self.vm = CreateTestLinuxVm()
+    self.vm.name = 'pkb-test'
+    self.issue_cmd_mock = self.enter_context(
+        mock.patch.object(vm_util, 'IssueCommand', autospec=True)
+    )
+    self.issue_cmd_mock.return_value = ('output', '', 0)
+    self.vm.ip_address = 'localhost:4000'
+
+  def testSshAppendedToCommandButNotLog(self):
+    with self.assertLogs() as logs:
+      self.vm.RemoteCommand('foo')
+    self.assertEqual(
+        logs.output,
+        ['INFO:root:Running on %s via ssh: %s' % ('pkb-test', 'foo')],
+    )
+    self.issue_cmd_mock.assert_called_once_with(
+        matchers.HASALLOF('ssh', 'PasswordAuthentication=no', 'foo'),
+        timeout=None,
+        should_pre_log=False,
+        raise_on_failure=False,
+        stack_level=mock.ANY,
+    )
+
+  def testIssueCommanndCalledWithStackLevel(self):
+    self.vm.RemoteCommand('foo')
+    self.issue_cmd_mock.assert_called_once_with(
+        mock.ANY,
+        timeout=None,
+        should_pre_log=False,
+        raise_on_failure=False,
+        stack_level=5,
+    )
+
+  @parameterized.parameters(
+      'RemoteCommand',
+      'RemoteCommandWithReturnCode',
+      'RemoteHostCommand',
+      'RemoteHostCommandWithReturnCode',
+  )
+  def testLogComesFromRightFile(self, method_name):
+    method = getattr(self.vm, method_name)
+    with self.assertLogs() as logs:
+      method('foo')
+    self.assertLen(logs.output, 1)
+    self.assertIn('linux_virtual_machine_test', logs.records[0].pathname)
+
+  def testLoginShellAppendsBash(self):
+    self.vm.RemoteCommand('foo', login_shell=True)
+    self.issue_cmd_mock.assert_called_once_with(
+        matchers.HASALLOF('-t', 'bash -l -c "foo"'),
+        timeout=None,
+        should_pre_log=False,
+        raise_on_failure=False,
+        stack_level=mock.ANY,
+    )
+
+  def testNonZeroReturnCodeRaises(self):
+    self.issue_cmd_mock.return_value = ('output', 'err', 1)
+    with self.assertRaises(errors.VirtualMachine.RemoteCommandError):
+      self.vm.RemoteCommand('foo')
+
+  def testNonZeroReturnCodeIgnored(self):
+    self.issue_cmd_mock.return_value = ('output', 'err', 1)
+    stdout, stderr, ret = self.vm.RemoteCommandWithReturnCode(
+        'foo', ignore_failure=True)
+    self.assertEqual(stdout, 'output')
+    self.assertEqual(stderr, 'err')
+    self.assertEqual(ret, 1)
+
+  def testRetriesInLimitSucceeds(self):
+    self.issue_cmd_mock.side_effect = [(
+        'o',
+        '',
+        linux_virtual_machine.RETRYABLE_SSH_RETCODE,
+    )] * 2 + [
+        ('o', '', 0),
+    ]
+    _, _, ret_val = self.vm.RemoteCommandWithReturnCode('foo', retries=3)
+    self.assertEqual(ret_val, 0)
+
+  def testRetriesOutOfLimitFails(self):
+    self.issue_cmd_mock.side_effect = [(
+        'o',
+        '',
+        linux_virtual_machine.RETRYABLE_SSH_RETCODE,
+    )] * 2 + [
+        ('o', '', 0),
+    ]
+    with self.assertRaises(errors.VirtualMachine.RemoteCommandError):
+      self.vm.RemoteCommand('foo', retries=2)
 
 
 class TestPartitionTable(unittest.TestCase):
@@ -421,14 +521,23 @@ class LinuxVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def CreateVm(self, run_cmd_response: Union[str, Dict[str, str]]):
     vm = CreateTestLinuxVm()
+
     def FakeRemoteHostCommandWithReturnCode(cmd, **_):
       if isinstance(run_cmd_response, str):
         stdout = run_cmd_response
       elif isinstance(run_cmd_response, dict):
-        # NOTE: unfortunately @vm_util.Retry will infinitely retry a key error
-        # on this map, which can be tricky to diagnose.
+        # NOTE: @vm_util.Retry would infinitely retry a KeyError on this map so
+        # we raise SystemExit which does not inherit from Exception.
+        # Unfortunately other issues, like a typo can raise
+        # AttributeError which is retried until the test times out.
+        # See b/271465182 for more discussion.
+        if cmd not in run_cmd_response:
+          raise SystemExit(f'Define response for {cmd}')
         stdout = run_cmd_response[cmd]
-      return stdout, ''  # pytype: disable=name-error  # py310-upgrade
+      else:
+        raise NotImplementedError()
+      return stdout, '', 0
+
     vm.RemoteHostCommandWithReturnCode = mock.Mock(
         side_effect=FakeRemoteHostCommandWithReturnCode)
     vm.CheckLsCpu = mock.Mock(
@@ -449,8 +558,12 @@ class LinuxVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
   )
   def testNumCpusForBenchmarkNoSmt(self, vcpus, kernel_command_line,
                                    expected_num_cpus):
+    FLAGS['use_numcpu_multi_files'].parse(True)
     responses = {
-        'cat /proc/cpuinfo | grep processor | wc -l': str(vcpus),
+        'ls /sys/fs/cgroup/cpuset.cpus.effective >> /dev/null 2>&1 || echo file_not_exist': (
+            ''
+        ),
+        'cat /sys/fs/cgroup/cpuset.cpus.effective': f'0-{vcpus-1}',
         'cat /proc/cmdline': kernel_command_line,
     }
     vm = self.CreateVm(responses)
@@ -458,12 +571,60 @@ class LinuxVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testNumCpusForBenchmarkDefaultCall(self):
     # shows that IsSmtEnabled is not called unless new optional parameter used
-    vm = self.CreateVm('32')
+    FLAGS['use_numcpu_multi_files'].parse(True)
+    responses = {
+        'ls /sys/fs/cgroup/cpuset.cpus.effective >> /dev/null 2>&1 || echo file_not_exist': (
+            ''
+        ),
+        'cat /sys/fs/cgroup/cpuset.cpus.effective': '0-31',
+    }
+    vm = self.CreateVm(responses)
     vm.IsSmtEnabled = mock.Mock()
     self.assertEqual(32, vm.NumCpusForBenchmark())
     vm.IsSmtEnabled.assert_not_called()
     self.assertEqual(32, vm.NumCpusForBenchmark(False))
     vm.IsSmtEnabled.assert_not_called()
+
+  def testNumCpusFromDifferentSources(self):
+    # Shows the extraction of number of CPUs from different sources.
+    FLAGS['use_numcpu_multi_files'].parse(True)
+    responses = {
+        'ls /sys/fs/cgroup/cpuset.cpus.effective >> /dev/null 2>&1 || echo file_not_exist': (
+            ''
+        ),
+        'cat /sys/fs/cgroup/cpuset.cpus.effective': '0-15,17-32',
+    }
+    vm = self.CreateVm(responses)
+    self.assertEqual(32, vm.NumCpusForBenchmark())
+    responses = {
+        'ls /sys/fs/cgroup/cpuset.cpus.effective >> /dev/null 2>&1 || echo file_not_exist': (
+            'file_not_exist'
+        ),
+        'ls /dev/cgroup/cpuset.cpus.effective >> /dev/null 2>&1 || echo file_not_exist': (
+            'file_not_exist'
+        ),
+        'ls /proc/self/status >> /dev/null 2>&1 || echo file_not_exist': '',
+        'cat /proc/self/status | grep Cpus_allowed_list': (
+            'Cpus_allowed_list:\t0-3,7-8'
+        ),
+    }
+    vm = self.CreateVm(responses)
+    self.assertEqual(6, vm.NumCpusForBenchmark())
+    responses = {
+        'ls /sys/fs/cgroup/cpuset.cpus.effective >> /dev/null 2>&1 || echo file_not_exist': (
+            'file_not_exist'
+        ),
+        'ls /dev/cgroup/cpuset.cpus.effective >> /dev/null 2>&1 || echo file_not_exist': (
+            'file_not_exist'
+        ),
+        'ls /proc/self/status >> /dev/null 2>&1 || echo file_not_exist': (
+            'file_not_exist'
+        ),
+        'ls /proc/cpuinfo >> /dev/null 2>&1 || echo file_not_exist': '',
+        'cat /proc/cpuinfo | grep processor | wc -l': '16',
+    }
+    vm = self.CreateVm(responses)
+    self.assertEqual(16, vm.NumCpusForBenchmark())
 
   def testBoot(self):
     vm = self.CreateVm(self.normal_boot_responses)
@@ -475,7 +636,6 @@ class LinuxVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
         'os_info': self.os_info,
         'cpu_arch': self.cpu_arch,
         'threads_per_core': 1,
-        'has_dpdk': False
     }
     self.assertEqual(expected_os_metadata, vm.os_metadata)
 
@@ -504,7 +664,8 @@ class LinuxVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
     names = vm._get_network_device_mtus()
     self.assertEqual({'eth0': '1500', 'eth1': '1500'}, names)
     mock_cmd = vm.RemoteHostCommandWithReturnCode
-    mock_cmd.assert_called_with('PATH="${PATH}":/usr/sbin ip link show up')
+    mock_cmd.assert_called_with('PATH="${PATH}":/usr/sbin ip link show up',
+                                stack_level=4)
 
   def testCpuVulnerabilitiesEmpty(self):
     self.assertEqual({}, self.CreateVm('').cpu_vulnerabilities.asdict)

@@ -105,6 +105,7 @@ class BaseNetworkSpec(object):
     self.zone = zone
     self.cidr = cidr
     self.machine_type = machine_type
+    self.subnet_name = None
 
   def __repr__(self):
     return '%s(%r)' % (self.__class__, self.__dict__)
@@ -184,6 +185,8 @@ class BaseNetwork(object):
     """Returns a key used to register Network instances."""
     if cls.CLOUD is None:
       raise errors.Error('Networks should have CLOUD attributes.')
+    if spec.subnet_name:
+      return (cls.CLOUD, spec.zone, spec.subnet_name)
     return (cls.CLOUD, spec.zone)
 
   @classmethod

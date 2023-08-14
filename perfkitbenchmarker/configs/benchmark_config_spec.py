@@ -31,6 +31,7 @@ from perfkitbenchmarker import key
 from perfkitbenchmarker import managed_memory_store
 from perfkitbenchmarker import non_relational_db
 from perfkitbenchmarker import placement_group
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import providers
 from perfkitbenchmarker import relational_db_spec
 from perfkitbenchmarker import spark_service
@@ -144,6 +145,7 @@ class _DpbServiceSpec(spec.BaseSpec):
                     dpb_service.UNMANAGED_DPB_SVC_YARN_CLUSTER,
                     dpb_service.UNMANAGED_SPARK_CLUSTER,
                     dpb_service.KUBERNETES_SPARK_CLUSTER,
+                    dpb_service.KUBERNETES_FLINK_CLUSTER,
                 ]
             }),
         'worker_group': (vm_group_decoders.VmGroupSpecDecoder, {}),
@@ -185,6 +187,14 @@ class _DpbServiceSpec(spec.BaseSpec):
             'none_ok': True
         }),
         'dataproc_serverless_max_executors': (option_decoders.IntDecoder, {
+            'default': None,
+            'none_ok': True
+        }),
+        'dataproc_serverless_memory': (option_decoders.IntDecoder, {
+            'default': None,
+            'none_ok': True
+        }),
+        'dataproc_serverless_memory_overhead': (option_decoders.IntDecoder, {
             'default': None,
             'none_ok': True
         }),
@@ -231,6 +241,8 @@ class _DpbServiceSpec(spec.BaseSpec):
 class _TpuGroupSpec(spec.BaseSpec):
   """Configurable options of a TPU."""
 
+  tpu_name: str
+
   def __init__(self,
                component_full_name,
                group_name,
@@ -256,7 +268,7 @@ class _TpuGroupSpec(spec.BaseSpec):
     result = super(_TpuGroupSpec, cls)._GetOptionDecoderConstructions()
     result.update({
         'cloud': (option_decoders.EnumDecoder, {
-            'valid_values': providers.VALID_CLOUDS
+            'valid_values': provider_info.VALID_CLOUDS
         }),
         'tpu_cidr_range': (option_decoders.StringDecoder, {
             'default': None
@@ -615,6 +627,8 @@ class _SparkServiceSpec(spec.BaseSpec):
 class _PlacementGroupSpecsDecoder(option_decoders.TypeVerifier):
   """Validates the placement_group_specs dictionary of a benchmark config object."""
 
+  cloud: str
+
   def __init__(self, **kwargs):
     super(_PlacementGroupSpecsDecoder, self).__init__(
         valid_types=(dict,), **kwargs)
@@ -725,6 +739,8 @@ class _ContainerSpecsDecoder(option_decoders.TypeVerifier):
 
 class _NodepoolSpec(spec.BaseSpec):
   """Configurable options of a Nodepool."""
+
+  vm_spec: option_decoders.PerCloudConfigSpec
 
   def __init__(self,
                component_full_name,
@@ -876,6 +892,10 @@ class _SandboxDecoder(option_decoders.TypeVerifier):
 class _ContainerClusterSpec(spec.BaseSpec):
   """Spec containing info needed to create a container cluster."""
 
+  cloud: str
+  vm_spec: option_decoders.PerCloudConfigSpec
+  nodepools: dict[str, _NodepoolSpec]
+
   def __init__(self, component_full_name, flag_values=None, **kwargs):
     super(_ContainerClusterSpec, self).__init__(
         component_full_name, flag_values=flag_values, **kwargs)
@@ -929,7 +949,7 @@ class _ContainerClusterSpec(spec.BaseSpec):
             'none_ok': True
         }),
         'cloud': (option_decoders.EnumDecoder, {
-            'valid_values': providers.VALID_CLOUDS
+            'valid_values': provider_info.VALID_CLOUDS
         }),
         'type': (option_decoders.StringDecoder, {
             'default': container_service.KUBERNETES,
@@ -1134,6 +1154,8 @@ class _TpuGroupsDecoder(option_decoders.TypeVerifier):
 class _CloudRedisSpec(spec.BaseSpec):
   """Specs needed to configure a cloud redis instance."""
 
+  redis_name: str
+
   def __init__(self, component_full_name, flag_values=None, **kwargs):
     super(_CloudRedisSpec, self).__init__(
         component_full_name, flag_values=flag_values, **kwargs)
@@ -1152,7 +1174,7 @@ class _CloudRedisSpec(spec.BaseSpec):
     result = super(_CloudRedisSpec, cls)._GetOptionDecoderConstructions()
     result.update({
         'cloud': (option_decoders.EnumDecoder, {
-            'valid_values': providers.VALID_CLOUDS
+            'valid_values': provider_info.VALID_CLOUDS
         }),
         'redis_name': (option_decoders.StringDecoder, {
             'default': None,
@@ -1217,6 +1239,8 @@ class _VPNServiceSpec(spec.BaseSpec):
     Since vpn_gateway may be across cloud providers we only create tunnel when
     vpn_gateway's are up and known
   """
+
+  name: str
 
   def __init__(self, component_full_name, flag_values=None, **kwargs):
     super(_VPNServiceSpec, self).__init__(
@@ -1318,8 +1342,20 @@ class _VPNServiceDecoder(option_decoders.TypeVerifier):
     return result
 
 
-class _AppGroupSpec(spec.BaseSpec):
-  """Configurable options of a AppService group."""
+class AppGroupSpec(spec.BaseSpec):
+  """Configurable options of a AppService group.
+
+    Attributes:
+    SPEC_TYPE: The class / spec name.
+    app_runtime: The runtime environment (e.g. java).
+    app_type: The type / workload of the app (e.g. echo).
+    appservice_count: The number of app services in the group.
+  """
+
+  SPEC_TYPE = 'AppGroupSpec'
+  app_runtime: str
+  app_type: str
+  appservice_count: int
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -1330,7 +1366,7 @@ class _AppGroupSpec(spec.BaseSpec):
       The pair specifies a decoder class and its __init__() keyword arguments
       to construct in order to decode the named option.
     """
-    result = super(_AppGroupSpec, cls)._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'app_runtime': (option_decoders.StringDecoder, {
             'default': None,
@@ -1349,7 +1385,7 @@ class _AppGroupSpec(spec.BaseSpec):
 
   @classmethod
   def _ApplyFlags(cls, config_values, flag_values):
-    super(_AppGroupSpec, cls)._ApplyFlags(config_values, flag_values)
+    super()._ApplyFlags(config_values, flag_values)
     if flag_values['appservice_count'].present:
       config_values['appservice_count'] = flag_values.appservice_count
     if flag_values['app_runtime'].present:
@@ -1375,7 +1411,7 @@ class _AppGroupsDecoder(option_decoders.TypeVerifier):
         BaseSpec constructors.
 
     Returns:
-     dict mapping app group name string to _AppGroupSpec.
+     dict mapping app group name string to AppGroupSpec.
 
     Raises:
       errors.Config.InvalidValue upon invalid input value.
@@ -1385,7 +1421,7 @@ class _AppGroupsDecoder(option_decoders.TypeVerifier):
                                            flag_values)
     result = {}
     for app_group_name, app_group_config in six.iteritems(app_group_configs):
-      result[app_group_name] = _AppGroupSpec(
+      result[app_group_name] = AppGroupSpec(
           '{0}.{1}'.format(
               self._GetOptionFullName(component_full_name), app_group_name),
           flag_values=flag_values,
@@ -1444,7 +1480,7 @@ class _MessagingServiceSpec(spec.BaseSpec):
     result = super()._GetOptionDecoderConstructions()
     result.update({
         'cloud': (option_decoders.EnumDecoder, {
-            'valid_values': providers.VALID_CLOUDS}),
+            'valid_values': provider_info.VALID_CLOUDS}),
         # TODO(odiego): Add support for push delivery mechanism
         'delivery': (option_decoders.EnumDecoder, {
             'valid_values': ('pull',)}),
@@ -1513,7 +1549,7 @@ class _DataDiscoveryServiceSpec(spec.BaseSpec):
     result = super()._GetOptionDecoderConstructions()
     result.update({
         'cloud': (option_decoders.EnumDecoder, {
-            'valid_values': providers.VALID_CLOUDS
+            'valid_values': provider_info.VALID_CLOUDS
         }),
         'service_type': (
             option_decoders.EnumDecoder,
@@ -1604,6 +1640,8 @@ class BenchmarkConfigSpec(spec.BaseSpec):
     vm_groups: dict mapping VM group name string to _VmGroupSpec. Configurable
       options for each VM group used by the benchmark.
   """
+
+  vm_groups: dict[str, vm_group_decoders.VmGroupSpec]
 
   def __init__(self, component_full_name, expected_os_types=None, **kwargs):
     """Initializes a BenchmarkConfigSpec.
@@ -1718,7 +1756,13 @@ class BenchmarkConfigSpec(spec.BaseSpec):
         'key': (_KeyDecoder, {
             'default': None,
             'none_ok': True,
-        })
+        }),
+        # A place to hold temporary data
+        'temporary': (option_decoders.TypeVerifier, {
+            'default': None,
+            'none_ok': True,
+            'valid_types': (dict,)
+        }),
     })
     return result
 

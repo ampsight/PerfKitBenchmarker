@@ -24,6 +24,7 @@ from perfkitbenchmarker import configs
 from perfkitbenchmarker import context
 from perfkitbenchmarker import flag_alias
 from perfkitbenchmarker import pkb  # pylint: disable=unused-import # noqa
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import providers
 from perfkitbenchmarker import static_virtual_machine as static_vm
 from perfkitbenchmarker.configs import benchmark_config_spec
@@ -120,7 +121,7 @@ class _BenchmarkSpecTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
     super(_BenchmarkSpecTestCase, self).setUp()
-    FLAGS.cloud = providers.GCP
+    FLAGS.cloud = provider_info.GCP
     FLAGS.temp_dir = 'tmp'
     FLAGS.ignore_package_requirements = True
     self.addCleanup(context.SetThreadBenchmarkSpec, None)
@@ -193,28 +194,6 @@ class ConstructSpannerTestCase(_BenchmarkSpecTestCase):
                      f'regional-{gcp_spanner._DEFAULT_REGION}')
     self.assertEqual(spanner_instance.nodes, gcp_spanner._DEFAULT_NODES)
     self.assertFalse(spanner_instance.user_managed)
-
-  @flagsaver.flagsaver(run_uri='test_uri')
-  def testInitializationUserManaged(self):
-    test_spec = inspect.cleandoc("""
-    cloud_spanner_ycsb:
-      description: Sample spanner benchmark
-      relational_db:
-        spanner_instance_id: test_instance
-        spanner_database_id: test_database
-        engine: spanner-googlesql
-    """)
-    self.test_bm_spec = pkb_common_test_case.CreateBenchmarkSpecFromYaml(
-        yaml_string=test_spec, benchmark_name='cloud_spanner_ycsb')
-
-    self.test_bm_spec.ConstructRelationalDb()
-
-    spanner_instance = self.test_bm_spec.relational_db
-    self.assertIsInstance(spanner_instance,
-                          gcp_spanner.GoogleSqlGcpSpannerInstance)
-    self.assertEqual(spanner_instance.instance_id, 'test_instance')
-    self.assertEqual(spanner_instance.database, 'test_database')
-    self.assertTrue(spanner_instance.user_managed)
 
   @flagsaver.flagsaver(run_uri='test_uri')
   def testRestoreInstanceCopiedFromPreviousSpec(self):

@@ -30,7 +30,7 @@ from perfkitbenchmarker import benchmark_spec
 from perfkitbenchmarker import context
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import os_types
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.configs import benchmark_config_spec
@@ -67,6 +67,23 @@ _FAKE_DISK_METADATA = {
     'sourceImage': '',
     'type': 'pd-standard'
 }
+
+
+_COMPUTE_DESCRIBE_RUNNING = r"""{
+  "id": "758013403901965936",
+  "networkInterfaces": [
+    {
+      "accessConfigs": [
+        {
+          "natIP": "35.227.176.232"
+        }
+      ],
+      "networkIP": "10.138.0.113"
+    }
+  ],
+  "status": "RUNNING"
+}
+"""
 
 
 @contextlib.contextmanager
@@ -284,6 +301,49 @@ class GceVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
                        f'--project p --quiet --zones {vm.zone}')
       self.assertTrue(vm.spot_early_termination)
 
+  @parameterized.named_parameters(
+      (
+          'is_deleted',
+          '',
+          """ERROR: (gcloud.compute.instances.describe) Could not fetch resource:
+ - The resource 'projects/p3rf-cluster-boot/zones/us-west1-a/instances/pkb-c322006c78-0' was not found""",
+          1,
+          False,
+      ),
+      ('exists', _COMPUTE_DESCRIBE_RUNNING, '', 0, True),
+      (
+          'is_deleted_staging_http',
+          '',
+          r"""{
+  "error": {
+    "code": 404,
+    "message": "The resource 'projects/sharp-airway-384/zones/us-central1-jq1/instances/pkb-8d45d024-0' was not found",
+    "errors": [
+      {
+        "message": "The resource 'projects/sharp-airway-384/zones/us-central1-jq1/instances/pkb-8d45d024-0' was not found",
+        "domain": "global",
+        "reason": "notFound",
+        "debugInfo": "java.lang.Exception\n\tat com.google.cloud.control.common.publicerrors.PublicErrorProtoUtils.newErrorBuilder(PublicErrorProtoUtils.java:1919)\n\tat com.google.cloud.control.common.publicerrors.PublicErrorProtoUtils.createResourceNotFoundError(PublicErrorProtoUtils.java:184)\n\tat com.google.cloud.control.frontend.PublicResourceRepository.getEntityKeyOrThrow(PublicResourceRepository.java:229)\n\tat com.google.cloud.control.frontend.PublicResourceRepository.loadResource(PublicResourceRepository.java:174)\n\tat com.google.cloud.control.frontend.action.SimpleCustomMixerGetActionHandler.getTargetEntity(SimpleCustomMixerGetActionHandler.java:94)\n\tat com.google.cloud.control.frontend.action.SimpleCustomMixerGetActionHandler.performRead(SimpleCustomMixerGetActionHandler.java:104)\n\tat com.google.cloud.control.frontend.action.CustomMixerReadActionExecutor$InnerHandler.runAttempt(CustomMixerReadActionExecutor.java:273)\n\tat com.google.cloud.control.frontend.action.CustomMixerReadActionExecutor$InnerHandler.runAttempt(CustomMixerReadActionExecutor.java:219)\n\tat com.google.cloud.cluster.metastore.RetryingMetastoreTransactionExecutor$1.runAttempt(RetryingMetastoreTransactionExecutor.java:79)\n\tat com.google.cloud.cluster.metastore.MetastoreRetryLoop.runHandler(MetastoreRetryLoop.java:523)\n\t...Stack trace is shortened.\n"
+      }
+    ]
+  }
+}""",
+          1,
+          False,
+      ),
+  )
+  def test_exists(self, stdout, stderr, return_code, expected):
+    spec = gce_virtual_machine.GceVmSpec(
+        _COMPONENT,
+        machine_type='test_machine_type',
+        preemptible=True,
+        project='p',
+    )
+    vm = pkb_common_test_case.TestGceVirtualMachine(spec)
+    fake_rets = [(stdout, stderr, return_code)]
+    with PatchCriticalObjects(fake_rets):
+      self.assertEqual(vm._Exists(), expected)
+
 
 def _CreateFakeDiskMetadata(image):
   fake_disk = copy.copy(_FAKE_DISK_METADATA)
@@ -326,9 +386,10 @@ class GceVirtualMachineOsTypesTestCase(pkb_common_test_case.PkbCommonTestCase):
       fake_rets.append((json.dumps(_CreateFakeDiskMetadata(fake_image)), '', 0))
     return fake_rets
 
-  def testCreateUbuntu1804(self):
-    vm_class = virtual_machine.GetVmClass(providers.GCP, os_types.UBUNTU1804)
-    fake_image = 'fake-ubuntu1804'
+  def testCreateUbuntu2004(self):
+    vm_class = virtual_machine.GetVmClass(provider_info.GCP,
+                                          os_types.UBUNTU2004)
+    fake_image = 'fake-ubuntu2004'
     with PatchCriticalObjects(
         self._CreateFakeReturnValues(fake_image)) as issue_command:
       vm = vm_class(self.spec)
@@ -337,19 +398,20 @@ class GceVirtualMachineOsTypesTestCase(pkb_common_test_case.PkbCommonTestCase):
       command_string = ' '.join(issue_command.call_args[0][0])
 
       self.assertEqual(issue_command.call_count, 1)
-      self.assertEqual(vm.GetDefaultImageFamily(), 'ubuntu-1804-lts')
+      self.assertEqual(vm.GetDefaultImageFamily(False), 'ubuntu-2004-lts')
+      self.assertEqual(vm.GetDefaultImageFamily(True), 'ubuntu-2004-lts-arm64')
       self.assertEqual(vm.GetDefaultImageProject(), 'ubuntu-os-cloud')
       self.assertTrue(vm.SupportGVNIC())
       self.assertIn('gcloud compute instances create', command_string)
       self.assertIn(
-          '--image-family ubuntu-1804-lts --image-project ubuntu-os-cloud',
+          '--image-family ubuntu-2004-lts --image-project ubuntu-os-cloud',
           command_string)
       self.assertNotIn('--boot-disk-size', command_string)
       self.assertNotIn('--boot-disk-type', command_string)
       vm._PostCreate()
       self.assertEqual(issue_command.call_count, 3)
       self.assertDictContainsSubset({'image': fake_image,
-                                     'image_family': 'ubuntu-1804-lts',
+                                     'image_family': 'ubuntu-2004-lts',
                                      'image_project': 'ubuntu-os-cloud',
                                      'boot_disk_size': '10',
                                      'boot_disk_type': 'pd-standard'},
@@ -357,8 +419,9 @@ class GceVirtualMachineOsTypesTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testCreateUbuntuInCustomProject(self):
     """Test simulating passing --image and --image_project."""
-    vm_class = virtual_machine.GetVmClass(providers.GCP, os_types.UBUNTU1804)
-    fake_image = 'fake-ubuntu1804'
+    vm_class = virtual_machine.GetVmClass(provider_info.GCP,
+                                          os_types.UBUNTU2004)
+    fake_image = 'fake-ubuntu2004'
     fake_image_project = 'fake-project'
     spec = gce_virtual_machine.GceVmSpec(_COMPONENT,
                                          machine_type='fake-machine-type',
@@ -374,7 +437,7 @@ class GceVirtualMachineOsTypesTestCase(pkb_common_test_case.PkbCommonTestCase):
       self.assertEqual(issue_command.call_count, 1)
       self.assertIn('gcloud compute instances create', command_string)
       self.assertIn(
-          '--image fake-ubuntu1804 --image-project fake-project',
+          '--image fake-ubuntu2004 --image-project fake-project',
           command_string)
       self.assertNotIn('--image-family', command_string)
       vm._PostCreate()
@@ -387,8 +450,9 @@ class GceVirtualMachineOsTypesTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testCreateUbuntuInCustomDisk(self):
     """Test simulating passing --image and --image_project."""
-    vm_class = virtual_machine.GetVmClass(providers.GCP, os_types.UBUNTU1804)
-    fake_image = 'fake-ubuntu1804'
+    vm_class = virtual_machine.GetVmClass(provider_info.GCP,
+                                          os_types.UBUNTU2004)
+    fake_image = 'fake-ubuntu2004'
     fake_image_project = 'fake-project'
     spec = gce_virtual_machine.GceVmSpec(_COMPONENT,
                                          machine_type='fake-machine-type',
@@ -418,7 +482,7 @@ class GceVirtualMachineOsTypesTestCase(pkb_common_test_case.PkbCommonTestCase):
       self.assertNotIn('image_family', vm_metadata)
 
   def testCreateRhel7CustomImage(self):
-    vm_class = virtual_machine.GetVmClass(providers.GCP, os_types.RHEL7)
+    vm_class = virtual_machine.GetVmClass(provider_info.GCP, os_types.RHEL7)
     fake_image = 'fake-custom-rhel-image'
     spec = gce_virtual_machine.GceVmSpec(_COMPONENT,
                                          machine_type='fake-machine-type',
@@ -443,7 +507,7 @@ class GceVirtualMachineOsTypesTestCase(pkb_common_test_case.PkbCommonTestCase):
       self.assertNotIn('image_family', vm_metadata)
 
   def testCreateCentOs7CustomImage(self):
-    vm_class = virtual_machine.GetVmClass(providers.GCP, os_types.CENTOS7)
+    vm_class = virtual_machine.GetVmClass(provider_info.GCP, os_types.CENTOS7)
     fake_image = 'fake-custom-centos7-image'
     spec = gce_virtual_machine.GceVmSpec(_COMPONENT,
                                          machine_type='fake-machine-type',
@@ -468,7 +532,7 @@ class GceVirtualMachineOsTypesTestCase(pkb_common_test_case.PkbCommonTestCase):
       self.assertNotIn('image_family', vm_metadata)
 
   def testCosVm(self):
-    vm_class = virtual_machine.GetVmClass(providers.GCP, os_types.COS)
+    vm_class = virtual_machine.GetVmClass(provider_info.GCP, os_types.COS)
     spec = gce_virtual_machine.GceVmSpec(_COMPONENT,
                                          machine_type='fake-machine-type')
     fake_image = 'fake_cos_image'
@@ -496,7 +560,7 @@ class GCEVMFlagsTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
     super(GCEVMFlagsTestCase, self).setUp()
-    FLAGS.cloud = providers.GCP
+    FLAGS.cloud = provider_info.GCP
     FLAGS.gcloud_path = 'test_gcloud'
     FLAGS.run_uri = 'aaaaaa'
     FLAGS.gcp_instance_metadata = []
@@ -682,9 +746,10 @@ class GCEVMCreateTestCase(pkb_common_test_case.PkbCommonTestCase):
               'memory': '1.0GiB',
           })
       vm = pkb_common_test_case.TestGceVirtualMachine(spec)
-      with self.assertRaises(
-          errors.Benchmarks.QuotaFailure.RateLimitExceededError):
+      with self.assertRaises(vm_util.RetriesExceededRetryError) as e:
         vm._Create()
+      self.assertIs(type(e.exception.__cause__),
+                    errors.Benchmarks.QuotaFailure.RateLimitExceededError)
       self.assertEqual(issue_command.call_count,
                        util.RATE_LIMITED_MAX_RETRIES + 1)
 
@@ -766,6 +831,14 @@ class GCEVMCreateTestCase(pkb_common_test_case.PkbCommonTestCase):
           'fake_stderr':
               ('ERROR: (gcloud.compute.instances.create) Could not fetch'
                'resource:\n - The service is currently unavailable.'),
+          'expected_error': errors.Benchmarks.KnownIntermittentError
+      }, {
+          'testcase_name':
+              'duplicate_create_request',
+          'fake_stderr':
+              ('ERROR: (gcloud.compute.instances.create) HTTPError 409: '
+               'The resource "projects/control-plane-tests/zones/europe-west6-b/'
+               'instances/pkb-5b778a551293-0" already exists'),
           'expected_error': errors.Benchmarks.KnownIntermittentError
       })
   def testCreateVMErrorCases(self, fake_stderr, expected_error):
@@ -945,7 +1018,7 @@ class GvnicTest(GceVirtualMachineTestCase):
   def setUp(self):
     super(GvnicTest, self).setUp()
     vm_spec = gce_virtual_machine.GceVmSpec('test_component', project='test')
-    self.vm = gce_virtual_machine.Ubuntu1804BasedGceVirtualMachine(vm_spec)
+    self.vm = gce_virtual_machine.Ubuntu2004BasedGceVirtualMachine(vm_spec)
     self.vm.HasPackage = mock.Mock(return_value=False)
     self.mock_cmd = mock.Mock()
     self.vm.RemoteCommand = self.mock_cmd

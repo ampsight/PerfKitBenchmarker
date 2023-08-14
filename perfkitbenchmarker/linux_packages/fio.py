@@ -83,13 +83,13 @@ def _Install(vm):
 
 def YumInstall(vm):
   """Installs the fio package on the VM."""
-  vm.InstallPackages('libaio-devel libaio bc zlib-devel')
+  vm.InstallPackages('libaio-devel numactl-devel libaio bc zlib-devel')
   _Install(vm)
 
 
 def AptInstall(vm):
   """Installs the fio package on the VM."""
-  vm.InstallPackages('libaio-dev libaio1 bc zlib1g-dev')
+  vm.InstallPackages('libaio-dev libnuma-dev libaio1 bc zlib1g-dev')
   _Install(vm)
 
 
@@ -219,12 +219,12 @@ def ParseResults(job_file, fio_json_result, base_metadata=None,
           else:
             return value
 
-        percentiles = clat_section['percentile']
         lat_statistics = [('min', _ConvertClat(clat_section['min'])),
                           ('max', _ConvertClat(clat_section['max'])),
                           ('mean', _ConvertClat(clat_section['mean'])),
                           ('stddev', _ConvertClat(clat_section['stddev']))]
         if not skip_latency_individual_stats:
+          percentiles = clat_section['percentile']
           lat_statistics += [('p1', _ConvertClat(percentiles['1.000000'])),
                              ('p5', _ConvertClat(percentiles['5.000000'])),
                              ('p10', _ConvertClat(percentiles['10.000000'])),

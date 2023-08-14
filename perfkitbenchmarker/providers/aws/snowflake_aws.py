@@ -18,23 +18,21 @@ AWS. Relevant functionality is in providers/snowflake/Snowflake.
 """
 
 from absl import flags
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker.providers.snowflake import snowflake
 
 FLAGS = flags.FLAGS
 # Filename for JDBC client associated with this provider:
-# snowflake-jdbc-client-2.0.jar
+# snowflake-jdbc-client-2.5-standard.jar
 
 
 class Snowflake(snowflake.Snowflake):
   """Class representing a Snowflake Data Warehouse Instance hosted on AWS."""
-  CLOUD = providers.AWS
+  CLOUD = provider_info.AWS
   SERVICE_TYPE = 'snowflake_aws'
 
 
 class Snowflakeexternal(snowflake.Snowflake):
   """Class representing Snowflake External Warehouses on AWS."""
-  CLOUD = providers.AWS
+  CLOUD = provider_info.AWS
   SERVICE_TYPE = 'snowflakeexternal_aws'
-
-

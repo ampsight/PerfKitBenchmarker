@@ -34,6 +34,7 @@ import logging
 import posixpath
 import re
 import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
 from absl import flags
@@ -44,7 +45,7 @@ from perfkitbenchmarker import flag_util
 from perfkitbenchmarker import linux_virtual_machine as linux_vm
 from perfkitbenchmarker import os_types
 from perfkitbenchmarker import placement_group
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
@@ -61,7 +62,27 @@ import yaml
 
 FLAGS = flags.FLAGS
 
-# 2h timeout for LM notificaiton
+# GCE Instance life cycle:
+# https://cloud.google.com/compute/docs/instances/instance-life-cycle
+RUNNING = 'RUNNING'
+TERMINATED = 'TERMINATED'
+INSTANCE_DELETED_STATUSES = frozenset([TERMINATED])
+INSTANCE_TRANSITIONAL_STATUSES = frozenset([
+    'PROVISIONING',
+    'STAGING',
+    'STOPPING',
+    'REPAIRING',
+    'SUSPENDING',
+])
+INSTANCE_EXISTS_STATUSES = INSTANCE_TRANSITIONAL_STATUSES | frozenset(
+    [RUNNING, 'SUSPENDED', 'STOPPED']
+)
+INSTANCE_KNOWN_STATUSES = INSTANCE_EXISTS_STATUSES | INSTANCE_DELETED_STATUSES
+
+# Gcloud operations are complete when their 'status' is 'DONE'.
+OPERATION_DONE = 'DONE'
+
+# 2h timeout for LM notification
 LM_NOTIFICATION_TIMEOUT_SECONDS = 60 * 60 * 2
 
 NVME = 'NVME'
@@ -73,7 +94,8 @@ _FAILED_TO_START_DUE_TO_PREEMPTION = (
     'Instance failed to start due to preemption.'
 )
 _GCE_VM_CREATE_TIMEOUT = 1200
-_GCE_NVIDIA_GPU_PREFIX = 'nvidia-tesla-'
+_GCE_NVIDIA_GPU_PREFIX = 'nvidia-'
+_GCE_NVIDIA_TESLA_GPU_PREFIX = 'nvidia-tesla-'
 _SHUTDOWN_SCRIPT = 'su "{user}" -c "echo | gsutil cp - {preempt_marker}"'
 METADATA_PREEMPT_URI = (
     'http://metadata.google.internal/computeMetadata/v1/instance/preempted'
@@ -85,7 +107,51 @@ _METADATA_PREEMPT_CMD = (
 _MACHINE_TYPE_PREFIX_TO_ARM_ARCH = {
     't2a': 'neoverse-n1',
 }
+# The A2 and A3 machine families, unlike some other GCP offerings, have a
+# preset type and number of GPUs, so we set those attributes directly from the
+# machine_type.
+_FIXED_GPU_MACHINE_TYPES = {
+    # A100 GPUs
+    # https://cloud.google.com/blog/products/compute/announcing-google-cloud-a2-vm-family-based-on-nvidia-a100-gpu
+    'a2-highgpu-1g': (virtual_machine.GPU_A100, 1),
+    'a2-highgpu-2g': (virtual_machine.GPU_A100, 2),
+    'a2-highgpu-4g': (virtual_machine.GPU_A100, 4),
+    'a2-highgpu-8g': (virtual_machine.GPU_A100, 8),
+    'a2-megagpu-16g': (virtual_machine.GPU_A100, 16),
+    'a2-ultragpu-1g': (virtual_machine.GPU_A100, 1),
+    'a2-ultragpu-2g': (virtual_machine.GPU_A100, 2),
+    'a2-ultragpu-4g': (virtual_machine.GPU_A100, 4),
+    'a2-ultragpu-8g': (virtual_machine.GPU_A100, 8),
+    # H100 GPUs
+    'a3-highgpu-1g': (virtual_machine.GPU_H100, 1),
+    'a3-highgpu-2g': (virtual_machine.GPU_H100, 2),
+    'a3-highgpu-4g': (virtual_machine.GPU_H100, 4),
+    'a3-highgpu-8g': (virtual_machine.GPU_H100, 8),
+    # L4 GPUs
+    # https://cloud.google.com/compute/docs/accelerator-optimized-machines#g2-vms
+    'g2-standard-4': (virtual_machine.GPU_L4, 1),
+    'g2-standard-8': (virtual_machine.GPU_L4, 1),
+    'g2-standard-12': (virtual_machine.GPU_L4, 1),
+    'g2-standard-16': (virtual_machine.GPU_L4, 1),
+    'g2-standard-24': (virtual_machine.GPU_L4, 2),
+    'g2-standard-32': (virtual_machine.GPU_L4, 1),
+    'g2-standard-48': (virtual_machine.GPU_L4, 4),
+    'g2-standard-96': (virtual_machine.GPU_L4, 8),
+}
+
 FIVE_MINUTE_TIMEOUT = 300
+
+
+class GceRetryDescribeOperationsError(Exception):
+  """Exception for retrying Exists().
+
+  When there is an internal error with 'describe operations' or the
+  'instances create' operation has not yet completed.
+  """
+
+
+class GceServiceUnavailableError(Exception):
+  """Error for retrying _Exists when the describe output indicates that 'The service is currently unavailable'."""
 
 
 class GceVmSpec(virtual_machine.BaseVmSpec):
@@ -100,13 +166,13 @@ class GceVmSpec(virtual_machine.BaseVmSpec):
     preemptible: boolean. True if the VM should be preemptible, False otherwise.
     project: string or None. The project to create the VM in.
     image_family: string or None. The image family used to locate the image.
-    image_project: string or None. The image project used to locate the specifed
-      image.
+    image_project: string or None. The image project used to locate the
+      specified image.
     boot_disk_size: None or int. The size of the boot disk in GB.
     boot_disk_type: string or None. The type of the boot disk.
   """
 
-  CLOUD = providers.GCP
+  CLOUD = provider_info.GCP
 
   def __init__(self, *args, **kwargs):
     self.num_local_ssds: int = None
@@ -121,6 +187,7 @@ class GceVmSpec(virtual_machine.BaseVmSpec):
     self.threads_per_core: int = None
     self.gce_tags: List[str] = None
     self.min_node_cpus: int = None
+    self.subnet_name: str = None
     super(GceVmSpec, self).__init__(*args, **kwargs)
 
     if isinstance(
@@ -140,24 +207,6 @@ class GceVmSpec(virtual_machine.BaseVmSpec):
     else:
       self.cpus = None
       self.memory = None
-
-    # The A2 machine family, unlike other GCP offerings has a preset number of
-    # GPUs, so we set them directly from the machine_type
-    # https://cloud.google.com/blog/products/compute/announcing-google-cloud-a2-vm-family-based-on-nvidia-a100-gpu
-    if self.machine_type and self.machine_type.startswith('a2-'):
-      a2_lookup = {
-          'a2-highgpu-1g': 1,
-          'a2-highgpu-2g': 2,
-          'a2-highgpu-4g': 4,
-          'a2-highgpu-8g': 8,
-          'a2-megagpu-16g': 16,
-          'a2-ultragpu-1g': 1,
-          'a2-ultragpu-2g': 2,
-          'a2-ultragpu-4g': 4,
-          'a2-ultragpu-8g': 8,
-      }
-      self.gpu_count = a2_lookup[self.machine_type]
-      self.gpu_type = virtual_machine.GPU_A100
 
   @classmethod
   def _ApplyFlags(cls, config_values, flag_values):
@@ -216,47 +265,49 @@ class GceVmSpec(virtual_machine.BaseVmSpec):
           arguments to construct in order to decode the named option.
     """
     result = super(GceVmSpec, cls)._GetOptionDecoderConstructions()
-    result.update(
-        {
-            'machine_type': (
-                custom_virtual_machine_spec.MachineTypeDecoder,
-                {'default': None},
-            ),
-            'ssd_interface': (
-                option_decoders.StringDecoder,
-                {'default': 'SCSI'},
-            ),
-            'num_local_ssds': (
-                option_decoders.IntDecoder,
-                {'default': 0, 'min': 0},
-            ),
-            'preemptible': (option_decoders.BooleanDecoder, {'default': False}),
-            'boot_disk_size': (option_decoders.IntDecoder, {'default': None}),
-            'boot_disk_type': (
-                option_decoders.StringDecoder,
-                {'default': None},
-            ),
-            'project': (option_decoders.StringDecoder, {'default': None}),
-            'image_family': (option_decoders.StringDecoder, {'default': None}),
-            'image_project': (option_decoders.StringDecoder, {'default': None}),
-            'node_type': (
-                option_decoders.StringDecoder,
-                {'default': 'n1-node-96-624'},
-            ),
-            'min_cpu_platform': (
-                option_decoders.StringDecoder,
-                {'default': None},
-            ),
-            'threads_per_core': (option_decoders.IntDecoder, {'default': None}),
-            'gce_tags': (
-                option_decoders.ListDecoder,
-                {
-                    'item_decoder': option_decoders.StringDecoder(),
-                    'default': None,
-                },
-            ),
-        }
-    )
+    result.update({
+        'machine_type': (
+            custom_virtual_machine_spec.MachineTypeDecoder,
+            {'default': None},
+        ),
+        'ssd_interface': (
+            option_decoders.StringDecoder,
+            {'default': 'SCSI'},
+        ),
+        'num_local_ssds': (
+            option_decoders.IntDecoder,
+            {'default': 0, 'min': 0},
+        ),
+        'preemptible': (option_decoders.BooleanDecoder, {'default': False}),
+        'boot_disk_size': (option_decoders.IntDecoder, {'default': None}),
+        'boot_disk_type': (
+            option_decoders.StringDecoder,
+            {'default': None},
+        ),
+        'project': (option_decoders.StringDecoder, {'default': None}),
+        'image_family': (option_decoders.StringDecoder, {'default': None}),
+        'image_project': (option_decoders.StringDecoder, {'default': None}),
+        'node_type': (
+            option_decoders.StringDecoder,
+            {'default': 'n1-node-96-624'},
+        ),
+        'min_cpu_platform': (
+            option_decoders.StringDecoder,
+            {'default': None},
+        ),
+        'threads_per_core': (option_decoders.IntDecoder, {'default': None}),
+        'gce_tags': (
+            option_decoders.ListDecoder,
+            {
+                'item_decoder': option_decoders.StringDecoder(),
+                'default': None,
+            },
+        ),
+        'subnet_name': (
+            option_decoders.StringDecoder,
+            {'none_ok': True, 'default': None},
+        ),
+    })
     return result
 
 
@@ -382,9 +433,13 @@ def GenerateAcceleratorSpecString(accelerator_type, accelerator_count):
     String to be used by gcloud to attach accelerators to a VM.
     Must be prepended by the flag '--accelerator'.
   """
-  gce_accelerator_type = (
-      FLAGS.gce_accelerator_type_override
-      or _GCE_NVIDIA_GPU_PREFIX + accelerator_type
+  gce_accelerator_type = FLAGS.gce_accelerator_type_override or (
+      (
+          _GCE_NVIDIA_TESLA_GPU_PREFIX
+          if accelerator_type in virtual_machine.TESLA_GPU_TYPES
+          else _GCE_NVIDIA_GPU_PREFIX
+      )
+      + accelerator_type
   )
   return 'type={0},count={1}'.format(gce_accelerator_type, accelerator_count)
 
@@ -401,7 +456,7 @@ def GetArmArchitecture(machine_type):
 class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
   """Object representing a Google Compute Engine Virtual Machine."""
 
-  CLOUD = providers.GCP
+  CLOUD = provider_info.GCP
 
   DEFAULT_IMAGE = None
   BOOT_DISK_SIZE_GB = None
@@ -432,6 +487,9 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     """
     super(GceVirtualMachine, self).__init__(vm_spec)
     self.boot_metadata = {}
+    self.boot_metadata_from_file = {}
+    if self.boot_startup_script:
+      self.boot_metadata_from_file['startup-script'] = self.boot_startup_script
     self.ssd_interface = vm_spec.ssd_interface
     self.cpus = vm_spec.cpus
     self.image = self.image or self.DEFAULT_IMAGE
@@ -441,10 +499,10 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.spot_early_termination = False
     self.preemptible_status_code = None
     self.project = vm_spec.project or util.GetDefaultProject()
-    self.image_family = vm_spec.image_family or self.GetDefaultImageFamily()
     self.image_project = vm_spec.image_project or self.GetDefaultImageProject()
     self.backfill_image = False
     self.mtu: Optional[int] = FLAGS.mtu
+    self.subnet_name = vm_spec.subnet_name
     self.network = self._GetNetwork()
     self.firewall = gce_network.GceFirewall.GetFirewall()
     self.boot_disk_size = vm_spec.boot_disk_size or self.BOOT_DISK_SIZE_GB
@@ -461,6 +519,13 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.gce_tags = vm_spec.gce_tags
     self.gce_network_tier = FLAGS.gce_network_tier
     self.gce_nic_type = FLAGS.gce_nic_type
+
+    # For certain machine families, we need to explicitly set the GPU type
+    # and counts. See the _FIXED_GPU_MACHINE_TYPES dictionary for more details.
+    if self.machine_type and self.machine_type in _FIXED_GPU_MACHINE_TYPES:
+      self.gpu_type = _FIXED_GPU_MACHINE_TYPES[self.machine_type][0]
+      self.gpu_count = _FIXED_GPU_MACHINE_TYPES[self.machine_type][1]
+
     if not self.SupportGVNIC():
       logging.warning('Changing gce_nic_type to VIRTIO_NET')
       self.gce_nic_type = 'VIRTIO_NET'
@@ -494,20 +559,9 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
       # Assign host_arch to avoid running detect_host on ARM
       self.host_arch = arm_arch
       self.is_aarch64 = True
-
-      if 'arm64' not in self.image_family:
-        arm_image_family = f'{self.image_family}-arm64'
-        logging.warning(
-            'ARM image must be used; changing image to %s',
-            arm_image_family,
-        )
-        self.image_family = arm_image_family
-
-    # Reset image when running client-server benchmarks where client must be x86
-    if not arm_arch and self.image_family and 'arm64' in self.image_family:
-      logging.warning('Using default image and project for non-ARM VM')
-      self.image_family = self.GetDefaultImageFamily()  # pylint: disable=assignment-from-none
-      self.image_project = self.GetDefaultImageProject()  # pylint: disable=assignment-from-none
+    self.image_family = vm_spec.image_family or self.GetDefaultImageFamily(
+        self.is_aarch64
+    )
 
   def _GetNetwork(self):
     """Returns the GceNetwork to use."""
@@ -530,6 +584,9 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     args = ['compute', 'instances', 'create', self.name]
 
     cmd = util.GcloudCommand(self, *args)
+    cmd.flags['async'] = True
+    if gcp_flags.GCE_CREATE_LOG_HTTP.value:
+      cmd.flags['log-http'] = True
 
     # Compute all flags requiring alpha first. Then if any flags are different
     # between alpha and GA, we can set the appropriate ones.
@@ -539,7 +596,14 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
       )
       cmd.flags['network-performance-configs'] = network_performance_configs
 
-    if self.on_host_maintenance:
+    if gcp_flags.GCE_CONFIDENTIAL_COMPUTE.value:
+      # TODO(pclay): remove when on-host-maintenance gets promoted to GA
+      cmd.use_alpha_gcloud = True
+      if gcp_flags.GCE_CONFIDENTIAL_COMPUTE_TYPE.value == 'sev':
+        cmd.flags.update({'confidential-compute': True})
+      cmd.flags.update({'on-host-maintenance': 'TERMINATE'})
+
+    elif self.on_host_maintenance:
       # TODO(pclay): remove when on-host-maintenance gets promoted to GA
       maintenance_flag = 'maintenance-policy'
       if cmd.use_alpha_gcloud:
@@ -550,16 +614,24 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     # This flag is mutually exclusive with any of these flags:
     # --address, --network, --network-tier, --subnet, --private-network-ip.
     # gcloud compute instances create ... --network-interface=
-    ni_args = []
-    if self.network.subnet_resource is not None:
-      ni_args.append(f'subnet={self.network.subnet_resource.name}')
-    else:
-      ni_args.append(f'network={self.network.network_resource.name}')
-    ni_args.append(f'network-tier={self.gce_network_tier.upper()}')
-    ni_args.append(f'nic-type={self.gce_nic_type.upper()}')
+    common_ni_args = [
+        f'network-tier={self.gce_network_tier.upper()}',
+        f'nic-type={self.gce_nic_type.upper()}',
+    ]
     if not self.assign_external_ip:
-      ni_args.append('no-address')
-    cmd.flags['network-interface'] = ','.join(ni_args)
+      common_ni_args.append('no-address')
+    if self.network.subnet_resources:
+      for subnet_resource in self.network.subnet_resources:
+        cmd.additional_flags += [
+            '--network-interface',
+            ','.join([f'subnet={subnet_resource.name}'] + common_ni_args),
+        ]
+    else:
+      for network_resource in self.network.network_resources:
+        cmd.additional_flags += [
+            '--network-interface',
+            ','.join([f'network={network_resource.name}'] + common_ni_args),
+        ]
 
     if self.image:
       cmd.flags['image'] = self.image
@@ -584,8 +656,11 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     if self.threads_per_core:
       cmd.flags['threads-per-core'] = self.threads_per_core
 
-    if self.gpu_count and self.machine_type and 'a2-' not in self.machine_type:
-      # A2 machine type already has predefined GPU type and count.
+    if (
+        self.gpu_count
+        and self.machine_type
+        and self.machine_type not in _FIXED_GPU_MACHINE_TYPES
+    ):
       cmd.flags['accelerator'] = GenerateAcceleratorSpecString(
           self.gpu_type, self.gpu_count
       )
@@ -607,6 +682,8 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
       )
 
     metadata_from_file = {'sshKeys': ssh_keys_path}
+    if self.boot_metadata_from_file:
+      metadata_from_file.update(self.boot_metadata_from_file)
     parsed_metadata_from_file = flag_util.ParseKeyValuePairs(
         FLAGS.gcp_instance_metadata_from_file
     )
@@ -739,7 +816,6 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
 
   def _Create(self):
     """Create a GCE VM instance."""
-    num_hosts = len(self.host_list)
     with open(self.ssh_public_key) as f:
       public_key = f.read().rstrip('\n')
     with vm_util.NamedTemporaryFile(
@@ -748,10 +824,21 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
       tf.write('%s:%s\n' % (self.user_name, public_key))
       tf.close()
       create_cmd = self._GenerateCreateCommand(tf.name)
-      _, stderr, retcode = create_cmd.Issue(
+      stdout, stderr, retcode = create_cmd.Issue(
           timeout=_GCE_VM_CREATE_TIMEOUT, raise_on_failure=False
       )
+      # Save the create operation name for use in _WaitUntilRunning
+      if 'name' in stdout:
+        response = json.loads(stdout)
+        self.create_operation_name = response[0]['name']
+    self._ParseCreateErrors(create_cmd.rate_limited, stderr, retcode)
+    if not self.create_return_time:
+      self.create_return_time = time.time()
 
+  def _ParseCreateErrors(
+      self, cmd_rate_limited: bool, stderr: str, retcode: int):
+    """Parse error messages from a command in order to classify a failure."""
+    num_hosts = len(self.host_list)
     if (
         self.use_dedicated_host
         and retcode
@@ -789,7 +876,7 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     util.CheckGcloudResponseKnownFailures(stderr, retcode)
     if retcode:
       if (
-          create_cmd.rate_limited
+          cmd_rate_limited
           and 'already exists' in stderr
           and FLAGS.retry_on_rate_limited
       ):
@@ -825,8 +912,13 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
         raise errors.Benchmarks.UnsupportedConfigError(stderr)
       if 'The service is currently unavailable' in stderr:
         raise errors.Benchmarks.KnownIntermittentError(stderr)
+      # The initial request failed, prompting a retry, but the instance was
+      # still successfully created, which results in
+      # '409: The resource X already exists'
+      if '(gcloud.compute.instances.create) HTTPError 409' in stderr:
+        raise errors.Benchmarks.KnownIntermittentError(stderr)
       raise errors.Resource.CreationError(
-          'Failed to create VM: %s return code: %s' % (stderr, retcode)
+          f'Failed to create VM {self.name}:\n{stderr}\nreturn code: {retcode}'
       )
 
   def _CreateDependencies(self):
@@ -873,6 +965,9 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     if 'accessConfigs' in network_interface:
       self.ip_address = network_interface['accessConfigs'][0]['natIP']
 
+    for network_interface in describe_response['networkInterfaces']:
+      self.internal_ips.append(network_interface['networkIP'])
+
   @property
   def HasIpAddress(self):
     """Returns True when the IP has been retrieved from a describe response."""
@@ -882,7 +977,7 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     """Returns whether the ID and IP addresses still need to be set."""
     return (
         not self.id
-        or not self.internal_ip
+        or not self.GetInternalIPs()
         or (self.assign_external_ip and not self.ip_address)
     )
 
@@ -935,27 +1030,59 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     # Response is a list of size one
     self._ParseDescribeResponse(response[0])
 
+  @vm_util.Retry(
+      poll_interval=1,
+      log_errors=False,
+      retryable_exceptions=(GceServiceUnavailableError,)
+  )
   def _Exists(self):
     """Returns true if the VM exists."""
     getinstance_cmd = util.GcloudCommand(
         self, 'compute', 'instances', 'describe', self.name
     )
-    stdout, _, _ = getinstance_cmd.Issue(raise_on_failure=False)
-    try:
-      response = json.loads(stdout)
-    except ValueError:
+    stdout, stderr, retcode = getinstance_cmd.Issue(raise_on_failure=False)
+    if 'The service is currently unavailable' in stderr:
+      logging.info('instances describe command failed, retrying.')
+      raise GceServiceUnavailableError()
+    elif retcode and re.search(r"The resource \'.*'\ was not found", stderr):
       return False
-    try:
-      # The VM may exist before we can fully parse the describe response for the
-      # IP address or ID of the VM. For example, if the VM has a status of
-      # provisioning, we can't yet parse the IP address. If this is the case, we
-      # will continue to invoke the describe command in _PostCreate above.
-      # However, if we do have this information now, it's better to stash it and
-      # avoid invoking the describe command again.
-      self._ParseDescribeResponse(response)
-    except (KeyError, IndexError):
-      pass
-    return True
+    response = json.loads(stdout)
+    status = response['status']
+    return status in INSTANCE_EXISTS_STATUSES
+
+  @vm_util.Retry(
+      poll_interval=1,
+      log_errors=False,
+      retryable_exceptions=(GceRetryDescribeOperationsError,),
+  )
+  def _WaitUntilRunning(self):
+    """Waits until the VM instances create command completes."""
+    getoperation_cmd = util.GcloudCommand(
+        self, 'compute', 'operations', 'describe', self.create_operation_name
+    )
+    if gcp_flags.GCE_CREATE_LOG_HTTP.value:
+      getoperation_cmd.flags['log-http'] = True
+
+    stdout, _, retcode = getoperation_cmd.Issue(raise_on_failure=False)
+    if retcode != 0:
+      logging.info('operations describe command failed, retrying.')
+      raise GceRetryDescribeOperationsError()
+    response = json.loads(stdout)
+    status = response['status']
+    # Classify errors once the operation is complete.
+    if 'error' in response:
+      create_stderr = json.dumps(response['error'])
+      create_retcode = 1
+      self._ParseCreateErrors(getoperation_cmd.rate_limited,
+                              create_stderr, create_retcode)
+    # Retry if the operation is not yet DONE.
+    elif status != OPERATION_DONE:
+      logging.info('VM create operation has status %s; retrying operations '
+                   'describe command.', status)
+      raise GceRetryDescribeOperationsError()
+    # Collect the time-to-running timestamp once the operation completes.
+    elif not self.is_running_time:
+      self.is_running_time = time.time()
 
   def _GenerateDiskNamePrefix(self, disk_spec_id, index):
     """Generates a deterministic disk name given disk_spec_id and index."""
@@ -979,12 +1106,13 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
           name = 'local-ssd-%d' % self.local_disk_counter
           disk_number = self.local_disk_counter + 1
         elif self.ssd_interface == NVME:
-          # Device can either be /dev/nvme0n1 or /dev/nvme1n1. Find out which.
-          name, _ = self.RemoteCommand(
-              'find /dev/nvme*n%d' % (self.local_disk_counter + 1)
-          )
-          name = name.strip().split('/')[-1]
-          disk_number = self.local_disk_counter + self.NVME_START_INDEX
+          name = f'local-nvme-ssd-{self.local_disk_counter}'
+          # TODO(user): Apply for new Gen 3 VMs (barring M3)
+          if self.machine_type.startswith('c3'):
+            # TODO(user): Also consider removing disk_number
+            disk_number = self.local_disk_counter
+          else:  # includes N2D CVM
+            disk_number = self.local_disk_counter + self.NVME_START_INDEX
         else:
           raise errors.Error('Unknown Local SSD Interface.')
         # This is a local ssd, it does not need the regional pd flag.
@@ -1026,25 +1154,13 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
 
   def FindRemoteNVMEDevices(self, _, nvme_devices):
     """Find the paths for all remote NVME devices inside the VM."""
-    local_disks = []
-    if self.ssd_interface == NVME:
-      for local_disk_count in range(self.max_local_disks):
-        name, _ = self.RemoteCommand(f'find /dev/nvme*n{local_disk_count + 1}')
-        name = name.strip().split('/')[-1]
-        local_disk_name = '/dev/%s' % name
-        local_disks.append(local_disk_name)
-    # filter out local nvme devices from all nvme devices
     remote_nvme_devices = [
         device['DevicePath']
         for device in nvme_devices
-        if device['DevicePath'] not in local_disks
+        if device['ModelNumber'] == 'nvme_card-pd'
     ]
-    # if boot disk is nvme,
-    # remove the boot disk, which is the disk with the lowest index
-    if gce_disk.PdDriveIsNvme(self):
-      return sorted(remote_nvme_devices)[1:]
-    else:
-      return sorted(remote_nvme_devices)
+
+    return sorted(remote_nvme_devices)
 
   def UpdateDevicePath(self, scratch_disk, remote_nvme_devices):
     """Updates the paths for all remote NVME devices inside the VM."""
@@ -1128,6 +1244,17 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     if self.max_local_disks:
       result['gce_local_ssd_count'] = self.max_local_disks
       result['gce_local_ssd_interface'] = self.ssd_interface
+    # self.network.network_resources can be None when subnet_names are populated
+    network_resources = (
+        self.network.network_resources or self.network.subnet_resources
+    )
+    result['gce_network_name'] = ','.join(
+        network_resource.name for network_resource in network_resources
+    )
+    result['gce_subnet_name'] = ','.join(
+        subnet_resource.name
+        for subnet_resource in self.network.subnet_resources
+    )
     result['gce_network_tier'] = self.gce_network_tier
     result['gce_nic_type'] = self.gce_nic_type
     if self.gce_egress_bandwidth_tier:
@@ -1139,6 +1266,11 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
       result['threads_per_core'] = self.threads_per_core
     if self.network.mtu:
       result['mtu'] = self.network.mtu
+    if gcp_flags.GCE_CONFIDENTIAL_COMPUTE.value:
+      result['confidential_compute'] = True
+      result['confidential_compute_type'] = (
+          gcp_flags.GCE_CONFIDENTIAL_COMPUTE_TYPE.value
+      )
     return result
 
   def SimulateMaintenanceWithLog(self):
@@ -1178,10 +1310,16 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
 
   def _GetLMNotificationCommand(self):
     """Return Remote python execution command for LM notify script."""
-    vm_name = self.name
     vm_path = posixpath.join(vm_util.VM_TMP_DIR, self._LM_NOTICE_SCRIPT)
     server_log = self._LM_NOTICE_LOG
-    return f'python3 {vm_path} {vm_name} > {server_log} 2>&1'
+    return (
+        f'python3 {vm_path} {gcp_flags.LM_NOTIFICATION_METADATA_NAME.value} >'
+        f' {server_log} 2>&1'
+    )
+
+  def _PullLMNoticeLog(self):
+    """Pull the LM Notice Log onto the local VM."""
+    self.PullFile(vm_util.GetTempDir(), self._LM_NOTICE_LOG)
 
   def StartLMNotification(self):
     """Start meta-data server notification subscription."""
@@ -1192,7 +1330,7 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
           timeout=LM_NOTIFICATION_TIMEOUT_SECONDS,
           ignore_failure=True,
       )
-      self.PullFile(vm_util.GetTempDir(), self._LM_NOTICE_LOG)
+      self._PullLMNoticeLog()
       logging.info('[LM Notify] Release live migration lock.')
       self._LM_TIMES_SEMAPHORE.release()
 
@@ -1205,6 +1343,10 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     logging.info('[LM Notify] Wait for live migration to finish.')
     self._LM_TIMES_SEMAPHORE.acquire()
     logging.info('[LM Notify] Live migration is done.')
+
+  def _ReadLMNoticeContents(self):
+    """Read the contents of the LM Notice Log into a string."""
+    return self.RemoteCommand(f'cat {self._LM_NOTICE_LOG}')[0]
 
   def CollectLMNotificationsTime(self):
     """Extract LM notifications from log file.
@@ -1225,9 +1367,9 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
         lm_end_time_key: 0,
         lm_total_time_key: 0,
     }
-    lm_times, _ = self.RemoteCommand(f'cat {self._LM_NOTICE_LOG}')
+    lm_times = self._ReadLMNoticeContents()
     if not lm_times:
-      return events_dict
+      raise ValueError('Cannot collect lm times. Live Migration might failed.')
 
     # Result may contain errors captured, so we need to skip them
     for event_info in lm_times.splitlines():
@@ -1362,7 +1504,7 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
   def SupportGVNIC(self) -> bool:
     return True
 
-  def GetDefaultImageFamily(self) -> Optional[str]:
+  def GetDefaultImageFamily(self, is_arm: bool) -> Optional[str]:
     return None
 
   def GetDefaultImageProject(self) -> Optional[str]:
@@ -1384,6 +1526,7 @@ class BaseLinuxGceVirtualMachine(GceVirtualMachine, linux_vm.BaseLinuxMixin):
   # Subclasses should override the default image OR
   # both the image family and image_project.
   DEFAULT_IMAGE_FAMILY = None
+  DEFAULT_ARM_IMAGE_FAMILY = None
   DEFAULT_IMAGE_PROJECT = None
   SUPPORTS_GVNIC = True
 
@@ -1449,9 +1592,20 @@ class BaseLinuxGceVirtualMachine(GceVirtualMachine, linux_vm.BaseLinuxMixin):
   def SupportGVNIC(self) -> bool:
     return self.SUPPORTS_GVNIC
 
-  def GetDefaultImageFamily(self) -> str:
+  # Use an explicit is_arm parameter to not accidentally assume a default
+  def GetDefaultImageFamily(self, is_arm: bool) -> str:
     if not self.DEFAULT_IMAGE_FAMILY:
       raise ValueError('DEFAULT_IMAGE_FAMILY can not be None')
+    if is_arm:
+      if self.DEFAULT_ARM_IMAGE_FAMILY:
+        return self.DEFAULT_ARM_IMAGE_FAMILY
+      if 'arm64' not in self.DEFAULT_IMAGE_FAMILY:
+        arm_image_family = self.DEFAULT_IMAGE_FAMILY + '-arm64'
+        logging.info(
+            'ARM image must be used; changing image to %s',
+            arm_image_family,
+        )
+        return arm_image_family
     return self.DEFAULT_IMAGE_FAMILY
 
   def GetDefaultImageProject(self) -> str:
@@ -1558,11 +1712,56 @@ class CentOsStream9BasedGceVirtualMachine(
   DEFAULT_IMAGE_PROJECT = 'centos-cloud'
 
 
-class ContainerOptimizedOsBasedGceVirtualMachine(
-    BaseLinuxGceVirtualMachine, linux_vm.ContainerOptimizedOsMixin
-):
-  DEFAULT_IMAGE_FAMILY = 'cos-stable'
+class BaseCosBasedGceVirtualMachine(
+    BaseLinuxGceVirtualMachine, linux_vm.BaseContainerLinuxMixin):
+  BASE_OS_TYPE = os_types.CORE_OS
   DEFAULT_IMAGE_PROJECT = 'cos-cloud'
+
+  def PrepareVMEnvironment(self):
+    super().PrepareVMEnvironment()
+    # COS mounts /home and /tmp with -o noexec, which blocks running benchmark
+    # binaries.
+    # TODO(user): Support reboots
+    self.RemoteCommand('sudo mount -o remount,exec /home')
+    self.RemoteCommand('sudo mount -o remount,exec /tmp')
+
+
+class CosStableBasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
+  OS_TYPE = os_types.COS
+  DEFAULT_IMAGE_FAMILY = 'cos-stable'
+  DEFAULT_ARM_IMAGE_FAMILY = 'cos-arm64-stable'
+
+
+class CosDevBasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
+  OS_TYPE = os_types.COS_DEV
+  DEFAULT_IMAGE_FAMILY = 'cos-dev'
+  DEFAULT_ARM_IMAGE_FAMILY = 'cos-arm64-dev'
+
+
+class Cos105BasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
+  OS_TYPE = os_types.COS105
+  DEFAULT_IMAGE_FAMILY = 'cos-105-lts'
+  DEFAULT_ARM_IMAGE_FAMILY = 'cos-arm64-105-lts'
+
+
+class Cos101BasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
+  OS_TYPE = os_types.COS101
+  DEFAULT_IMAGE_FAMILY = 'cos-101-lts'
+  DEFAULT_ARM_IMAGE_FAMILY = 'cos-arm64-101-lts'
+
+
+class Cos97BasedGceVirtualMachine(BaseCosBasedGceVirtualMachine):
+  OS_TYPE = os_types.COS97
+  DEFAULT_IMAGE_FAMILY = 'cos-97-lts'
+
+
+class Cos93BasedGceVirtualMachine(
+    BaseCosBasedGceVirtualMachine, virtual_machine.DeprecatedOsMixin):
+  OS_TYPE = os_types.COS93
+  DEFAULT_IMAGE_FAMILY = 'cos-93-lts'
+  # Not sure if it's beginning or end of October
+  END_OF_LIFE = '2023-10-01'
+  ALTERNATIVE_OS = os_types.COS97
 
 
 class CoreOsBasedGceVirtualMachine(

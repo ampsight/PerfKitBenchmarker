@@ -21,7 +21,7 @@ import time
 from absl import flags
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import managed_memory_store
-from perfkitbenchmarker import providers
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers import azure
 from perfkitbenchmarker.providers.azure import azure_network
@@ -36,7 +36,7 @@ EXISTS_RETRY_POLL = 30
 class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
   """Object representing an Azure Redis Cache."""
 
-  CLOUD = providers.AZURE
+  CLOUD = provider_info.AZURE
   MEMORY_STORE = managed_memory_store.REDIS
 
   # Azure redis could take up to an hour to create
@@ -173,7 +173,7 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
     stdout, _, retcode = self.DescribeCache()
     if retcode != 0:
       raise errors.Resource.RetryableGetError(
-          'Failed to retrieve information on %s.', self.name)
+          f'Failed to retrieve information on {self.name}.')
     response = json.loads(stdout)
     self._ip = response['hostName']
     self._port = response['port']
@@ -185,6 +185,6 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
     ], raise_on_failure=False)
     if retcode != 0:
       raise errors.Resource.RetryableGetError(
-          'Failed to retrieve information on %s.', self.name)
+          f'Failed to retrieve information on {self.name}.')
     response = json.loads(stdout)
     self._password = response['primaryKey']
