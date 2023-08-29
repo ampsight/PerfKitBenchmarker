@@ -10,3 +10,7 @@
 *.iml
 /.idea
 /*git_ignore*
+/bash_scripts
+/config_files
+/elasticsearch-files/
+/perfkit_venv/
