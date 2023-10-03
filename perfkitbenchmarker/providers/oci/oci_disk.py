@@ -37,7 +37,7 @@ class OciDisk(disk.BaseDisk):
         self.id = None
         self.availability_domain = availability_domain
         self.disk_size = disk_spec.disk_size or 100
-        self.vpus_per_gb: int = DEFAULT_VPUS_PER_GB
+        # self.vpus_per_gb: int = DEFAULT_VPUS_PER_GB
         self.status = None
         self.name = f'{vm_name}-{disk_number}'
         self.attachment_id = None
@@ -46,6 +46,11 @@ class OciDisk(disk.BaseDisk):
         self.port: Optional[str] = None
         self.ipv4: Optional[str] = None
         self.tags = util.MakeFormattedDefaultTags()
+    
+    @classmethod
+    def _ApplyFlags(cls, config_values, flag_values):
+        super(OciDisk, cls)._ApplyFlags(config_values, flag_values)
+        if flag_values['oci_vpu_per_gb']
 
 
     def _Create(self):

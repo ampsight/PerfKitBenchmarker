@@ -51,6 +51,8 @@ class OciVmSpec(virtual_machine.BaseVmSpec):
             config_values['oci_fault_domain'] = flag_values.oci_fault_domain
         if flag_values['oci_boot_disk_size'].present:
             config_values['oci_boot_disk_size'] = flag_values.oci_boot_disk_size
+        if flag_values['oci_bd_vpu_per_gb'].present:
+            config_values['oci_bd_vpu_per_gb'] = flag_values.oci_bd_vpu_per_gb
         if flag_values['oci_use_vcn'].present:
             config_values['oci_use_vcn'] = flag_values.oci_use_vcn
         if flag_values['oci_num_local_ssds'].present:
@@ -76,6 +78,7 @@ class OciVmSpec(virtual_machine.BaseVmSpec):
             'oci_availability_domain': (option_decoders.StringDecoder, {'default': None}),
             'oci_fault_domain': (option_decoders.StringDecoder, {'default': None}),            
             'oci_boot_disk_size': (option_decoders.IntDecoder, {'default': 50}),
+            'oci_bd_vpu_per_gb': (option_decoders.IntDecoder, {'default': 10}),
             'oci_use_vcn': (option_decoders.BooleanDecoder, {'default': True}),
             'num_local_ssds': (option_decoders.IntDecoder, {'default': 0}),
             'machine_type': (option_decoders.StringDecoder, {'default': 'VM.Standard.A1.Flex'}),
@@ -111,6 +114,7 @@ class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
         self.compute_units = vm_spec.oci_compute_units
         self.compute_memory = vm_spec.oci_compute_memory
         self.bv_size = vm_spec.oci_boot_disk_size
+        self.bd_vpu_per_gb = vm_spec.oci_bd_vpu_per_gb
         self.ip_address = None
         self.internal_ip = None
         self.status = None
@@ -161,6 +165,8 @@ class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
 
         if self.compute_memory is None:
             self.compute_memory = self.compute_units * 4
+        if self.bd_vpu_per_gb is None:
+            self.bd_vpu_per_gb = 10
         ad_list = []
         if self.availability_domain is None:
             ad_list = util.GetAvailabilityDomainFromRegion(self.region)
@@ -209,6 +215,7 @@ class OciVirtualMachine(virtual_machine.BaseVirtualMachine):
             f' {shape_config}',
             f'--user-data-file {user_data_filepath}',
             f' --boot-volume-size-in-gbs {self.bv_size}',
+            f' --volume-processing-units-per-gb {self.bd_vpu_per_gb}',
             f'--freeform-tags {self.tags}',
             f'--ssh-authorized-keys-file {key_file_path}',
             '--assign-public-ip true']

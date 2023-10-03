@@ -17,6 +17,10 @@ flags.DEFINE_integer('oci_compute_units', 1, 'Number of compute units to allocat
 
 flags.DEFINE_integer('oci_compute_memory', None, 'Number of memory in gbs to allocate for the machine type')
 
+flags.DEFINE_integer('oci_bd_vpus_per_gb', 10, 'Number of vpus per GB of storage on the boot disk')
+
+flags.DEFINE_integer('oci_vpus_per_gb', 10, 'Number of vpus per GB of Storage')
+
 flags.DEFINE_integer('oci_boot_disk_size', 50, 'Size of Boot disk in GBs')
 
 flags.DEFINE_boolean('oci_use_vcn', True, 'Use in built networking')
