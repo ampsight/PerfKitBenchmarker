@@ -9,7 +9,6 @@ sys.argv[1]: The root HCFS directory
 sys.argv[2]: A comma separated list of the subdirectories/table names
 """
 
-
 import argparse
 import logging
 import os
@@ -27,10 +26,11 @@ def parse_args(args=None):
 
 
 def main(args):
-  spark = (SparkSession.builder
-           .appName('Setup Spark tables')
-           .enableHiveSupport()
-           .getOrCreate())
+  spark = (
+      SparkSession.builder.appName('Setup Spark tables')
+      .enableHiveSupport()
+      .getOrCreate()
+  )
   for table in args.tables:
     logging.info('Creating table %s', table)
     table_dir = os.path.join(args.root_dir, table)
@@ -48,10 +48,11 @@ def main(args):
     # the Hive Metastore. I do not believe this interoperates with Hive's own
     # statistics. See
     # https://jaceklaskowski.gitbooks.io/mastering-spark-sql/content/spark-sql-LogicalPlan-AnalyzeColumnCommand.html
-    columns = ','.join(spark.table(table).columns)
-    spark.sql(
-        'ANALYZE TABLE {} COMPUTE STATISTICS FOR COLUMNS {}'.format(
-            table, columns))
+    # Disabling to comply with the TPC spec.
+    # columns = ','.join(spark.table(table).columns)
+    # spark.sql(
+    #     'ANALYZE TABLE {} COMPUTE STATISTICS FOR COLUMNS {}'.format(
+    #         table, columns))
 
 
 if __name__ == '__main__':

@@ -16,10 +16,11 @@
 
 This contains the BaseProviderInfo class which is
 used for IsBenchmarkSupported
-
 """
 
+from absl import flags
 import six
+
 
 GCP = 'GCP'
 AZURE = 'Azure'
@@ -37,10 +38,37 @@ PROFITBRICKS = 'ProfitBricks'
 # for performing on premise to cloud benchmarks
 DOCKER = 'Docker'
 
-VALID_CLOUDS = (GCP, AZURE, AWS, IBMCLOUD, DIGITALOCEAN, KUBERNETES, OPENSTACK,
-                RACKSPACE, CLOUDSTACK, ALICLOUD, MESOS, PROFITBRICKS, DOCKER)
+PROVIDER_DIRECTORY_NAMES = (
+    GCP,
+    AZURE,
+    AWS,
+    IBMCLOUD,
+    DIGITALOCEAN,
+    OPENSTACK,
+    RACKSPACE,
+    CLOUDSTACK,
+    ALICLOUD,
+    MESOS,
+    PROFITBRICKS,
+    DOCKER,
+)
+# TODO(user): Remove Kubernetes from VALID_CLOUDS.
+VALID_CLOUDS = tuple(list(PROVIDER_DIRECTORY_NAMES) + [KUBERNETES])
 
 _PROVIDER_INFO_REGISTRY = {}
+
+# With b/302543184, VM Platform replaces Cloud as that attribute is overused &
+# overloaded.
+# TODO(user): Add STATIC, DOCKER_ON_VM, DOCKER_INSTANCE, & BARE_METAL.
+DEFAULT_VM_PLATFORM = 'DEFAULT_VM'
+KUBERNETES_PLATFORM = KUBERNETES
+ALL_PLATFORMS = [
+    DEFAULT_VM_PLATFORM,
+    KUBERNETES_PLATFORM,
+]
+VM_PLATFORM = flags.DEFINE_enum(
+    'vm_platform', DEFAULT_VM_PLATFORM, ALL_PLATFORMS, 'VM platform to use.'
+)
 
 
 def GetProviderInfoClass(cloud):

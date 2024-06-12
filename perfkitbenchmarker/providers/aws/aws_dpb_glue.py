@@ -12,7 +12,7 @@ import os
 from typing import List, Optional
 
 from absl import flags
-
+from perfkitbenchmarker import dpb_constants
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import provider_info
@@ -47,7 +47,8 @@ class AwsDpbGlue(
     self.cmd_prefix = list(util.AWS_PREFIX)
     if not self.dpb_service_zone:
       raise errors.Setup.InvalidSetupError(
-          'dpb_service_zone must be provided, for provisioning.')
+          'dpb_service_zone must be provided, for provisioning.'
+      )
     self.region = util.GetRegionFromZone(self.dpb_service_zone)
     self.cmd_prefix += ['--region', self.region]
     self.storage_service = s3.S3Service()
@@ -58,7 +59,7 @@ class AwsDpbGlue(
     self._job_counter = 0
 
     # Last job run cost
-    self._run_cost = None
+    self._run_cost = dpb_service.JobCosts()
     self._FillMetadata()
 
   @property
@@ -71,13 +72,16 @@ class AwsDpbGlue(
     cmd = self.cmd_prefix + [
         'glue',
         'get-job-run',
-        '--job-name', job_name,
-        '--run-id', job_run_id
+        '--job-name',
+        job_name,
+        '--run-id',
+        job_run_id,
     ]
     stdout, stderr, retcode = vm_util.IssueCommand(cmd, raise_on_failure=False)
     if retcode:
       raise errors.VmUtil.IssueCommandError(
-          f'Getting step status failed:\n{stderr}')
+          f'Getting step status failed:\n{stderr}'
+      )
     result = json.loads(stdout)
     state = result['JobRun']['JobRunState']
     if state in ('FAILED', 'ERROR', 'TIMEOUT'):
@@ -93,21 +97,24 @@ class AwsDpbGlue(
       )
       return dpb_service.JobResult(
           run_time=execution_time,
-          pending_time=completed_on - started_on - execution_time)
+          pending_time=completed_on - started_on - execution_time,
+      )
 
-  def SubmitJob(self,
-                jarfile=None,
-                classname=None,
-                pyspark_file=None,
-                query_file=None,
-                job_poll_interval=None,
-                job_stdout_file=None,
-                job_arguments=None,
-                job_files=None,
-                job_jars=None,
-                job_py_files=None,
-                job_type=None,
-                properties=None):
+  def SubmitJob(
+      self,
+      jarfile=None,
+      classname=None,
+      pyspark_file=None,
+      query_file=None,
+      job_poll_interval=None,
+      job_stdout_file=None,
+      job_arguments=None,
+      job_files=None,
+      job_jars=None,
+      job_py_files=None,
+      job_type=None,
+      properties=None,
+  ):
     """See base class."""
     assert job_type
 
@@ -117,7 +124,7 @@ class AwsDpbGlue(
     self._job_counter += 1
     glue_command = {}
     glue_default_args = {}
-    if job_type == self.PYSPARK_JOB_TYPE:
+    if job_type == dpb_constants.PYSPARK_JOB_TYPE:
       glue_command = {
           'Name': 'glueetl',
           'ScriptLocation': self._glue_script_wrapper_url,
@@ -129,34 +136,53 @@ class AwsDpbGlue(
       if properties:
         all_properties.update(properties)
       glue_default_args = {
-          '--extra-py-files': ','.join(extra_py_files), **all_properties}
+          '--extra-py-files': ','.join(extra_py_files),
+          **all_properties,
+      }
     else:
       raise ValueError(f'Unsupported job type {job_type} for AWS Glue.')
-    vm_util.IssueCommand(self.cmd_prefix + [
-        'glue',
-        'create-job',
-        '--name', job_name,
-        '--role', self.role,
-        '--command', json.dumps(glue_command),
-        '--default-arguments', json.dumps(glue_default_args),
-        '--glue-version', self.GetDpbVersion(),
-        '--number-of-workers', str(self.spec.worker_count),
-        '--worker-type', self.spec.worker_group.vm_spec.machine_type,
-
-    ])
+    vm_util.IssueCommand(
+        self.cmd_prefix
+        + [
+            'glue',
+            'create-job',
+            '--name',
+            job_name,
+            '--role',
+            self.role,
+            '--command',
+            json.dumps(glue_command),
+            '--default-arguments',
+            json.dumps(glue_default_args),
+            '--glue-version',
+            self.GetDpbVersion(),
+            '--number-of-workers',
+            str(self.spec.worker_count),
+            '--worker-type',
+            self.spec.worker_group.vm_spec.machine_type,
+        ]
+    )
 
     # Run job definition
-    stdout, _, _ = vm_util.IssueCommand(self.cmd_prefix + [
-        'glue',
-        'start-job-run',
-        '--job-name', job_name,
-        '--arguments', json.dumps(
-            {'--pkb_main': _ModuleFromPyFilename(pyspark_file),
-             '--pkb_args': json.dumps(job_arguments)})])
+    stdout, _, _ = vm_util.IssueCommand(
+        self.cmd_prefix
+        + [
+            'glue',
+            'start-job-run',
+            '--job-name',
+            job_name,
+            '--arguments',
+            json.dumps({
+                '--pkb_main': _ModuleFromPyFilename(pyspark_file),
+                '--pkb_args': json.dumps(job_arguments),
+            }),
+        ]
+    )
     job_run_id = json.loads(stdout)['JobRunId']
 
-    return self._WaitForJob((job_name, job_run_id), GLUE_TIMEOUT,
-                            job_poll_interval)
+    return self._WaitForJob(
+        (job_name, job_run_id), GLUE_TIMEOUT, job_poll_interval
+    )
 
   def _Delete(self):
     """Deletes Glue Jobs created to avoid quota issues."""
@@ -165,11 +191,10 @@ class AwsDpbGlue(
       self._DeleteGlueJob(job_name)
 
   def _DeleteGlueJob(self, job_name: str):
-    vm_util.IssueCommand(self.cmd_prefix + [
-        'glue',
-        'delete-job',
-        f'--job-name={job_name}'
-    ], raise_on_failure=False)
+    vm_util.IssueCommand(
+        self.cmd_prefix + ['glue', 'delete-job', f'--job-name={job_name}'],
+        raise_on_failure=False,
+    )
 
   def _FillMetadata(self) -> None:
     """Gets a dict to initialize this DPB service instance's metadata."""
@@ -179,7 +204,8 @@ class AwsDpbGlue(
     # https://docs.aws.amazon.com/glue/latest/dg/add-job.html#:~:text=Own%20Custom%20Scripts.-,Worker%20type,-The%20following%20worker
     disk_size_by_worker_type = {'Standard': '50', 'G.1X': '64', 'G.2X': '128'}
     dpb_disk_size = disk_size_by_worker_type.get(
-        self.spec.worker_group.vm_spec.machine_type, 'Unknown')
+        self.spec.worker_group.vm_spec.machine_type, 'Unknown'
+    )
 
     self.metadata = {
         'dpb_service': basic_data['dpb_service'],
@@ -187,7 +213,7 @@ class AwsDpbGlue(
         'dpb_service_version': basic_data['dpb_service_version'],
         'dpb_cluster_shape': basic_data['dpb_cluster_shape'],
         'dpb_cluster_size': basic_data['dpb_cluster_size'],
-        'dpb_hdfs_type': 'default-disk',
+        'dpb_hdfs_type': basic_data['dpb_hdfs_type'],
         'dpb_disk_size': dpb_disk_size,
         'dpb_service_zone': basic_data['dpb_service_zone'],
         'dpb_job_properties': basic_data['dpb_job_properties'],
@@ -197,7 +223,7 @@ class AwsDpbGlue(
     """Gets service wrapper scripts to upload alongside benchmark scripts."""
     return [self.SPARK_SQL_GLUE_WRAPPER_SCRIPT]
 
-  def CalculateLastJobCost(self) -> Optional[float]:
+  def CalculateLastJobCosts(self) -> dpb_service.JobCosts:
     return self._run_cost
 
   def _ComputeJobRunCost(
@@ -205,7 +231,7 @@ class AwsDpbGlue(
       dpu_seconds: Optional[float],
       max_capacity: Optional[float],
       execution_time: Optional[float],
-  ) -> Optional[float]:
+  ) -> dpb_service.JobCosts:
     """Computes the job run cost.
 
     If dpu_seconds is not None, then the job run cost will be computed only with
@@ -226,8 +252,20 @@ class AwsDpbGlue(
     """
     dpu_hourly_price = aws_dpb_glue_prices.GLUE_PRICES.get(self.region)
     if dpu_hourly_price is None:
-      return None
+      return dpb_service.JobCosts()
     # dpu_seconds is only reported directly in auto-scaling jobs.
     if dpu_seconds is None:
       dpu_seconds = max_capacity * execution_time
-    return dpu_seconds / 3600 * dpu_hourly_price
+    hourly_dpu = dpu_seconds / 3600
+    cost = hourly_dpu * dpu_hourly_price
+    return dpb_service.JobCosts(
+        total_cost=cost,
+        compute_cost=cost,
+        compute_units_used=hourly_dpu,
+        compute_unit_name='DPU*hr',
+        compute_unit_cost=dpu_hourly_price,
+    )
+
+  def GetHdfsType(self) -> Optional[str]:
+    """Gets human friendly disk type for metric metadata."""
+    return 'default-disk'

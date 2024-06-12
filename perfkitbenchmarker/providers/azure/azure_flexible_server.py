@@ -38,14 +38,12 @@ DEFAULT_POSTGRES_VERSION = '13'
 
 IS_READY_TIMEOUT = 60 * 60 * 1  # 1 hour (might take some time to prepare)
 
-# Longest time recorded is 20 minutes when
-# creating STANDARD_D64_V3 - 12/02/2020
 # The Azure command timeout with the following error message:
 #
 # Deployment failed. Correlation ID: fcdc3c76-33cc-4eb1-986c-fbc30ce7d820.
 # The operation timed out and automatically rolled back.
 # Please retry the operation.
-CREATE_AZURE_DB_TIMEOUT = 60 * 30
+CREATE_AZURE_DB_TIMEOUT = 60 * 120
 
 
 class AzureFlexibleServer(azure_relational_db.AzureRelationalDb):
@@ -58,12 +56,14 @@ class AzureFlexibleServer(azure_relational_db.AzureRelationalDb):
 
   Note that the client VM's region and the region requested for the database
   must be the same.
-
   """
+
   SERVER_TYPE = 'flexible-server'
   CLOUD = provider_info.AZURE
-  ENGINE = [sql_engine_utils.FLEXIBLE_SERVER_POSTGRES,
-            sql_engine_utils.FLEXIBLE_SERVER_MYSQL]
+  ENGINE = [
+      sql_engine_utils.FLEXIBLE_SERVER_POSTGRES,
+      sql_engine_utils.FLEXIBLE_SERVER_MYSQL,
+  ]
 
   @staticmethod
   def GetDefaultEngineVersion(engine: str):
@@ -131,11 +131,11 @@ class AzureFlexibleServer(azure_relational_db.AzureRelationalDb):
     return engine
 
   def _PostCreate(self):
-    """Perform general post create operations on the cluster.
-
-    """
+    """Perform general post create operations on the cluster."""
     # Calling the grand parent class.
     super(azure_relational_db.AzureRelationalDb, self)._PostCreate()
+    # Get the client VM's ip address
+    ip = self.client_vm.ip_address
     cmd = [
         azure.AZURE_PATH,
         self.GetAzCommandForEngine(),
@@ -149,9 +149,9 @@ class AzureFlexibleServer(azure_relational_db.AzureRelationalDb):
         '--rule-name',
         'allow-all-ips',
         '--start-ip-address',
-        '0.0.0.0',
+        ip,
         '--end-ip-address',
-        '255.255.255.255',
+        ip,
     ]
     vm_util.IssueCommand(cmd)
 
@@ -216,25 +216,25 @@ class AzureFlexibleServer(azure_relational_db.AzureRelationalDb):
       name_and_value = flag.split('=')
       cmd = [
           azure.AZURE_PATH,
+          self.GetAzCommandForEngine(),
           self.SERVER_TYPE,
-          'server',
-          'configuration',
+          'parameter',
           'set',
           '--name',
           name_and_value[0],
           '--resource-group',
           self.resource_group.name,
-          '--server',
+          '--server-name',
           self.instance_id,
           '--value',
           name_and_value[1],
       ]
       _, stderr, _ = vm_util.IssueCommand(cmd, raise_on_failure=False)
-      if stderr:
+      if stderr and 'WARNING' not in stderr:
+        # Azure might raise warning
+        # WARNING: configuration_name is not a known attribute of class
         raise NotImplementedError(
-            'Invalid MySQL flags: {0}.  Error {1}'.format(
-                name_and_value, stderr
-            )
+            'Invalid flags: {0}.  Error {1}'.format(name_and_value, stderr)
         )
 
     self._Reboot()

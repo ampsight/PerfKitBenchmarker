@@ -24,13 +24,16 @@ Steps for both Apt and Yum installs:
 4. Install the azure-cli.
 """
 
+from perfkitbenchmarker import os_types
 from perfkitbenchmarker import vm_util
 
 # Debian info
 _DEB_REPO_FILE = '/etc/apt/sources.list.d/azure-cli.list'
 _DEB_REPO_KEY = 'https://packages.microsoft.com/keys/microsoft.asc'
-_DEB_REPO = ('deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ '
-             '{az_repo} main')
+_DEB_REPO = (
+    'deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ '
+    '{az_repo} main'
+)
 
 # RedHat info
 _YUM_REPO_FILE = '/etc/yum.repos.d/azure-cli.repo'
@@ -46,7 +49,7 @@ gpgkey={_YUM_REPO_KEY}
 """
 
 
-@vm_util.Retry(poll_interval=15, timeout=5*60)
+@vm_util.Retry(poll_interval=15, timeout=5 * 60)
 def ZypperInstall(vm):
   """Installs the azure-cli package on the VM for SUSE systems.
 
@@ -56,13 +59,15 @@ def ZypperInstall(vm):
   # Work-around to remove conflicting python packages. See
   # https://github.com/Azure/azure-cli/issues/13209
   vm.RemoteCommand(
-      'sudo zypper install -y --oldpackage azure-cli-2.0.45-4.22.noarch')
+      'sudo zypper install -y --oldpackage azure-cli-2.0.45-4.22.noarch'
+  )
   vm.RemoteCommand('sudo zypper rm -y --clean-deps azure-cli')
   vm.Install('curl')
   vm.RemoteCommand('sudo rpm --import {key}'.format(key=_YUM_REPO_KEY))
   vm.RemoteCommand(
       f'sudo zypper addrepo --name "{_YUM_REPO_NAME}" '
-      f'--check {_YUM_REPO_URL} azure-cli')
+      f'--check {_YUM_REPO_URL} azure-cli'
+  )
   vm.RemoteCommand('sudo zypper install -y --from azure-cli azure-cli')
 
 
@@ -73,7 +78,20 @@ def _PipInstall(vm):
     vm: Virtual Machine to install on.
   """
   vm.Install('pip3')
-  vm.RemoteCommand('sudo pip3 install azure-cli')
+  # azure-cli updated requirements.txt dependency, but not setupu.py:
+  # https://github.com/Azure/azure-cli/pull/26671
+  vm.RemoteCommand('sudo pip3 install --upgrade azure-cli pyOpenSSL>=23.2.0')
+
+
+# https://packages.microsoft.com/repos/azure-cli/dists/
+SUPPORTED_APT_DISTROS = [
+    os_types.UBUNTU1804,
+    os_types.UBUNTU2004,
+    os_types.UBUNTU2204,
+    os_types.DEBIAN10,
+    os_types.DEBIAN11,
+    os_types.DEBIAN12,
+]
 
 
 def AptInstall(vm):
@@ -82,17 +100,15 @@ def AptInstall(vm):
   Args:
     vm: Virtual Machine to install on.
   """
-  if vm.is_aarch64:
+  if vm.is_aarch64 or vm.OS_TYPE not in SUPPORTED_APT_DISTROS:
     _PipInstall(vm)
     return
-  vm.Install('python')
-  vm.Install('lsb_release')
-  vm.Install('curl')
-  vm.InstallPackages('apt-transport-https')
+  vm.InstallPackages('lsb-release curl apt-transport-https')
   az_repo, _ = vm.RemoteCommand('lsb_release -cs')
   _CreateFile(vm, _DEB_REPO.format(az_repo=az_repo.strip()), _DEB_REPO_FILE)
   vm.RemoteCommand(
-      'curl -L {key} | sudo apt-key add -'.format(key=_DEB_REPO_KEY))
+      'curl -L {key} | sudo apt-key add -'.format(key=_DEB_REPO_KEY)
+  )
   vm.RemoteCommand('sudo apt-get update')
   vm.InstallPackages('azure-cli')
 
@@ -116,5 +132,8 @@ def _CreateFile(vm, content, file_path):
     content: Text to put into the file.
     file_path: Path to text output file.
   """
-  vm.RemoteCommand('echo "{content}" | sudo tee {file_path}'.format(
-      content=content, file_path=file_path))
+  vm.RemoteCommand(
+      'echo "{content}" | sudo tee {file_path}'.format(
+          content=content, file_path=file_path
+      )
+  )

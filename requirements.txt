@@ -27,13 +27,11 @@ six>=1.13.0
 pywinrm
 timeout-decorator
 google-cloud-datastore
-google-cloud-monitoring>=0.31.1
+google-cloud-monitoring>=2.0.0
 beautifulsoup4
 requests
-python-datetime-tz
-matplotlib
 seaborn
 
 # unlike setup.py requirements.txt cannot require a Python version AFAICT
-# this hack requires a non-existent package when Python is less than 3.9
-PerfkitBenchmarker_requires_Python_39;python_version<"3.9"
+# this hack requires a non-existent package when Python is less than 3.11
+PerfkitBenchmarker_requires_Python_311;python_version<"3.11"

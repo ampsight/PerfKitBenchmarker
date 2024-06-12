@@ -17,8 +17,6 @@
 import abc
 
 from perfkitbenchmarker import errors
-from perfkitbenchmarker import provider_info
-from perfkitbenchmarker.configs import spec
 import six
 
 
@@ -36,29 +34,33 @@ class ConfigOptionDecoder(six.with_metaclass(abc.ABCMeta, object)):
     Args:
       option: None or string. Name of the config option.
       **kwargs: May optionally contain a 'default' key mapping to a value or
-          callable object. If a value is provided, the config option is
-          optional, and the provided value is the default if the user does not
-          set a value for the config option. If a callable object is provided,
-          the config option is optional, and the provided object is called to
-          determine the value if the user does not set a value for the config
-          option. If not provided, the config option is required.
+        callable object. If a value is provided, the config option is optional,
+        and the provided value is the default if the user does not set a value
+        for the config option. If a callable object is provided, the config
+        option is optional, and the provided object is called to determine the
+        value if the user does not set a value for the config option. If not
+        provided, the config option is required.
     """
     self.option = option
     self.required = 'default' not in kwargs
     if not self.required:
       self._default = kwargs.pop('default')
-    assert not kwargs, ('__init__() received unexpected keyword arguments: '
-                        '{0}'.format(kwargs))
+    assert (
+        not kwargs
+    ), '__init__() received unexpected keyword arguments: {0}'.format(kwargs)
 
   def _GetOptionFullName(self, component_full_name):
     """Returns the fully qualified name of a config option.
 
     Args:
       component_full_name: string. Fully qualified name of a configurable object
-          to which the option belongs.
+        to which the option belongs.
     """
-    return (component_full_name if self.option is None
-            else '{0}.{1}'.format(component_full_name, self.option))
+    return (
+        component_full_name
+        if self.option is None
+        else '{0}.{1}'.format(component_full_name, self.option)
+    )
 
   @property
   def default(self):
@@ -69,7 +71,8 @@ class ConfigOptionDecoder(six.with_metaclass(abc.ABCMeta, object)):
     """
     assert not self.required, (
         'Attempted to get the default value of required config option '
-        '"{0}".'.format(self.option))
+        '"{0}".'.format(self.option)
+    )
     if hasattr(self._default, '__call__'):
       return self._default()
     return self._default
@@ -81,9 +84,9 @@ class ConfigOptionDecoder(six.with_metaclass(abc.ABCMeta, object)):
     Args:
       value: The value specified in the config.
       component_full_name: string. Fully qualified name of the configurable
-          component containing the config option.
+        component containing the config option.
       flag_values: flags.FlagValues. Runtime flag values to be propagated to
-          BaseSpec constructors.
+        BaseSpec constructors.
 
     Returns:
       The decoded value.
@@ -107,7 +110,7 @@ class EnumDecoder(ConfigOptionDecoder):
       valid_values: list of the allowed values
       **kwargs: Keyword arguments to pass to the base class.
     """
-    super(EnumDecoder, self).__init__(**kwargs)
+    super().__init__(**kwargs)
     self.valid_values = valid_values
 
   def Decode(self, value, component_full_name, flag_values):
@@ -115,10 +118,10 @@ class EnumDecoder(ConfigOptionDecoder):
 
     Args:
       value: The value specified in the config.
-      component_full_name: string.  Fully qualified name of the
-          configurable component containing the config option.
-      flag_values: flags.FlagValues.  Runtime flag values to be
-          propagated to the BaseSpec constructors.
+      component_full_name: string.  Fully qualified name of the configurable
+        component containing the config option.
+      flag_values: flags.FlagValues.  Runtime flag values to be propagated to
+        the BaseSpec constructors.
 
     Returns:
       The valid value.
@@ -131,8 +134,12 @@ class EnumDecoder(ConfigOptionDecoder):
     else:
       raise errors.Config.InvalidValue(
           'Invalid {0} value: "{1}". Value must be one of the following: '
-          '{2}.'.format(self._GetOptionFullName(component_full_name), value,
-                        ', '.join(str(t) for t in self.valid_values)))
+          '{2}.'.format(
+              self._GetOptionFullName(component_full_name),
+              value,
+              ', '.join(str(t) for t in self.valid_values),
+          )
+      )
 
 
 class TypeVerifier(ConfigOptionDecoder):
@@ -149,7 +156,7 @@ class TypeVerifier(ConfigOptionDecoder):
       none_ok: boolean. If True, None is also an allowed option value.
       **kwargs: Keyword arguments to pass to the base class.
     """
-    super(TypeVerifier, self).__init__(**kwargs)
+    super().__init__(**kwargs)
     if none_ok:
       self._valid_types = (type(None),) + valid_types
     else:
@@ -161,9 +168,9 @@ class TypeVerifier(ConfigOptionDecoder):
     Args:
       value: The value specified in the config.
       component_full_name: string. Fully qualified name of the configurable
-          component containing the config option.
+        component containing the config option.
       flag_values: flags.FlagValues. Runtime flag values to be propagated to
-          BaseSpec constructors.
+        BaseSpec constructors.
 
     Returns:
       The valid value.
@@ -175,9 +182,12 @@ class TypeVerifier(ConfigOptionDecoder):
       raise errors.Config.InvalidValue(
           'Invalid {0} value: "{1}" (of type "{2}"). Value must be one of the '
           'following types: {3}.'.format(
-              self._GetOptionFullName(component_full_name), value,
+              self._GetOptionFullName(component_full_name),
+              value,
               value.__class__.__name__,
-              ', '.join(t.__name__ for t in self._valid_types)))
+              ', '.join(t.__name__ for t in self._valid_types),
+          )
+      )
     return value
 
 
@@ -185,7 +195,7 @@ class BooleanDecoder(TypeVerifier):
   """Verifies and decodes a config option value when a boolean is expected."""
 
   def __init__(self, **kwargs):
-    super(BooleanDecoder, self).__init__((bool,), **kwargs)
+    super().__init__((bool,), **kwargs)
 
 
 class IntDecoder(TypeVerifier):
@@ -197,7 +207,7 @@ class IntDecoder(TypeVerifier):
   """
 
   def __init__(self, max=None, min=None, **kwargs):
-    super(IntDecoder, self).__init__((int,), **kwargs)
+    super().__init__((int,), **kwargs)
     self.max = max
     self.min = min
 
@@ -207,9 +217,9 @@ class IntDecoder(TypeVerifier):
     Args:
       value: The value specified in the config.
       component_full_name: string. Fully qualified name of the configurable
-          component containing the config option.
+        component containing the config option.
       flag_values: flags.FlagValues. Runtime flag values to be propagated to
-          BaseSpec constructors.
+        BaseSpec constructors.
 
     Returns:
       int. The valid value.
@@ -217,17 +227,20 @@ class IntDecoder(TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    value = super(IntDecoder, self).Decode(value, component_full_name,
-                                           flag_values)
+    value = super().Decode(value, component_full_name, flag_values)
     if value is not None:
       if self.max is not None and value > self.max:
         raise errors.Config.InvalidValue(
             'Invalid {0} value: "{1}". Value must be at most {2}.'.format(
-                self._GetOptionFullName(component_full_name), value, self.max))
+                self._GetOptionFullName(component_full_name), value, self.max
+            )
+        )
       if self.min is not None and value < self.min:
         raise errors.Config.InvalidValue(
             'Invalid {0} value: "{1}". Value must be at least {2}.'.format(
-                self._GetOptionFullName(component_full_name), value, self.min))
+                self._GetOptionFullName(component_full_name), value, self.min
+            )
+        )
     return value
 
 
@@ -240,7 +253,7 @@ class FloatDecoder(TypeVerifier):
   """
 
   def __init__(self, max=None, min=None, **kwargs):
-    super(FloatDecoder, self).__init__((float, int), **kwargs)
+    super().__init__((float, int), **kwargs)
     self.max = max
     self.min = min
 
@@ -250,9 +263,9 @@ class FloatDecoder(TypeVerifier):
     Args:
       value: The value specified in the config.
       component_full_name: string. Fully qualified name of the configurable
-          component containing the config option.
+        component containing the config option.
       flag_values: flags.FlagValues. Runtime flag values to be propagated to
-          BaseSpec constructors.
+        BaseSpec constructors.
 
     Returns:
       float. The valid value.
@@ -260,17 +273,20 @@ class FloatDecoder(TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    value = super(FloatDecoder, self).Decode(value, component_full_name,
-                                             flag_values)
+    value = super().Decode(value, component_full_name, flag_values)
     if value is not None:
       if self.max is not None and value > self.max:
         raise errors.Config.InvalidValue(
             'Invalid {0} value: "{1}". Value must be at most {2}.'.format(
-                self._GetOptionFullName(component_full_name), value, self.max))
+                self._GetOptionFullName(component_full_name), value, self.max
+            )
+        )
       if self.min is not None and value < self.min:
         raise errors.Config.InvalidValue(
             'Invalid {0} value: "{1}". Value must be at least {2}.'.format(
-                self._GetOptionFullName(component_full_name), value, self.min))
+                self._GetOptionFullName(component_full_name), value, self.min
+            )
+        )
     return value
 
 
@@ -278,7 +294,7 @@ class StringDecoder(TypeVerifier):
   """Verifies and decodes a config option value when a string is expected."""
 
   def __init__(self, **kwargs):
-    super(StringDecoder, self).__init__(six.string_types, **kwargs)
+    super().__init__(six.string_types, **kwargs)
 
 
 class ListDecoder(TypeVerifier):
@@ -289,10 +305,10 @@ class ListDecoder(TypeVerifier):
 
     Args:
       item_decoder: ConfigOptionDecoder. Used to decode the items of an input
-          list.
+        list.
       **kwargs: Keyword arguments to pass to the base class.
     """
-    super(ListDecoder, self).__init__((list,), **kwargs)
+    super().__init__((list,), **kwargs)
     self._item_decoder = item_decoder
 
   def Decode(self, value, component_full_name, flag_values):
@@ -301,9 +317,9 @@ class ListDecoder(TypeVerifier):
     Args:
       value: The value specified in the config.
       component_full_name: string. Fully qualified name of the configurable
-          component containing the config option.
+        component containing the config option.
       flag_values: flags.FlagValues. Runtime flag values to be propagated to
-          BaseSpec constructors.
+        BaseSpec constructors.
 
     Returns:
       None if the input value was None. Otherwise, a list containing the decoded
@@ -312,67 +328,14 @@ class ListDecoder(TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    input_list = super(ListDecoder, self).Decode(value, component_full_name,
-                                                 flag_values)
+    input_list = super().Decode(value, component_full_name, flag_values)
     if input_list is None:
       return None
     list_full_name = self._GetOptionFullName(component_full_name)
     result = []
     for index, input_item in enumerate(input_list):
       item_full_name = '{0}[{1}]'.format(list_full_name, index)
-      result.append(self._item_decoder.Decode(input_item, item_full_name,
-                                              flag_values))
+      result.append(
+          self._item_decoder.Decode(input_item, item_full_name, flag_values)
+      )
     return result
-
-
-class PerCloudConfigSpec(spec.BaseSpec):
-  """Contains one config dict attribute per cloud provider.
-
-  The name of each attribute is the name of the cloud provider.
-  """
-
-  @classmethod
-  def _GetOptionDecoderConstructions(cls):
-    """Gets decoder classes and constructor args for each configurable option.
-
-    Returns:
-      dict. Maps option name string to a (ConfigOptionDecoder class, dict) pair.
-      The pair specifies a decoder class and its __init__() keyword arguments
-      to construct in order to decode the named option.
-    """
-    result = super()._GetOptionDecoderConstructions()
-    for cloud in provider_info.VALID_CLOUDS:
-      result[cloud] = TypeVerifier, {
-          'default': None,
-          'valid_types': (dict,)
-      }
-    return result
-
-
-class PerCloudConfigDecoder(TypeVerifier):
-  """Decodes the disk_spec or vm_spec option of a VM group config object."""
-
-  def __init__(self, **kwargs):
-    super(PerCloudConfigDecoder, self).__init__(valid_types=(dict,), **kwargs)
-
-  def Decode(self, value, component_full_name, flag_values):
-    """Decodes the disk_spec or vm_spec option of a VM group config object.
-
-    Args:
-      value: None or dict mapping cloud provider name string to a dict.
-      component_full_name: string. Fully qualified name of the configurable
-          component containing the config option.
-      flag_values: flags.FlagValues. Runtime flag values to be propagated to
-          BaseSpec constructors.
-
-    Returns:
-      _PerCloudConfigSpec decoded from the input dict.
-    """
-    input_dict = super(PerCloudConfigDecoder, self).Decode(
-        value, component_full_name, flag_values)
-    if input_dict is None:
-      return None
-    return PerCloudConfigSpec(
-        self._GetOptionFullName(component_full_name),
-        flag_values=flag_values,
-        **input_dict)

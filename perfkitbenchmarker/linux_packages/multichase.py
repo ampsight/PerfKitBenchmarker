@@ -16,19 +16,24 @@
 """Module containing multichase installation and cleanup functions."""
 
 GIT_PATH = 'https://github.com/google/multichase'
-GIT_VERSION = 'ebd614435f9d510963c5568d840ff647ca8e3701'
+GIT_VERSION = '6188a9fba4cc2edd736e8082aa8911686ae6bc66'
 INSTALL_PATH = 'multichase'
 
 
 def _Install(vm):
   """Installs the multichase package on the VM."""
   vm.Install('build_tools')
-  vm.RemoteCommand('rm -rf {path} && mkdir -p {path}'.format(
-      path=INSTALL_PATH))
-  vm.RemoteCommand('git clone --recursive {git_path} {dir}'.format(
-      dir=INSTALL_PATH, git_path=GIT_PATH))
-  vm.RemoteCommand('cd {dir} && git checkout {version} && make'.format(
-      dir=INSTALL_PATH, version=GIT_VERSION))
+  vm.RemoteCommand('rm -rf {path} && mkdir -p {path}'.format(path=INSTALL_PATH))
+  vm.RemoteCommand(
+      'git clone --recursive {git_path} {dir}'.format(
+          dir=INSTALL_PATH, git_path=GIT_PATH
+      )
+  )
+  vm.RemoteCommand(
+      'cd {dir} && git checkout {version} && make'.format(
+          dir=INSTALL_PATH, version=GIT_VERSION
+      )
+  )
 
 
 def YumInstall(vm):

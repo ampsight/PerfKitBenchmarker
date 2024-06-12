@@ -1,4 +1,5 @@
 ### Breaking changes:
+
 -   Added --accept_licenses flag. User have to turn this flag on to acknowledge
     that PKB may install software thereby accepting license agreements on the
     user's behalf.
@@ -46,9 +47,37 @@
     dataflow_max_worker_count in spec to allow users to set this parameter on
     their own.
 -   Remove flag fio_write_against_multiple_clients from FIO.
+-   Remove flag benchmark_compatibility_checking.
 -   Drop windows coremark benchmark.
 -   Remove cudnn linux package.
 -   Make Ubuntu 20 the default os_type.
+-   Default `--ip_addresses` to `INTERNAL`.
+-   Add multichase_benchmark flag defaults.
+-   For hammerdbcli_benchmark, set default num_warehouses=25*num_cpus and
+    num_vu=2*num_cpus.
+-   Remove old `spark_benchmark` and `hadoop_terasort_benchmark` and related
+    services. Prefer to use the newer `dpb_generic_benchmark` and
+    `dpb_terasort_benchmark`.
+-   gcp/aws/azure_provisioned_iops/throughput flags are unified to
+    provisioned_iops/throughput flags.
+-   aws_dynamodb_ycsb benchmark now requires an explicit
+    `--aws_dynamodb_ycsb_cli_profile` flag to select the credentials to talk to
+    YCSB.
+-   Benchmarks that require EC2 client VMs now require
+    `--aws_ec2_instance_profile` to configure VM permissions instead of
+    installing local AWS CLI credentials via aws_credentials.py. This must be
+    set up by the user beforehand. See
+    [AWS documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2_instance-profiles.html)
+    - Alternatively for EKS benchmarking, clusters require
+    --aws_eks_pod_identity_role for Kubernetes VMs inside the cluster calling
+    APIs. The role must be set up by the user beforehand. See
+    [AWS documentation](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-association.html)
+-   Split `--azure_preprovisioned_data_bucket` into
+    `--azure_preprovisioned_data_account` and
+    `--azure_preprovisioned_data_subscription`, which allows cross-subscription
+    access.
+-   Remove Rocky Linux on Azure.
+-   Changed supported Python version to 3.11.
 
 ### New features:
 
@@ -132,15 +161,27 @@
 -   Add support for multi-network creation/attachment. PKB currently does not
     handle subnet creation on an existing network.
 -   Add support for GCE Confidential VM's.
--   Add cos-dev, cos105, cos101, cos97, and cos93 OS support for GCP.
+-   Add cos-dev, cost109, cos105, and cos101 OS support for GCP.
 -   Add --object_ttl_days flag for lifecycle management of created buckets.
 -   Add support for multi-NIC netperf throughput on AWS.
 -   Added AWS/GCP support for Data Plane Development Kit (DPDK) on Linux VM's to
     improve networking performance, as well as a DPDK benchmark for testpmd.
 -   Add --dpb_hardware_hourly_cost and --dpb_service_premium_hourly_cost to
--   Add support for Spanner Postgres benchmarking with TPCC.
-    estimate cost of DPB service in benchmark runs.
--   Add --dpb_dynamic_allocation flag to disable dynamic allocation in Spark benchmarks.
+-   Add support for Spanner Postgres benchmarking with TPCC. estimate cost of
+    DPB service in benchmark runs.
+-   Add --dpb_dynamic_allocation flag to disable dynamic allocation in Spark
+    benchmarks.
+-   Add support for benchmarking VMs with Local SSD on Windows on GCE/AWS/Azure.
+-   Add support for Debian 12.
+-   Add netperf_hammerdbcli benchmark, which executes netperf and hammerdbcli
+    benchmarks in parallel.
+-   Add default_benchmark_config.yaml and merge it with user_config. This is
+    done before config overrides. Within default_benchmark_config.yaml, add
+    configs for netperf_tcp_rr, netperf_tcp_stream, and hammerdbcli_mysql.
+-   Add support for Ubuntu 23.10.
+-   HammerDB enables "Use All Warehouses" by default for increased I/O.
+-   Add Ubuntu 24.04 support for GCP, AWS, and Azure Providers.
+-   Add keydb_memtier_benchmark (KeyDB is a fork of Redis).
 
 ### Enhancements:
 
@@ -264,6 +305,21 @@
     create` and `gcloud compute operations describe`.
 -   Update AWS/Azure/GCP data disks to use cheap ssds rather than hdds.
 -   Support Azure ZRS disks and hyperdisk balanced.
+-   Add --create_container_cluster_time_resize option to time adding node to
+    provisioned Kubernetes clusters.
+-   Removed --container_cluster_cloud & --cloud=Kubernetes. Now to run VM
+    benchmarks on Kubernetes, just set --cloud=GCP (or whichever) and
+    --vm_platform=Kubernetes.
+-   Added function under perfkitbenchmarker.publisher to de-serialize labels
+    from a string.
+-   Add support for S3 Express One Zone buckets with --object_storage_zone.
+-   Add `--always_call_cleanup` flag for runs that need to run Cleanup, but may
+    fail in Provision.
+-   Add support for setting an app profile to use on an existing instance via
+    `--google_bigtable_app_profile_id` for Cloud Bigtable YCSB benchmarks.
+-   Add retryable failure sub-statuses for runs that fail on a `vm_util.Retry()`
+    command timing out or exceeding its retry limit.
+-   Local disks not included in striping are now available as scratch disks.
 
 ### Bug fixes and maintenance updates:
 
@@ -319,7 +375,7 @@
 -   Updated required numpy and six versions.
 -   Added `--hadoop_bin_url` flag to allow overrides for Hadoop downloads.
 -   Make RunBenchmark handle KeyboardInterrupt so that benchmark specific
-    resources can be cleaned up on cancellation.
+    resources can be cleaned up on cancellation. Expose these errors via status.
 -   Added --ycsb_fail_on_incomplete_loading flag to allow the test to fail fast
     in the case of table loading failures. --ycsb_insert_error_metric can be
     used to determine which metric indicates that loading failed (defaults to
@@ -395,3 +451,22 @@
 -   Remove cygwin codepath.
 -   Moved flags from `pkb.py` to `flags.py` to help avoid circular dependencies.
 -   Updated tracer dstat to use pcp dstat.
+-   Removed Windows 2012 after loss of support on all clouds.
+-   Formatted entire directory with https://github.com/google/pyink.
+-   Added a new flag `--azure_attach_disk_with_create` (default=True) to
+    enable/disable attach of disks to VM as a part of Disk creation for Azure.
+-   Using the flag `--gcp_create_disks_with_vm=false` in provision_disk
+    benchmark to separate disk creation from VM creation in GCP and get the disk
+    create and attach time.
+-   Reduce duplicate code in MaintenanceEventTrigger.AppendSamples().
+-   Attach "run_number" label to "LM Total Time" sample.
+-   Refactored `azure_virtual_machine.py` to use `azure_disk_strategies.py` and
+    Enabled disk provision benchmark for Azure.
+-   Refactored `aws_virtual_machine.py` to use `aws_disk_strategies.py` and
+    Enabled disk provision benchmark for AWS by using
+    `--aws_create_disks_with_vm`.
+-   Enabled parallel/bulk create and attach of GCE, AWS and Azure remote disks.
+-   Set `--always_call_cleanup=True` flag as the default for `cluster_boot`.
+    This prevents leaking `tcpdump` processes from runs that fail in the
+    Provision phase.
+-   Test change.

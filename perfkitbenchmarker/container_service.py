@@ -20,89 +20,103 @@ without pre-provisioning container clusters. In the future, this may be
 expanded to support first-class container benchmarks.
 """
 
+import calendar
 import collections
+import dataclasses
+import datetime
 import functools
 import ipaddress
 import itertools
 import logging
 import os
+import re
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from absl import flags
 import jinja2
 from perfkitbenchmarker import context
-from perfkitbenchmarker import custom_virtual_machine_spec
 from perfkitbenchmarker import data
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import events
 from perfkitbenchmarker import kubernetes_helper
 from perfkitbenchmarker import os_types
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import units
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
-from perfkitbenchmarker.configs import option_decoders
-from perfkitbenchmarker.configs import spec
+from perfkitbenchmarker.configs import container_spec as container_spec_lib
 import requests
 import six
 import yaml
 
-KUBERNETES = 'Kubernetes'
-DEFAULT_NODEPOOL = 'default'
+BenchmarkSpec = Any  # benchmark_spec lib imports this module.
+
+KUBERNETES = container_spec_lib.KUBERNETES
+DEFAULT_NODEPOOL = container_spec_lib.DEFAULT_NODEPOOL
 
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string(
-    'kubeconfig', None, 'Path to kubeconfig to be used by kubectl. '
-    'If unspecified, it will be set to a file in this run\'s '
-    'temporary directory.')
+    'kubeconfig',
+    None,
+    'Path to kubeconfig to be used by kubectl. '
+    "If unspecified, it will be set to a file in this run's "
+    'temporary directory.',
+)
 
 flags.DEFINE_string('kubectl', 'kubectl', 'Path to kubectl tool')
 
 flags.DEFINE_boolean(
-    'local_container_build', False,
+    'local_container_build',
+    False,
     'Force container images to be built locally rather than '
     'just as a fallback if there is no remote image builder '
-    'associated with the registry.')
+    'associated with the registry.',
+)
 
 flags.DEFINE_boolean(
-    'static_container_image', True,
+    'static_container_image',
+    True,
     'Whether container images are static (i.e. are not '
     'managed by PKB). If this is set, PKB will accept the '
     'image as fully qualified (including repository) and will '
-    'not attempt to build it.')
+    'not attempt to build it.',
+)
 
 flags.DEFINE_boolean(
-    'force_container_build', False,
+    'force_container_build',
+    False,
     'Whether to force PKB to build container images even '
-    'if they already exist in the registry.')
-
-flags.DEFINE_string(
-    'container_cluster_cloud', None,
-    'Sets the cloud to use for the container cluster. '
-    'This will override both the value set in the config and '
-    'the value set using the generic "cloud" flag.')
+    'if they already exist in the registry.',
+)
 
 flags.DEFINE_integer(
-    'container_cluster_num_vms', None,
-    'Number of nodes in the cluster. Defaults to '
-    'container_cluster.vm_count')
-
-flags.DEFINE_string('container_cluster_type', KUBERNETES,
-                    'The type of container cluster.')
+    'container_cluster_num_vms',
+    None,
+    'Number of nodes in the cluster. Defaults to container_cluster.vm_count',
+)
 
 flags.DEFINE_string(
-    'container_cluster_version', None,
+    'container_cluster_type', KUBERNETES, 'The type of container cluster.'
+)
+
+flags.DEFINE_string(
+    'container_cluster_version',
+    None,
     'Optional version flag to pass to the cluster create '
     'command. If not specified, the cloud-specific container '
-    'implementation will chose an appropriate default.')
+    'implementation will chose an appropriate default.',
+)
 
 _CONTAINER_CLUSTER_ARCHITECTURE = flags.DEFINE_list(
-    'container_cluster_architecture', ['linux/amd64'],
+    'container_cluster_architecture',
+    ['linux/amd64'],
     'The architecture(s) that the container cluster uses. '
-    'Defaults to linux/amd64')
+    'Defaults to linux/amd64',
+)
 
 _K8S_INGRESS = """
 apiVersion: extensions/v1beta1
@@ -121,95 +135,44 @@ class ContainerException(errors.Error):
   """Exception during the creation or execution of a container."""
 
 
-class FatalContainerException(errors.Resource.CreationError,
-                              ContainerException):
+class FatalContainerException(
+    errors.Resource.CreationError, ContainerException
+):
   """Fatal Exception during the creation or execution of a container."""
+
   pass
 
 
-class RetriableContainerException(errors.Resource.RetryableCreationError,
-                                  ContainerException):
+class RetriableContainerException(
+    errors.Resource.RetryableCreationError, ContainerException
+):
   """Retriable Exception during the creation or execution of a container."""
+
   pass
 
 
-def RunKubectlCommand(command: List[str], **kwargs):
+def RunKubectlCommand(command: list[str], **kwargs):
   """Run a kubectl command."""
   cmd = [FLAGS.kubectl, '--kubeconfig', FLAGS.kubeconfig] + command
   return vm_util.IssueCommand(cmd, **kwargs)
 
 
-class ContainerSpec(spec.BaseSpec):
-  """Class containing options for creating containers."""
-
-  @classmethod
-  def _ApplyFlags(cls, config_values, flag_values):
-    """Apply flag settings to the container spec."""
-    super(ContainerSpec, cls)._ApplyFlags(config_values, flag_values)
-    if flag_values['image'].present:
-      config_values['image'] = flag_values.image
-    if flag_values['static_container_image'].present:
-      config_values['static_image'] = flag_values.static_container_image
-
-  @classmethod
-  def _GetOptionDecoderConstructions(cls):
-    """Gets decoder classes and constructor args for each configurable option.
-
-    Can be overridden by derived classes to add options or impose additional
-    requirements on existing options.
-
-    Returns:
-      dict. Maps option name string to a (ConfigOptionDecoder class, dict) pair.
-          The pair specifies a decoder class and its __init__() keyword
-          arguments to construct in order to decode the named option.
-    """
-    result = super(ContainerSpec, cls)._GetOptionDecoderConstructions()
-    result.update({
-        'image': (option_decoders.StringDecoder, {
-            'default': None
-        }),
-        'static_image': (option_decoders.BooleanDecoder, {
-            'default': False
-        }),
-        'cpus': (option_decoders.FloatDecoder, {
-            'default': None
-        }),
-        'memory': (custom_virtual_machine_spec.MemoryDecoder, {
-            'default': None
-        }),
-        'command': (_CommandDecoder, {}),
-        'container_port': (option_decoders.IntDecoder, {
-            'default': 8080
-        }),
-    })
-    return result
-
-
-class _CommandDecoder(option_decoders.ListDecoder):
-  """Decodes the command/arg list for containers."""
-
-  def __init__(self, **kwargs):
-    super(_CommandDecoder, self).__init__(
-        default=None,
-        none_ok=True,
-        item_decoder=option_decoders.StringDecoder(),
-        **kwargs)
-
-
 class BaseContainer(resource.BaseResource):
   """Class representing a single container."""
 
-  def __init__(self, container_spec=None):
+  def __init__(
+      self, container_spec: Optional[container_spec_lib.ContainerSpec] = None
+  ):
     # Hack to make container_spec a kwarg
     assert container_spec
     super().__init__()
-    self.cpus = container_spec.cpus
-    self.memory = container_spec.memory
-    self.command = container_spec.command
-    self.image = container_spec.image
-    self.ip_address = None
+    self.cpus: float = container_spec.cpus
+    self.memory: int = container_spec.memory
+    self.command: list[str] = container_spec.command
+    self.image: str = container_spec.image
+    self.ip_address: Optional[str] = None
 
-  def WaitForExit(self, timeout: int = 1200) -> Dict[str, Any]:
+  def WaitForExit(self, timeout: int = 1200) -> dict[str, Any]:
     """Gets the successfully finished container.
 
     Args:
@@ -229,98 +192,45 @@ class BaseContainer(resource.BaseResource):
 class BaseContainerService(resource.BaseResource):
   """Class representing a service backed by containers."""
 
-  def __init__(self, container_spec):
-    super(BaseContainerService, self).__init__()
-    self.cpus = container_spec.cpus
-    self.memory = container_spec.memory
-    self.command = container_spec.command
-    self.image = container_spec.image
-    self.container_port = container_spec.container_port
-    self.ip_address = None
-    self.port = None
-    self.host_header = None
+  def __init__(self, container_spec: container_spec_lib.ContainerSpec):
+    super().__init__()
+    self.cpus: float = container_spec.cpus
+    self.memory: int = container_spec.memory
+    self.command: list[str] = container_spec.command
+    self.image: str = container_spec.image
+    self.container_port: int = container_spec.container_port
+    self.ip_address: Optional[str] = None
+    self.port: Optional[int] = None
+    self.host_header: Optional[str] = None
 
 
-class _ContainerImage(object):
+class ContainerImage:
   """Simple class for tracking container image names and source locations."""
 
-  def __init__(self, name):
-    self.name = name
-    self.directory = os.path.dirname(
-        data.ResourcePath(os.path.join('docker', self.name, 'Dockerfile')))
-
-
-class ContainerRegistrySpec(spec.BaseSpec):
-  """Spec containing options for creating a Container Registry."""
-
-  def __init__(self, component_full_name, flag_values=None, **kwargs):
-    super(ContainerRegistrySpec, self).__init__(
-        component_full_name, flag_values=flag_values, **kwargs)
-    registry_spec = getattr(self.spec, self.cloud, {})
-    self.project = registry_spec.get('project')
-    self.zone = registry_spec.get('zone')
-    self.name = registry_spec.get('name')
-
-  @classmethod
-  def _ApplyFlags(cls, config_values, flag_values):
-    """Apply flag values to the spec."""
-    super(ContainerRegistrySpec, cls)._ApplyFlags(config_values, flag_values)
-    if flag_values['cloud'].present or 'cloud' not in config_values:
-      config_values['cloud'] = flag_values.cloud
-    if flag_values['container_cluster_cloud'].present:
-      config_values['cloud'] = flag_values.container_cluster_cloud
-    updated_spec = {}
-    if flag_values['project'].present:
-      updated_spec['project'] = flag_values.project
-    if flag_values['zone'].present:
-      updated_spec['zone'] = flag_values.zone[0]
-    cloud = config_values['cloud']
-    cloud_spec = config_values.get('spec', {}).get(cloud, {})
-    cloud_spec.update(updated_spec)
-    config_values['spec'] = {cloud: cloud_spec}
-
-  @classmethod
-  def _GetOptionDecoderConstructions(cls):
-    """Gets decoder classes and constructor args for each configurable option.
-
-    Can be overridden by derived classes to add options or impose additional
-    requirements on existing options.
-
-    Returns:
-      dict. Maps option name string to a (ConfigOptionDecoder class, dict) pair.
-          The pair specifies a decoder class and its __init__() keyword
-          arguments to construct in order to decode the named option.
-    """
-    result = super(ContainerRegistrySpec, cls)._GetOptionDecoderConstructions()
-    result.update({
-        'cloud': (option_decoders.StringDecoder, {}),
-        'spec': (option_decoders.PerCloudConfigDecoder, {
-            'default': {}
-        })
-    })
-    return result
-
-
-def GetContainerRegistryClass(cloud):
-  return resource.GetResourceClass(BaseContainerRegistry, CLOUD=cloud)
+  def __init__(self, name: str):
+    self.name: str = name
+    self.directory: str = os.path.dirname(
+        data.ResourcePath(os.path.join('docker', self.name, 'Dockerfile'))
+    )
 
 
 class BaseContainerRegistry(resource.BaseResource):
   """Base class for container image registries."""
 
   RESOURCE_TYPE = 'BaseContainerRegistry'
+  CLOUD: str
 
-  def __init__(self, registry_spec):
-    super(BaseContainerRegistry, self).__init__()
-    benchmark_spec = context.GetThreadBenchmarkSpec()
+  def __init__(self, registry_spec: container_spec_lib.ContainerRegistrySpec):
+    super().__init__()
+    benchmark_spec: BenchmarkSpec = context.GetThreadBenchmarkSpec()
     container_cluster = getattr(benchmark_spec, 'container_cluster', None)
     zone = getattr(container_cluster, 'zone', None)
     project = getattr(container_cluster, 'project', None)
-    self.zone = registry_spec.zone or zone
-    self.project = registry_spec.project or project
-    self.name = registry_spec.name or 'pkb%s' % FLAGS.run_uri
-    self.local_build_times = {}
-    self.remote_build_times = {}
+    self.zone: str = registry_spec.zone or zone
+    self.project: str = registry_spec.project or project
+    self.name: str = registry_spec.name or 'pkb%s' % FLAGS.run_uri
+    self.local_build_times: dict[str, float] = {}
+    self.remote_build_times: dict[str, float] = {}
     self.metadata.update({'cloud': self.CLOUD})
 
   def _Create(self):
@@ -341,17 +251,19 @@ class BaseContainerRegistry(resource.BaseResource):
           'image': image_name,
       })
       samples.append(
-          sample.Sample('Image Build Time', build_time, 'seconds', metadata))
+          sample.Sample('Image Build Time', build_time, 'seconds', metadata)
+      )
     for image_name, build_time in self.remote_build_times.items():
       metadata.update({
           'build_type': 'remote',
           'image': image_name,
       })
       samples.append(
-          sample.Sample('Image Build Time', build_time, 'seconds', metadata))
+          sample.Sample('Image Build Time', build_time, 'seconds', metadata)
+      )
     return samples
 
-  def GetFullRegistryTag(self, image):
+  def GetFullRegistryTag(self, image: str):
     """Returns the full name of the image for the registry.
 
     Args:
@@ -359,11 +271,11 @@ class BaseContainerRegistry(resource.BaseResource):
     """
     raise NotImplementedError()
 
-  def PrePush(self, image):
+  def PrePush(self, image: ContainerImage):
     """Prepares registry to push a given image."""
     pass
 
-  def RemoteBuild(self, image):
+  def RemoteBuild(self, image: ContainerImage):
     """Build the image remotely.
 
     Args:
@@ -375,7 +287,7 @@ class BaseContainerRegistry(resource.BaseResource):
     """Log in to the registry (in order to push to it)."""
     raise NotImplementedError()
 
-  def LocalBuildAndPush(self, image):
+  def LocalBuildAndPush(self, image: ContainerImage):
     """Build the image locally and push to registry.
 
     Assumes we are already authenticated with the registry from self.Login.
@@ -383,7 +295,7 @@ class BaseContainerRegistry(resource.BaseResource):
     https://github.com/docker/buildx/issues/59
 
     Args:
-      image: Instance of _ContainerImage representing the image to build.
+      image: The image to build.
     """
     full_tag = self.GetFullRegistryTag(image.name)
     # Multiarch images require buildx create
@@ -396,7 +308,7 @@ class BaseContainerRegistry(resource.BaseResource):
     vm_util.IssueCommand(cmd, timeout=None)
     vm_util.IssueCommand(['docker', 'buildx', 'stop'])
 
-  def GetOrBuild(self, image):
+  def GetOrBuild(self, image: str):
     """Finds the image in the registry or builds it.
 
     TODO(pclay): Add support for build ARGs.
@@ -413,20 +325,19 @@ class BaseContainerRegistry(resource.BaseResource):
     if not FLAGS.force_container_build:
       # manifest inspect inpspects the registry's copy
       inspect_cmd = ['docker', 'manifest', 'inspect', full_image]
-      _, _, retcode = vm_util.IssueCommand(
-          inspect_cmd, raise_on_failure=False)
+      _, _, retcode = vm_util.IssueCommand(inspect_cmd, raise_on_failure=False)
       if retcode == 0:
         return full_image
     self._Build(image)
     return full_image
 
-  def _Build(self, image):
+  def _Build(self, image: str):
     """Builds the image and pushes it to the registry if necessary.
 
     Args:
       image: The PKB name for the image (string).
     """
-    image = _ContainerImage(image)
+    image = ContainerImage(image)
     build_start = time.time()
     if not FLAGS.local_container_build:
       try:
@@ -444,12 +355,17 @@ class BaseContainerRegistry(resource.BaseResource):
     self.local_build_times[image.name] = time.time() - build_start
 
 
+def GetContainerRegistryClass(cloud: str) -> type[BaseContainerRegistry]:
+  return resource.GetResourceClass(BaseContainerRegistry, CLOUD=cloud)
+
+
 @events.benchmark_start.connect
-def _SetKubeConfig(unused_sender, benchmark_spec):
+def _SetKubeConfig(unused_sender, benchmark_spec: BenchmarkSpec):
   """Sets the value for the kubeconfig flag if it's unspecified."""
   if not FLAGS.kubeconfig:
     FLAGS.kubeconfig = vm_util.PrependTempDir(
-        'kubeconfig' + str(benchmark_spec.sequence_number))
+        'kubeconfig' + str(benchmark_spec.sequence_number)
+    )
     # Store the value for subsequent run stages.
     benchmark_spec.config.flags['kubeconfig'] = FLAGS.kubeconfig
 
@@ -462,9 +378,32 @@ def NodePoolName(name: str) -> str:
   return name.replace('_', '')
 
 
-def GetContainerClusterClass(cloud, cluster_type):
-  return resource.GetResourceClass(
-      BaseContainerCluster, CLOUD=cloud, CLUSTER_TYPE=cluster_type)
+class BaseNodePoolConfig:
+  """A node pool's config, where each node in the node pool has the same config.
+
+  See also: https://cloud.google.com/kubernetes-engine/docs/concepts/node-pools
+  """
+
+  def __init__(self, vm_config: virtual_machine.BaseVirtualMachine, name: str):
+    # Use Virtual Machine class to resolve VM Spec. Note there is no actual VM;
+    # we just use it as a data holder to let VM subclass __init__'s handle
+    # parsing specific information like disks out of the spec.
+    self.machine_type = vm_config.machine_type
+    self.name = NodePoolName(name)
+    self.zone: str = vm_config.zone
+    self.sandbox_config: Optional[container_spec_lib.SandboxSpec] = None
+    self.num_nodes: int
+    self.disk_type: str
+    self.disk_size: int
+    # Defined by google_kubernetes_engine
+    self.max_local_disks: Optional[int]
+    self.gpu_type: Optional[str]
+    self.gpu_count: Optional[int]
+    self.threads_per_core: int
+    self.gce_tags: list[str]
+    self.min_cpu_platform: str
+    self.cpus: int
+    self.memory_mib: int
 
 
 class BaseContainerCluster(resource.BaseResource):
@@ -472,33 +411,89 @@ class BaseContainerCluster(resource.BaseResource):
 
   RESOURCE_TYPE = 'BaseContainerCluster'
   REQUIRED_ATTRS = ['CLOUD', 'CLUSTER_TYPE']
+  CLOUD: str
+  CLUSTER_TYPE: str
 
-  def __init__(self, cluster_spec):
+  def __init__(self, cluster_spec: container_spec_lib.ContainerClusterSpec):
     super().__init__(user_managed=bool(cluster_spec.static_cluster))
-    self.name = cluster_spec.static_cluster or 'pkb-' + FLAGS.run_uri
-    self.vm_config = virtual_machine.GetVmClass(self.CLOUD, os_types.DEFAULT)(
-        cluster_spec.vm_spec)
-    self.zone = self.vm_config.zone
-    # Use Virtual Machine class to resolve VM Spec. This lets subclasses parse
-    # Provider specific information like disks out of the spec.
-    for name, nodepool in cluster_spec.nodepools.copy().items():
-      nodepool_zone = nodepool.vm_spec.zone
-      # VM Classes can require zones. But nodepools have optional zones.
-      if not nodepool_zone:
-        nodepool.vm_spec.zone = self.zone
-      nodepool.vm_config = virtual_machine.GetVmClass(
-          self.CLOUD, os_types.DEFAULT)(nodepool.vm_spec)
-      nodepool.vm_config.zone = nodepool_zone
-      nodepool.num_nodes = nodepool.vm_count
-      # Fix name
-      del cluster_spec.nodepools[name]
-      cluster_spec.nodepools[NodePoolName(name)] = nodepool
-    self.nodepools = cluster_spec.nodepools
-    self.num_nodes = cluster_spec.vm_count
-    self.min_nodes = cluster_spec.min_vm_count or self.num_nodes
-    self.max_nodes = cluster_spec.max_vm_count or self.num_nodes
-    self.containers = collections.defaultdict(list)
-    self.services = {}
+    self.name: str = cluster_spec.static_cluster or 'pkb-' + FLAGS.run_uri
+    # Go get a BaseVM, to use strictly for config values.
+    default_vm_class = virtual_machine.GetVmClass(
+        self.CLOUD, os_types.DEFAULT, provider_info.DEFAULT_VM_PLATFORM
+    )
+    default_vm_config: virtual_machine.BaseVirtualMachine = default_vm_class(
+        cluster_spec.vm_spec
+    )
+    self.default_nodepool = self._InitializeDefaultNodePool(
+        cluster_spec, default_vm_config
+    )
+    self.nodepools: dict[str, BaseNodePoolConfig] = {}
+    for name, nodepool_spec in cluster_spec.nodepools.copy().items():
+      vm_config: virtual_machine.BaseVirtualMachine = default_vm_class(
+          nodepool_spec.vm_spec
+      )
+      nodepool = self._InitializeNodePool(name, nodepool_spec, vm_config)
+      self.nodepools[nodepool.name] = nodepool
+    self.min_nodes: int = (
+        cluster_spec.min_vm_count or self.default_nodepool.num_nodes
+    )
+    self.max_nodes: int = (
+        cluster_spec.max_vm_count or self.default_nodepool.num_nodes
+    )
+    self.containers: dict[str, list[KubernetesContainer]] = (
+        collections.defaultdict(list)
+    )
+    self.services: dict[str, KubernetesContainerService] = {}
+
+  @property
+  def num_nodes(self) -> int:
+    return self.default_nodepool.num_nodes
+
+  @property
+  def zone(self) -> str:
+    return self.default_nodepool.zone
+
+  def _InitializeDefaultNodePool(
+      self,
+      cluster_spec: container_spec_lib.ContainerClusterSpec,
+      vm_config: virtual_machine.BaseVirtualMachine,
+  ) -> BaseNodePoolConfig:
+    nodepool_config = BaseNodePoolConfig(
+        vm_config,
+        DEFAULT_NODEPOOL,
+    )
+    nodepool_config.num_nodes = cluster_spec.vm_count
+    self.InitializeNodePoolForCloud(vm_config, nodepool_config)
+    return nodepool_config
+
+  def _InitializeNodePool(
+      self,
+      name: str,
+      nodepool_spec: container_spec_lib.NodepoolSpec,
+      vm_config: virtual_machine.BaseVirtualMachine,
+  ) -> BaseNodePoolConfig:
+    zone = (
+        nodepool_spec.vm_spec.zone
+        if nodepool_spec.vm_spec
+        else self.default_nodepool.zone
+    )
+    nodepool_config = BaseNodePoolConfig(
+        vm_config,
+        name,
+    )
+    nodepool_config.sandbox_config = nodepool_spec.sandbox_config
+    nodepool_config.zone = zone
+    nodepool_config.num_nodes = nodepool_spec.vm_count
+    self.InitializeNodePoolForCloud(vm_config, nodepool_config)
+    return nodepool_config
+
+  def InitializeNodePoolForCloud(
+      self,
+      vm_config: virtual_machine.BaseVirtualMachine,
+      nodepool_config: BaseNodePoolConfig,
+  ):
+    """Override to initialize cloud specific configs."""
+    pass
 
   def DeleteContainers(self):
     """Delete containers belonging to the cluster."""
@@ -512,29 +507,32 @@ class BaseContainerCluster(resource.BaseResource):
 
   def GetResourceMetadata(self):
     """Returns a dictionary of cluster metadata."""
-    nodepools = {}
+    nodepools_metadata = {}
     for name, nodepool in six.iteritems(self.nodepools):
       nodepool_metadata = {
           'size': nodepool.num_nodes,
-          'machine_type': nodepool.vm_config.machine_type,
+          'machine_type': nodepool.machine_type,
           'name': name,
       }
       if nodepool.sandbox_config is not None:
         nodepool_metadata['sandbox_config'] = {
             'type': nodepool.sandbox_config.type,
         }
-      nodepools[name] = nodepool_metadata
+      nodepools_metadata[name] = nodepool_metadata
 
     metadata = {
         'cloud': self.CLOUD,
         'cluster_type': self.CLUSTER_TYPE,
-        'zone': self.zone,
-        'size': self.num_nodes,
-        'machine_type': self.vm_config.machine_type,
-        'nodepools': nodepools,
+        'zone': self.default_nodepool.zone,
+        'size': self.default_nodepool.num_nodes,
+        'machine_type': self.default_nodepool.machine_type,
+        'nodepools': nodepools_metadata,
     }
 
-    if self.min_nodes != self.num_nodes or self.max_nodes != self.num_nodes:
+    if (
+        self.min_nodes != self.default_nodepool.num_nodes
+        or self.max_nodes != self.default_nodepool.num_nodes
+    ):
       metadata.update({
           'max_size': self.max_nodes,
           'min_size': self.min_nodes,
@@ -546,7 +544,7 @@ class BaseContainerCluster(resource.BaseResource):
     """Deploys Containers according to the ContainerSpec."""
     raise NotImplementedError()
 
-  def DeployContainerService(self, name, container_spec, num_containers):
+  def DeployContainerService(self, name, container_spec):
     """Deploys a ContainerSerivice according to the ContainerSpec."""
     raise NotImplementedError()
 
@@ -560,13 +558,19 @@ class BaseContainerCluster(resource.BaseResource):
             sample.Sample(
                 'Container Deployment Time',
                 container.resource_ready_time - container.create_start_time,
-                'seconds', metadata))
+                'seconds',
+                metadata,
+            )
+        )
       if container.delete_end_time and container.delete_start_time:
         samples.append(
             sample.Sample(
                 'Container Delete Time',
                 container.delete_end_time - container.delete_start_time,
-                'seconds', metadata))
+                'seconds',
+                metadata,
+            )
+        )
     for service in self.services.values():
       metadata = {'image': service.image.split('/')[-1]}
       if service.resource_ready_time and service.create_start_time:
@@ -574,14 +578,33 @@ class BaseContainerCluster(resource.BaseResource):
             sample.Sample(
                 'Service Deployment Time',
                 service.resource_ready_time - service.create_start_time,
-                'seconds', metadata))
+                'seconds',
+                metadata,
+            )
+        )
       if service.delete_end_time and service.delete_start_time:
         samples.append(
-            sample.Sample('Service Delete Time',
-                          service.delete_end_time - service.delete_start_time,
-                          'seconds', metadata))
+            sample.Sample(
+                'Service Delete Time',
+                service.delete_end_time - service.delete_start_time,
+                'seconds',
+                metadata,
+            )
+        )
 
     return samples
+
+  def ResizeNodePool(self, new_size: int, node_pool: str = DEFAULT_NODEPOOL):
+    """Change the number of nodes in the node pool."""
+    raise NotImplementedError
+
+
+def GetContainerClusterClass(
+    cloud: str, cluster_type: str
+) -> type[BaseContainerCluster]:
+  return resource.GetResourceClass(
+      BaseContainerCluster, CLOUD=cloud, CLUSTER_TYPE=cluster_type
+  )
 
 
 class KubernetesPod:
@@ -596,18 +619,19 @@ class KubernetesPod:
     assert name
     self.name = name
 
-  def _GetPod(self) -> Dict[str, Any]:
+  def _GetPod(self) -> dict[str, Any]:
     """Gets a representation of the POD and returns it."""
     stdout, _, _ = RunKubectlCommand(['get', 'pod', self.name, '-o', 'yaml'])
     pod = yaml.safe_load(stdout)
     self.ip_address = pod.get('status', {}).get('podIP')
     return pod
 
-  def WaitForExit(self, timeout: int = None) -> Dict[str, Any]:
+  def WaitForExit(self, timeout: Optional[int] = None) -> dict[str, Any]:
     """Gets the finished running container."""
 
     @vm_util.Retry(
-        timeout=timeout, retryable_exceptions=(RetriableContainerException,))
+        timeout=timeout, retryable_exceptions=(RetriableContainerException,)
+    )
     def _WaitForExit():
       # Inspect the pod's status to determine if it succeeded, has failed, or is
       # doomed to fail.
@@ -619,25 +643,32 @@ class KubernetesPod:
         return pod
       elif phase == 'Failed':
         raise FatalContainerException(
-            f"Pod {self.name} failed:\n{yaml.dump(pod['status'])}")
+            f"Pod {self.name} failed:\n{yaml.dump(pod['status'])}"
+        )
       else:
         for condition in status.get('conditions', []):
-          if (condition['type'] == 'PodScheduled' and
-              condition['status'] == 'False' and
-              condition['reason'] == 'Unschedulable'):
+          if (
+              condition['type'] == 'PodScheduled'
+              and condition['status'] == 'False'
+              and condition['reason'] == 'Unschedulable'
+          ):
             # TODO(pclay): Revisit this when we scale clusters.
             raise FatalContainerException(
-                f"Pod {self.name} failed to schedule:\n{condition['message']}")
+                f"Pod {self.name} failed to schedule:\n{condition['message']}"
+            )
         for container_status in status.get('containerStatuses', []):
           waiting_status = container_status['state'].get('waiting', {})
           if waiting_status.get('reason') in [
-              'ErrImagePull', 'ImagePullBackOff'
+              'ErrImagePull',
+              'ImagePullBackOff',
           ]:
             raise FatalContainerException(
-                f'Failed to find container image for {status.name}:\n' +
-                yaml.dump(waiting_status.get('message')))
+                f'Failed to find container image for {status.name}:\n'
+                + yaml.dump(waiting_status.get('message'))
+            )
         raise RetriableContainerException(
-            f'Pod phase ({phase}) not in finished phases.')
+            f'Pod phase ({phase}) not in finished phases.'
+        )
 
     return _WaitForExit()
 
@@ -686,15 +717,17 @@ class KubernetesContainerService(BaseContainerService):
   """A Kubernetes flavor of Container Service."""
 
   def __init__(self, container_spec, name):
-    super(KubernetesContainerService, self).__init__(container_spec)
+    super().__init__(container_spec)
     self.name = name
     self.port = 8080
 
   def _Create(self):
     run_cmd = [
-        'run', self.name,
-        '--image=%s' % self.image, '--port',
-        str(self.port)
+        'run',
+        self.name,
+        '--image=%s' % self.image,
+        '--port',
+        str(self.port),
     ]
 
     limits = []
@@ -711,9 +744,13 @@ class KubernetesContainerService(BaseContainerService):
     RunKubectlCommand(run_cmd)
 
     expose_cmd = [
-        'expose', 'deployment', self.name, '--type', 'NodePort',
+        'expose',
+        'deployment',
+        self.name,
+        '--type',
+        'NodePort',
         '--target-port',
-        str(self.port)
+        str(self.port),
     ]
     RunKubectlCommand(expose_cmd)
     with vm_util.NamedTemporaryFile() as tf:
@@ -725,8 +762,11 @@ class KubernetesContainerService(BaseContainerService):
     """Attempts to set the Service's ip address."""
     ingress_name = '%s-ingress' % self.name
     get_cmd = [
-        'get', 'ing', ingress_name, '-o',
-        'jsonpath={.status.loadBalancer.ingress[*].ip}'
+        'get',
+        'ing',
+        ingress_name,
+        '-o',
+        'jsonpath={.status.loadBalancer.ingress[*].ip}',
     ]
     stdout, _, _ = RunKubectlCommand(get_cmd)
     ip_address = stdout
@@ -767,20 +807,18 @@ class KubernetesCluster(BaseContainerCluster):
     deleted here to prevent dynamically provisioned PDs from leaking once the
     cluster has been deleted.
     """
-    run_cmd = [
-        'delete', 'all', '--all', '-n', 'default'
-    ]
+    run_cmd = ['delete', 'all', '--all', '-n', 'default']
     RunKubectlCommand(run_cmd)
 
-    run_cmd = [
-        'delete', 'pvc', '--all', '-n', 'default'
-    ]
+    run_cmd = ['delete', 'pvc', '--all', '-n', 'default']
     RunKubectlCommand(run_cmd)
     # There maybe a slight race if resources are cleaned up in the background
     # where deleting the cluster immediately prevents the PVCs from being
     # deleted.
-    logging.info('Sleeping for %s seconds to give resources time to delete.',
-                 RESOURCE_DELETE_SLEEP_SECONDS)
+    logging.info(
+        'Sleeping for %s seconds to give resources time to delete.',
+        RESOURCE_DELETE_SLEEP_SECONDS,
+    )
     time.sleep(RESOURCE_DELETE_SLEEP_SECONDS)
 
   def _Delete(self):
@@ -793,21 +831,26 @@ class KubernetesCluster(BaseContainerCluster):
       result['container_cluster_version'] = self.k8s_version
     return result
 
-  def DeployContainer(self, base_name, container_spec):
+  def DeployContainer(
+      self, name: str, container_spec: container_spec_lib.ContainerSpec
+  ):
     """Deploys Containers according to the ContainerSpec."""
+    base_name = name
     name = base_name + str(len(self.containers[base_name]))
     container = KubernetesContainer(container_spec=container_spec, name=name)
     self.containers[base_name].append(container)
     container.Create()
 
-  def DeployContainerService(self, name, container_spec):
+  def DeployContainerService(
+      self, name: str, container_spec: container_spec_lib.ContainerSpec
+  ):
     """Deploys a ContainerSerivice according to the ContainerSpec."""
     service = KubernetesContainerService(container_spec, name)
     self.services[name] = service
     service.Create()
 
   # TODO(pclay): Revisit instance methods that don't rely on instance data.
-  def ApplyManifest(self, manifest_file, **kwargs):
+  def ApplyManifest(self, manifest_file: str, **kwargs):
     """Applies a declarative Kubernetes manifest; possibly with jinja.
 
     Args:
@@ -822,7 +865,8 @@ class KubernetesCluster(BaseContainerCluster):
 
     environment = jinja2.Environment(undefined=jinja2.StrictUndefined)
     with open(filename) as template_file, vm_util.NamedTemporaryFile(
-        mode='w', suffix='.yaml') as rendered_template:
+        mode='w', suffix='.yaml'
+    ) as rendered_template:
       manifest = environment.from_string(template_file.read()).render(kwargs)
       rendered_template.write(manifest)
       rendered_template.close()
@@ -830,37 +874,42 @@ class KubernetesCluster(BaseContainerCluster):
 
   def WaitForResource(
       self,
-      resource_name,
-      condition_name,
-      namespace=None,
-      timeout=vm_util.DEFAULT_TIMEOUT,
+      resource_name: str,
+      condition_name: str,
+      namespace: Optional[str] = None,
+      timeout: int = vm_util.DEFAULT_TIMEOUT,
   ):
     """Waits for a condition on a Kubernetes resource (eg: deployment, pod)."""
     run_cmd = [
-        'wait', f'--for=condition={condition_name}',
-        f'--timeout={timeout}s', resource_name
+        'wait',
+        f'--for=condition={condition_name}',
+        f'--timeout={timeout}s',
+        resource_name,
     ]
     if namespace:
       run_cmd.append(f'--namespace={namespace}')
     RunKubectlCommand(run_cmd, timeout=timeout + 10)
 
-  def WaitForRollout(self, resource_name):
+  def WaitForRollout(self, resource_name: str):
     """Blocks until a Kubernetes rollout is completed."""
     run_cmd = [
         'rollout',
         'status',
         '--timeout=%ds' % vm_util.DEFAULT_TIMEOUT,
-        resource_name
+        resource_name,
     ]
 
     RunKubectlCommand(run_cmd)
 
   @vm_util.Retry(retryable_exceptions=(errors.Resource.RetryableCreationError,))
-  def GetLoadBalancerIP(self, service_name):
+  def GetLoadBalancerIP(self, service_name: str):
     """Returns the IP address of a LoadBalancer service when ready."""
     get_cmd = [
-        'get', 'service', service_name, '-o',
-        'jsonpath={.status.loadBalancer.ingress[0].ip}'
+        'get',
+        'service',
+        service_name,
+        '-o',
+        'jsonpath={.status.loadBalancer.ingress[0].ip}',
     ]
 
     stdout, _, _ = RunKubectlCommand(get_cmd)
@@ -870,26 +919,32 @@ class KubernetesCluster(BaseContainerCluster):
       ip_address = ipaddress.ip_address(stdout)
     except ValueError:
       raise errors.Resource.RetryableCreationError(
-          "Load Balancer IP for service '%s' is not ready." % service_name)
+          "Load Balancer IP for service '%s' is not ready." % service_name
+      )
 
     return format(ip_address)
 
   @vm_util.Retry(retryable_exceptions=(errors.Resource.RetryableCreationError,))
-  def GetClusterIP(self, service_name) -> str:
+  def GetClusterIP(self, service_name: str) -> str:
     """Returns the IP address of a ClusterIP service when ready."""
     get_cmd = [
-        'get', 'service', service_name, '-o', 'jsonpath={.spec.clusterIP}'
+        'get',
+        'service',
+        service_name,
+        '-o',
+        'jsonpath={.spec.clusterIP}',
     ]
 
     stdout, _, _ = RunKubectlCommand(get_cmd)
 
     if not stdout:
       raise errors.Resource.RetryableCreationError(
-          "ClusterIP for service '%s' is not ready." % service_name)
+          "ClusterIP for service '%s' is not ready." % service_name
+      )
 
     return stdout
 
-  def CreateConfigMap(self, name, from_file_dir):
+  def CreateConfigMap(self, name: str, from_file_dir: str):
     """Creates a Kubernetes ConfigMap.
 
     Args:
@@ -898,15 +953,16 @@ class KubernetesCluster(BaseContainerCluster):
         in the ConfigMap
     """
     RunKubectlCommand(
-        ['create', 'configmap', name, '--from-file', from_file_dir])
+        ['create', 'configmap', name, '--from-file', from_file_dir]
+    )
 
-  def CreateServiceAccount(self,
-                           name: str,
-                           clusterrole: Optional[str] = None,
-                           namespace='default'):
+  def CreateServiceAccount(
+      self, name: str, clusterrole: Optional[str] = None, namespace='default'
+  ):
     """Create a k8s service account and cluster-role-binding."""
     RunKubectlCommand(
-        ['create', 'serviceaccount', name, '--namespace', namespace])
+        ['create', 'serviceaccount', name, '--namespace', namespace]
+    )
     if clusterrole:
       # TODO(pclay): Support customer cluster roles?
       RunKubectlCommand([
@@ -926,10 +982,8 @@ class KubernetesCluster(BaseContainerCluster):
     """Usable memory of each node in cluster in KiB."""
     stdout, _, _ = RunKubectlCommand(
         # TODO(pclay): Take a minimum of all nodes?
-        [
-            'get', 'nodes', '-o',
-            'jsonpath={.items[0].status.allocatable.memory}'
-        ])
+        ['get', 'nodes', '-o', 'jsonpath={.items[0].status.allocatable.memory}']
+    )
     return units.ParseExpression(stdout)
 
   @property
@@ -937,7 +991,8 @@ class KubernetesCluster(BaseContainerCluster):
   def node_num_cpu(self) -> int:
     """vCPU of each node in cluster."""
     stdout, _, _ = RunKubectlCommand(
-        ['get', 'nodes', '-o', 'jsonpath={.items[0].status.capacity.cpu}'])
+        ['get', 'nodes', '-o', 'jsonpath={.items[0].status.capacity.cpu}']
+    )
     return int(stdout)
 
   @property
@@ -949,14 +1004,16 @@ class KubernetesCluster(BaseContainerCluster):
 
   def GetPodLabel(self, resource_name):
     run_cmd = [
-        'get', resource_name,
-        '-o', 'jsonpath="{.spec.selector.matchLabels.app}"'
+        'get',
+        resource_name,
+        '-o',
+        'jsonpath="{.spec.selector.matchLabels.app}"',
     ]
 
     stdout, _, _ = RunKubectlCommand(run_cmd)
     return yaml.safe_load(stdout)
 
-  def GetPodIpsByLabel(self, pod_label_key, pod_label_value) -> List[str]:
+  def GetPodIpsByLabel(self, pod_label_key, pod_label_value) -> list[str]:
     """Returns a list of internal IPs for pod label key-value.
 
     Args:
@@ -964,14 +1021,18 @@ class KubernetesCluster(BaseContainerCluster):
       pod_label_value: The pod label value
     """
     get_cmd = [
-        'get', 'pods', '-l', f'{pod_label_key}={pod_label_value}',
-        '-o', 'jsonpath="{.items[*].status.podIP}"'
+        'get',
+        'pods',
+        '-l',
+        f'{pod_label_key}={pod_label_value}',
+        '-o',
+        'jsonpath="{.items[*].status.podIP}"',
     ]
 
     stdout, _, _ = RunKubectlCommand(get_cmd)
     return yaml.safe_load(stdout).split()
 
-  def GetPodIps(self, resource_name) -> List[str]:
+  def GetPodIps(self, resource_name) -> list[str]:
     """Returns a list of internal IPs for a pod name.
 
     Args:
@@ -981,9 +1042,7 @@ class KubernetesCluster(BaseContainerCluster):
     return self.GetPodIpsByLabel('app', pod_label)
 
   def RunKubectlExec(self, pod_name, cmd):
-    run_cmd = [
-        'exec', '-it', pod_name, '--'
-    ] + cmd
+    run_cmd = ['exec', '-it', pod_name, '--'] + cmd
     RunKubectlCommand(run_cmd)
 
   def LabelDisks(self):
@@ -998,3 +1057,66 @@ class KubernetesCluster(BaseContainerCluster):
   def GetDefaultStorageClass(self) -> str:
     """Get the default storage class for the provider."""
     raise NotImplementedError
+
+  def GetNodeNames(self) -> list[str]:
+    """Get the node names for the cluster."""
+    stdout, _, _ = RunKubectlCommand(
+        ['get', 'nodes', '-o', 'jsonpath={.items[*].metadata.name}']
+    )
+    return stdout.split()
+
+  def GetEvents(self):
+    """Get the events for the cluster."""
+    stdout, _, _ = RunKubectlCommand(['get', 'events', '-o', 'yaml'])
+    k8s_events = []
+    for item in yaml.safe_load(stdout)['items']:
+      k8s_event = KubernetesEvent.FromDict(item)
+      if k8s_event:
+        k8s_events.append(k8s_event)
+    return k8s_events
+
+
+@dataclasses.dataclass
+class KubernetesEventResource:
+  """Holder for Kubernetes event involved objects."""
+
+  kind: str
+  name: str
+
+  @classmethod
+  def FromDict(cls, yaml_data: dict[str, Any]) -> 'KubernetesEventResource':
+    """Parse Kubernetes Event YAML output."""
+    return cls(kind=yaml_data['kind'], name=yaml_data['name'])
+
+
+@dataclasses.dataclass
+class KubernetesEvent:
+  """Holder for Kubernetes event data."""
+
+  resource: KubernetesEventResource
+  message: str
+  # Reason is actually more of a machine readable message.
+  reason: Optional[str]
+  timestamp: float
+
+  @classmethod
+  def FromDict(cls, yaml_data: dict[str, Any]) -> Optional['KubernetesEvent']:
+    """Parse Kubernetes Event YAML output."""
+    if 'message' not in yaml_data:
+      return
+    # There are multiple timestamps. They should be equivalent.
+    raw_timestamp = yaml_data['lastTimestamp']
+    assert raw_timestamp
+    # Python 3.10 cannot handle Z as utc in ISO 8601 timestamps
+    python_3_10_compatible_timestamp = re.sub('Z$', '+00:00', raw_timestamp)
+    timestamp = calendar.timegm(
+        datetime.datetime.fromisoformat(
+            python_3_10_compatible_timestamp
+        ).timetuple()
+    )
+    return cls(
+        message=yaml_data['message'],
+        reason=yaml_data.get('reason'),
+        resource=KubernetesEventResource.FromDict(yaml_data['involvedObject']),
+        timestamp=timestamp,
+    )

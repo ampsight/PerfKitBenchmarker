@@ -20,6 +20,7 @@ the corresponding provider directory as a subclass of BaseDpbService.
 """
 
 import abc
+from collections.abc import MutableMapping
 import dataclasses
 import datetime
 import logging
@@ -34,6 +35,7 @@ from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import container_service
 from perfkitbenchmarker import context
 from perfkitbenchmarker import data
+from perfkitbenchmarker import dpb_constants
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import sample
@@ -41,141 +43,131 @@ from perfkitbenchmarker import units
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.linux_packages import hadoop
 from perfkitbenchmarker.linux_packages import spark
+from perfkitbenchmarker.providers.aws import flags as aws_flags
 from perfkitbenchmarker.providers.aws import s3
 from perfkitbenchmarker.providers.aws import util as aws_util
 from perfkitbenchmarker.providers.gcp import gcs
 from perfkitbenchmarker.providers.gcp import util as gcp_util
 import yaml
 
-# Job types that are supported on the dpb service backends
-_PYSPARK_JOB_TYPE = 'pyspark'
-_SPARKSQL_JOB_TYPE = 'spark-sql'
-_SPARK_JOB_TYPE = 'spark'
-_HADOOP_JOB_TYPE = 'hadoop'
-_DATAFLOW_JOB_TYPE = 'dataflow'
-_BEAM_JOB_TYPE = 'beam'
-_FLINK_JOB_TYPE = 'flink'
-
 flags.DEFINE_string(
-    'static_dpb_service_instance', None,
+    'static_dpb_service_instance',
+    None,
     'If set, the name of the pre created dpb implementation,'
-    'assumed to be ready.')
+    'assumed to be ready.',
+)
 flags.DEFINE_string('dpb_log_level', 'INFO', 'Manipulate service log level')
-flags.DEFINE_string('dpb_job_jarfile', None,
-                    'Executable Jarfile containing workload implementation')
-flags.DEFINE_string('dpb_job_classname', None, 'Classname of the job '
-                    'implementation in the jar file')
 flags.DEFINE_string(
-    'dpb_service_bucket', None, 'A bucket to use with the DPB '
+    'dpb_job_jarfile',
+    None,
+    'Executable Jarfile containing workload implementation',
+)
+flags.DEFINE_string(
+    'dpb_job_classname',
+    None,
+    'Classname of the job implementation in the jar file',
+)
+flags.DEFINE_string(
+    'dpb_service_bucket',
+    None,
+    'A bucket to use with the DPB '
     'service. If none is provided one will be created by the '
     'benchmark and cleaned up afterwards unless you are using '
-    'a static instance.')
-flags.DEFINE_string('dpb_service_zone', None, 'The zone for provisioning the '
-                    'dpb_service instance.')
+    'a static instance.',
+)
+flags.DEFINE_string(
+    'dpb_service_zone',
+    None,
+    'The zone for provisioning the dpb_service instance.',
+)
 flags.DEFINE_list(
-    'dpb_job_properties', [], 'A list of strings of the form '
-    '"key=value" to be passed into DPB jobs.')
+    'dpb_job_properties',
+    [],
+    'A list of strings of the form "key=value" to be passed into DPB jobs.',
+)
 flags.DEFINE_list(
-    'dpb_cluster_properties', [], 'A list of strings of the form '
+    'dpb_cluster_properties',
+    [],
+    'A list of strings of the form '
     '"type:key=value" to be passed into DPB clusters. See '
-    'https://cloud.google.com/dataproc/docs/concepts/configuring-clusters/cluster-properties.'
+    'https://cloud.google.com/dataproc/docs/concepts/configuring-clusters/cluster-properties.',
 )
 flags.DEFINE_float(
-    'dpb_job_poll_interval_secs', 5,
+    'dpb_job_poll_interval_secs',
+    5,
     'Poll interval to check submitted job status in seconds. Only applies for '
     'DPB service implementations that do not support synchronous job '
     'submissions (i.e. not Dataproc).',
-    lower_bound=0, upper_bound=120)
+    lower_bound=0,
+    upper_bound=120,
+)
 flags.DEFINE_string(
-    'dpb_initialization_actions', None,
+    'dpb_initialization_actions',
+    None,
     'A comma separated list of Google Cloud Storage URIs of executables to run '
     'on each node in the DPB cluster. See '
-    'https://cloud.google.com/sdk/gcloud/reference/dataproc/clusters/create#--initialization-actions.'
+    'https://cloud.google.com/sdk/gcloud/reference/dataproc/clusters/create#--initialization-actions.',
 )
 flags.DEFINE_bool(
-    'dpb_export_job_stats', False,
+    'dpb_export_job_stats',
+    False,
     'Exports job stats such as CPU usage and cost. Disabled by default and not '
-    'necessarily implemented on all services.')
+    'necessarily implemented on all services.',
+)
 flags.DEFINE_enum(
     'dpb_job_type',
     None,
     [
-        _PYSPARK_JOB_TYPE,
-        _SPARKSQL_JOB_TYPE,
-        _SPARK_JOB_TYPE,
-        _HADOOP_JOB_TYPE,
-        _BEAM_JOB_TYPE,
-        _DATAFLOW_JOB_TYPE,
-        _FLINK_JOB_TYPE,
+        dpb_constants.PYSPARK_JOB_TYPE,
+        dpb_constants.SPARKSQL_JOB_TYPE,
+        dpb_constants.SPARK_JOB_TYPE,
+        dpb_constants.HADOOP_JOB_TYPE,
+        dpb_constants.BEAM_JOB_TYPE,
+        dpb_constants.DATAFLOW_JOB_TYPE,
+        dpb_constants.FLINK_JOB_TYPE,
     ],
     'The type of the job to be run on the backends.',
 )
 _HARDWARE_HOURLY_COST = flags.DEFINE_float(
-    'dpb_hardware_hourly_cost', None,
+    'dpb_hardware_hourly_cost',
+    None,
     'Hardware hourly USD cost of running the DPB cluster. Set it along with '
-    '--dpb_service_premium_hourly_cost to publish cost estimate metrics.'
+    '--dpb_service_premium_hourly_cost to publish cost estimate metrics.',
 )
 _SERVICE_PREMIUM_HOURLY_COST = flags.DEFINE_float(
-    'dpb_service_premium_hourly_cost', None,
+    'dpb_service_premium_hourly_cost',
+    None,
     'Hardware hourly USD cost of running the DPB cluster. Set it along with '
-    '--dpb_hardware_hourly_cost to publish cost estimate metrics.'
+    '--dpb_hardware_hourly_cost to publish cost estimate metrics.',
 )
 _DYNAMIC_ALLOCATION = flags.DEFINE_bool(
-    'dpb_dynamic_allocation', True,
+    'dpb_dynamic_allocation',
+    True,
     'True by default. Set it to False to disable dynamic allocation and assign '
     'all cluster executors to an incoming job. Setting this off is only '
-    'supported by Dataproc and EMR (non-serverless versions).'
+    'supported by Dataproc and EMR (non-serverless versions).',
 )
 
 
 FLAGS = flags.FLAGS
 
-# List of supported data processing backend services
-DATAPROC = 'dataproc'
-DATAPROC_FLINK = 'dataproc_flink'
-DATAPROC_GKE = 'dataproc_gke'
-DATAPROC_SERVERLESS = 'dataproc_serverless'
-DATAFLOW = 'dataflow'
-DATAFLOW_TEMPLATE = 'dataflow_template'
-EMR = 'emr'
-EMR_SERVERLESS = 'emr_serverless'
-GLUE = 'glue'
-UNMANAGED_DPB_SVC_YARN_CLUSTER = 'unmanaged_dpb_svc_yarn_cluster'
-UNMANAGED_SPARK_CLUSTER = 'unmanaged_spark_cluster'
-KUBERNETES_SPARK_CLUSTER = 'kubernetes_spark_cluster'
-KUBERNETES_FLINK_CLUSTER = 'kubernetes_flink_cluster'
-UNMANAGED_SERVICES = [
-    UNMANAGED_DPB_SVC_YARN_CLUSTER,
-    UNMANAGED_SPARK_CLUSTER,
-]
-
-# Default number of workers to be used in the dpb service implementation
-DEFAULT_WORKER_COUNT = 2
-
-# List of supported applications that can be enabled on the dpb service
-FLINK = 'flink'
-HIVE = 'hive'
-
-# Metrics and Status related metadata
-# TODO(pclay): Remove these after migrating all callers to SubmitJob
-SUCCESS = 'success'
-RUNTIME = 'running_time'
-WAITING = 'pending_time'
-
 
 class JobNotCompletedError(Exception):
   """Used to signal a job is still running."""
+
   pass
 
 
 class JobSubmissionError(errors.Benchmarks.RunError):
   """Thrown by all implementations if SubmitJob fails."""
+
   pass
 
 
 @dataclasses.dataclass
 class JobResult:
   """Data class for the timing of a successful DPB job."""
+
   # Service reported execution time
   run_time: float
   # Service reported pending time (0 if service does not report).
@@ -187,6 +179,106 @@ class JobResult:
     return self.run_time + self.pending_time
 
 
+@dataclasses.dataclass
+class JobCosts:
+  """Contains cost stats for a job execution on a serverless DPB service.
+
+  Attributes:
+    total_cost: Total costs incurred by the job.
+    compute_cost: Compute costs incurred by the job. RAM may be billed as a
+      different item on some DPB service implementations.
+    memory_cost: RAM costs incurred by the job if available.
+    storage_cost: Shuffle storage costs incurred by the job.
+    compute_units_used: Compute units consumed by the job.
+    memory_units_used: RAM units consumed by this job.
+    storage_units_used: Shuffle storage units consumed by the job.
+    compute_unit_cost: Cost of 1 compute unit.
+    memory_unit_cost: Cost of 1 memory unit.
+    storage_unit_cost: Cost of 1 shuffle storage unit.
+    compute_unit_name: Name of the compute units used by the service.
+    memory_unit_name: Name of the memory units used by the service.
+    storage_unit_name: Name of the shuffle storage units used by the service.
+  """
+
+  total_cost: Optional[float] = None
+
+  compute_cost: Optional[float] = None
+  memory_cost: Optional[float] = None
+  storage_cost: Optional[float] = None
+
+  compute_units_used: Optional[float] = None
+  memory_units_used: Optional[float] = None
+  storage_units_used: Optional[float] = None
+
+  compute_unit_cost: Optional[float] = None
+  memory_unit_cost: Optional[float] = None
+  storage_unit_cost: Optional[float] = None
+
+  compute_unit_name: Optional[str] = None
+  memory_unit_name: Optional[str] = None
+  storage_unit_name: Optional[str] = None
+
+  def GetSamples(
+      self,
+      prefix: str = '',
+      renames: Optional[dict[str, str]] = None,
+      metadata: Optional[MutableMapping[str, str]] = None,
+  ) -> list[sample.Sample]:
+    """Gets PKB samples for these costs.
+
+    Args:
+      prefix: Add a prefix before the samples name if passed.
+      renames: Optional dict arg where each entry represents a metric rename,
+        being the key the original name and the value the new name. prefix is
+        added after the rename.
+      metadata: String mapping with the metadata for each benchmark.
+
+    Returns:
+      A list of samples to be published.
+    """
+
+    if renames is None:
+      renames = {}
+    if metadata is None:
+      metadata = {}
+
+    def GetName(original_name):
+      return f'{prefix}{renames.get(original_name) or original_name}'
+
+    metrics = [
+        ('total_cost', self.total_cost, '$'),
+        ('compute_cost', self.compute_cost, '$'),
+        ('memory_cost', self.memory_cost, '$'),
+        ('storage_cost', self.storage_cost, '$'),
+        ('compute_units_used', self.compute_units_used, self.compute_unit_name),
+        ('memory_units_used', self.memory_units_used, self.memory_unit_name),
+        ('storage_units_used', self.storage_units_used, self.storage_unit_name),
+        (
+            'compute_unit_cost',
+            self.compute_unit_cost,
+            f'$/({self.compute_unit_name})',
+        ),
+        (
+            'memory_unit_cost',
+            self.memory_unit_cost,
+            f'$/({self.memory_unit_name})',
+        ),
+        (
+            'storage_unit_cost',
+            self.storage_unit_cost,
+            f'$/({self.storage_unit_name})',
+        ),
+    ]
+
+    results = []
+    for metric_name, value, unit in metrics:
+      if value is not None and unit is not None:
+        results.append(
+            sample.Sample(GetName(metric_name), value, unit, metadata)
+        )
+    return results
+
+
 class BaseDpbService(resource.BaseResource):
   """Object representing a Data Processing Backend Service."""
 
@@ -194,25 +286,16 @@ class BaseDpbService(resource.BaseResource):
   RESOURCE_TYPE = 'BaseDpbService'
   CLOUD = 'abstract'
   SERVICE_TYPE = 'abstract'
-  HDFS_FS = 'hdfs'
-  GCS_FS = 'gs'
-  S3_FS = 's3'
+  HDFS_FS = dpb_constants.HDFS_FS
+  GCS_FS = dpb_constants.GCS_FS
+  S3_FS = dpb_constants.S3_FS
 
   SUPPORTS_NO_DYNALLOC = False
-
-  # Job types that are supported on the dpb service backends
-  PYSPARK_JOB_TYPE = _PYSPARK_JOB_TYPE
-  SPARKSQL_JOB_TYPE = _SPARKSQL_JOB_TYPE
-  SPARK_JOB_TYPE = _SPARK_JOB_TYPE
-  HADOOP_JOB_TYPE = _HADOOP_JOB_TYPE
-  DATAFLOW_JOB_TYPE = _DATAFLOW_JOB_TYPE
-  BEAM_JOB_TYPE = _BEAM_JOB_TYPE
-  FLINK_JOB_TYPE = _FLINK_JOB_TYPE
 
   def _JobJars(self) -> Dict[str, Dict[str, str]]:
     """Known mappings of jars in the cluster used by GetExecutionJar."""
     return {
-        self.SPARK_JOB_TYPE: {
+        dpb_constants.SPARK_JOB_TYPE: {
             # Default for Dataproc and EMR
             'examples': 'file:///usr/lib/spark/examples/jars/spark-examples.jar'
         }
@@ -229,7 +312,6 @@ class BaseDpbService(resource.BaseResource):
     # user_managed resources in a special manner and skips creation attempt
     super(BaseDpbService, self).__init__(user_managed=is_user_managed)
     self.spec = dpb_service_spec
-    self.dpb_hdfs_type = None
     if dpb_service_spec.static_dpb_service_instance:
       self.cluster_id = dpb_service_spec.static_dpb_service_instance
     else:
@@ -248,29 +330,36 @@ class BaseDpbService(resource.BaseResource):
           'Dynamic allocation off is not supported for the current DPB '
           f'Service: {type(self).__name__}.'
       )
+    self.cluster_duration = None
     self._InitializeMetadata()
 
   def GetDpbVersion(self) -> Optional[str]:
     return self.spec.version
+
+  def GetHdfsType(self) -> Optional[str]:
+    """Gets human friendly disk type for metric metadata."""
+    return None
 
   @property
   def base_dir(self):
     return self.persistent_fs_prefix + self.bucket  # pytype: disable=attribute-error  # bind-properties
 
   @abc.abstractmethod
-  def SubmitJob(self,
-                jarfile: Optional[str] = None,
-                classname: Optional[str] = None,
-                pyspark_file: Optional[str] = None,
-                query_file: Optional[str] = None,
-                job_poll_interval: Optional[float] = None,
-                job_stdout_file: Optional[str] = None,
-                job_arguments: Optional[List[str]] = None,
-                job_files: Optional[List[str]] = None,
-                job_jars: Optional[List[str]] = None,
-                job_py_files: Optional[List[str]] = None,
-                job_type: Optional[str] = None,
-                properties: Optional[Dict[str, str]] = None) -> JobResult:
+  def SubmitJob(
+      self,
+      jarfile: Optional[str] = None,
+      classname: Optional[str] = None,
+      pyspark_file: Optional[str] = None,
+      query_file: Optional[str] = None,
+      job_poll_interval: Optional[float] = None,
+      job_stdout_file: Optional[str] = None,
+      job_arguments: Optional[List[str]] = None,
+      job_files: Optional[List[str]] = None,
+      job_jars: Optional[List[str]] = None,
+      job_py_files: Optional[List[str]] = None,
+      job_type: Optional[str] = None,
+      properties: Optional[Dict[str, str]] = None,
+  ) -> JobResult:
     """Submit a data processing job to the backend.
 
     Args:
@@ -303,7 +392,6 @@ class BaseDpbService(resource.BaseResource):
     pass
 
   def _WaitForJob(self, job_id, timeout, poll_interval):
-
     if poll_interval is None:
       poll_interval = FLAGS.dpb_job_poll_interval_secs
 
@@ -311,7 +399,8 @@ class BaseDpbService(resource.BaseResource):
         timeout=timeout,
         poll_interval=poll_interval,
         fuzz=0,
-        retryable_exceptions=(JobNotCompletedError,))
+        retryable_exceptions=(JobNotCompletedError,),
+    )
     def Poll():
       result = self._GetCompletedJob(job_id)
       if result is None:
@@ -333,8 +422,9 @@ class BaseDpbService(resource.BaseResource):
     Raises:
       JobSubmissionError if job fails.
     """
-    raise NotImplementedError('You need to implement _GetCompletedJob if you '
-                              'use _WaitForJob')
+    raise NotImplementedError(
+        'You need to implement _GetCompletedJob if you use _WaitForJob'
+    )
 
   def GetSparkSubmitCommand(
       self,
@@ -348,12 +438,13 @@ class BaseDpbService(resource.BaseResource):
       job_type: Optional[str] = None,
       job_py_files: Optional[List[str]] = None,
       properties: Optional[Dict[str, str]] = None,
-      spark_submit_cmd: str = spark.SPARK_SUBMIT) -> List[str]:
+      spark_submit_cmd: str = spark.SPARK_SUBMIT,
+  ) -> List[str]:
     """Builds the command to run spark-submit on cluster."""
-    # TODO(pclay): support BaseDpbService.SPARKSQL_JOB_TYPE
+    # TODO(pclay): support dpb_constants.SPARKSQL_JOB_TYPE
     if job_type not in [
-        BaseDpbService.PYSPARK_JOB_TYPE,
-        BaseDpbService.SPARK_JOB_TYPE,
+        dpb_constants.PYSPARK_JOB_TYPE,
+        dpb_constants.SPARK_JOB_TYPE,
     ]:
       raise NotImplementedError
     cmd = [spark_submit_cmd]
@@ -369,20 +460,22 @@ class BaseDpbService(resource.BaseResource):
     if job_py_files:
       cmd += ['--py-files', ','.join(job_py_files)]
     # Main jar/script goes last before args.
-    if job_type == BaseDpbService.SPARK_JOB_TYPE:
+    if job_type == dpb_constants.SPARK_JOB_TYPE:
       assert jarfile
       cmd.append(jarfile)
-    elif job_type == BaseDpbService.PYSPARK_JOB_TYPE:
+    elif job_type == dpb_constants.PYSPARK_JOB_TYPE:
       assert pyspark_file
       cmd.append(pyspark_file)
     if job_arguments:
       cmd += job_arguments
     return cmd
 
-  def DistributedCopy(self,
-                      source: str,
-                      destination: str,
-                      properties: Optional[Dict[str, str]] = None) -> JobResult:
+  def DistributedCopy(
+      self,
+      source: str,
+      destination: str,
+      properties: Optional[Dict[str, str]] = None,
+  ) -> JobResult:
     """Method to copy data using a distributed job on the cluster.
 
     Args:
@@ -399,33 +492,27 @@ class BaseDpbService(resource.BaseResource):
     return self.SubmitJob(
         classname='org.apache.hadoop.tools.DistCp',
         job_arguments=[source, destination],
-        job_type=BaseDpbService.HADOOP_JOB_TYPE,
-        properties=properties)
+        job_type=dpb_constants.HADOOP_JOB_TYPE,
+        properties=properties,
+    )
 
   def _InitializeMetadata(self) -> None:
     pretty_version = self.GetDpbVersion()
     self.metadata = {
-        'dpb_service':
-            self.dpb_service_type,
-        'dpb_version':
-            pretty_version,
-        'dpb_service_version':
-            '{}_{}'.format(self.dpb_service_type, pretty_version),
-        'dpb_cluster_id':
-            self.cluster_id,
-        'dpb_cluster_shape':
-            self.spec.worker_group.vm_spec.machine_type,
-        'dpb_cluster_size':
-            self.spec.worker_count,
-        'dpb_hdfs_type':
-            self.dpb_hdfs_type,
-        'dpb_disk_size':
-            self.spec.worker_group.disk_spec.disk_size,
-        'dpb_service_zone':
-            self.dpb_service_zone,
-        'dpb_job_properties':
-            ','.join('{}={}'.format(k, v)
-                     for k, v in self.GetJobProperties().items()),
+        'dpb_service': self.dpb_service_type,
+        'dpb_version': pretty_version,
+        'dpb_service_version': '{}_{}'.format(
+            self.dpb_service_type, pretty_version
+        ),
+        'dpb_cluster_id': self.cluster_id,
+        'dpb_cluster_shape': self.spec.worker_group.vm_spec.machine_type,
+        'dpb_cluster_size': self.spec.worker_count,
+        'dpb_hdfs_type': self.GetHdfsType(),
+        'dpb_disk_size': self.spec.worker_group.disk_spec.disk_size,
+        'dpb_service_zone': self.dpb_service_zone,
+        'dpb_job_properties': ','.join(
+            '{}={}'.format(k, v) for k, v in self.GetJobProperties().items()
+        ),
         'dpb_cluster_properties': ','.join(self.GetClusterProperties()),
         'dpb_dynamic_allocation': _DYNAMIC_ALLOCATION.value,
     }
@@ -512,7 +599,8 @@ class BaseDpbService(resource.BaseResource):
     if jar:
       return jar
     raise NotImplementedError(
-        f'No jar found for category {job_category} and type {job_type}.')
+        f'No jar found for category {job_category} and type {job_type}.'
+    )
 
   def GetClusterCreateTime(self) -> Optional[float]:
     """Returns the cluster creation time.
@@ -531,13 +619,13 @@ class BaseDpbService(resource.BaseResource):
     """Gets service wrapper scripts to upload alongside benchmark scripts."""
     return []
 
-  def CalculateLastJobCost(self) -> Optional[float]:
+  def CalculateLastJobCosts(self) -> JobCosts:
     """Returns the cost of last job submitted.
 
     Returns:
-      A float representing the cost in dollars or None if not implemented.
+      A dpb_service.JobCosts object.
     """
-    return None
+    return JobCosts()
 
   def GetClusterDuration(self) -> Optional[float]:
     """Gets how much time the cluster has been running in seconds.
@@ -549,7 +637,7 @@ class BaseDpbService(resource.BaseResource):
       A float representing the number of seconds the cluster has been running or
       None if it cannot be obtained.
     """
-    return None
+    return self.cluster_duration
 
   def GetClusterCost(self) -> Optional[float]:
     """Gets the cost of running the cluster if applicable.
@@ -602,15 +690,27 @@ class BaseDpbService(resource.BaseResource):
     """Gets samples with service statistics."""
     samples = []
     metrics: dict[str, tuple[Optional[float], str]] = {
+        # Cluster creation time as reported by the DPB service
+        # (non-Serverless DPB services only).
         'dpb_cluster_create_time': (self.GetClusterCreateTime(), 'seconds'),
+        # Cluster duration as computed by the underlying benchmark.
+        # (non-Serverless DPB services only).
         'dpb_cluster_duration': (self.GetClusterDuration(), 'seconds'),
+        # Cluster hardware cost computed from cluster duration and
+        # hourly costs passed in flags (non-Serverless DPB services only).
         'dpb_cluster_hardware_cost': (self.GetClusterHardwareCost(), '$'),
+        # Cluster DPB service premium cost computed from cluster duration and
+        # hourly costs passed in flags (non-Serverless DPB services only).
         'dpb_cluster_premium_cost': (self.GetClusterPremiumCost(), '$'),
+        # Cluster hardware cost computed from cluster duration and
+        # hourly costs passed in flags (non-Serverless DPB services only).
         'dpb_cluster_total_cost': (self.GetClusterCost(), '$'),
+        # Cluster hardware cost per hour as specified in PKB flags.
         'dpb_cluster_hardware_hourly_cost': (
             _HARDWARE_HOURLY_COST.value,
             '$/hour',
         ),
+        # DPB Service premium cost per hour as specified in PKB flags.
         'dpb_cluster_premium_hourly_cost': (
             _SERVICE_PREMIUM_HOURLY_COST.value,
             '$/hour',
@@ -660,7 +760,8 @@ class UnmanagedDpbService(BaseDpbService):
     self.cloud = dpb_service_spec.worker_group.cloud
     if not self.dpb_service_zone:
       raise errors.Setup.InvalidSetupError(
-          'dpb_service_zone must be provided, for provisioning.')
+          'dpb_service_zone must be provided, for provisioning.'
+      )
     if self.cloud == 'GCP':
       self.region = gcp_util.GetRegionFromZone(FLAGS.dpb_service_zone)
       self.storage_service = gcs.GoogleCloudStorageService()
@@ -677,13 +778,20 @@ class UnmanagedDpbService(BaseDpbService):
       logging.warning(
           'Cloud provider %s does not support object storage. '
           'Some benchmarks will not work.',
-          self.cloud)
+          self.cloud,
+      )
 
     if self.storage_service:
       self.storage_service.PrepareService(location=self.region)
 
     # set in _Create of derived classes
     self.leader = None
+
+  def CheckPrerequisites(self):
+    if self.cloud == 'AWS' and not aws_flags.AWS_EC2_INSTANCE_PROFILE.value:
+      raise ValueError(
+          'EC2 based Spark and Hadoop services require '
+          '--aws_ec2_instance_profile.')
 
   def GetClusterCreateTime(self) -> Optional[float]:
     """Returns the cluster creation time.
@@ -704,28 +812,33 @@ class UnmanagedDpbService(BaseDpbService):
       for vm in vm_group:
         vms.append(vm)
     first_vm_create_start_time = min(
-        (vm.create_start_time
-         for vm in vms
-         if vm.create_start_time is not None),
+        (
+            vm.create_start_time
+            for vm in vms
+            if vm.create_start_time is not None
+        ),
         default=None,
     )
     last_vm_ready_start_time = max(
-        (vm.resource_ready_time
-         for vm in vms
-         if vm.resource_ready_time is not None),
+        (
+            vm.resource_ready_time
+            for vm in vms
+            if vm.resource_ready_time is not None
+        ),
         default=None,
     )
     if first_vm_create_start_time is None or last_vm_ready_start_time is None:
       return None
-    return (my_create_time + last_vm_ready_start_time -
-            first_vm_create_start_time)
+    return (
+        my_create_time + last_vm_ready_start_time - first_vm_create_start_time
+    )
 
 
 class UnmanagedDpbServiceYarnCluster(UnmanagedDpbService):
   """Object representing an un-managed dpb service yarn cluster."""
 
   CLOUD = 'Unmanaged'
-  SERVICE_TYPE = UNMANAGED_DPB_SVC_YARN_CLUSTER
+  SERVICE_TYPE = dpb_constants.UNMANAGED_DPB_SVC_YARN_CLUSTER
 
   def __init__(self, dpb_service_spec):
     super(UnmanagedDpbServiceYarnCluster, self).__init__(dpb_service_spec)
@@ -746,29 +859,33 @@ class UnmanagedDpbServiceYarnCluster(UnmanagedDpbService):
 
     if 'worker_group' not in self.vms:
       raise errors.Resource.CreationError(
-          'UnmanagedDpbServiceYarnCluster requires VMs in a worker_group.')
+          'UnmanagedDpbServiceYarnCluster requires VMs in a worker_group.'
+      )
     background_tasks.RunThreaded(
         InstallHadoop, self.vms['worker_group'] + self.vms['master_group']
     )
     self.leader = self.vms['master_group'][0]
     hadoop.ConfigureAndStart(
-        self.leader, self.vms['worker_group'], configure_s3=self.cloud == 'AWS')
+        self.leader, self.vms['worker_group'], configure_s3=self.cloud == 'AWS'
+    )
 
-  def SubmitJob(self,
-                jarfile=None,
-                classname=None,
-                pyspark_file=None,
-                query_file=None,
-                job_poll_interval=None,
-                job_stdout_file=None,
-                job_arguments=None,
-                job_files=None,
-                job_jars=None,
-                job_py_files=None,
-                job_type=None,
-                properties=None):
+  def SubmitJob(
+      self,
+      jarfile=None,
+      classname=None,
+      pyspark_file=None,
+      query_file=None,
+      job_poll_interval=None,
+      job_stdout_file=None,
+      job_arguments=None,
+      job_files=None,
+      job_jars=None,
+      job_py_files=None,
+      job_type=None,
+      properties=None,
+  ):
     """Submit a data processing job to the backend."""
-    if job_type != self.HADOOP_JOB_TYPE:
+    if job_type != dpb_constants.HADOOP_JOB_TYPE:
       raise NotImplementedError
     cmd_list = [hadoop.HADOOP_CMD]
     # Order is important
@@ -809,11 +926,13 @@ class UnmanagedDpbSparkCluster(UnmanagedDpbService):
   """Object representing an un-managed dpb service spark cluster."""
 
   CLOUD = 'Unmanaged'
-  SERVICE_TYPE = UNMANAGED_SPARK_CLUSTER
+  SERVICE_TYPE = dpb_constants.UNMANAGED_SPARK_CLUSTER
 
   def _JobJars(self) -> Dict[str, Dict[str, str]]:
     """Known mappings of jars in the cluster used by GetExecutionJar."""
-    return {self.SPARK_JOB_TYPE: {'examples': spark.SparkExamplesJarPath()}}
+    return {
+        dpb_constants.SPARK_JOB_TYPE: {'examples': spark.SparkExamplesJarPath()}
+    }
 
   def __init__(self, dpb_service_spec):
     super(UnmanagedDpbSparkCluster, self).__init__(dpb_service_spec)
@@ -836,28 +955,32 @@ class UnmanagedDpbSparkCluster(UnmanagedDpbService):
 
     if 'worker_group' not in self.vms:
       raise errors.Resource.CreationError(
-          'UnmanagedDpbSparkCluster requires VMs in a worker_group.')
+          'UnmanagedDpbSparkCluster requires VMs in a worker_group.'
+      )
 
     background_tasks.RunThreaded(
         InstallSpark, self.vms['worker_group'] + self.vms['master_group']
     )
     self.leader = self.vms['master_group'][0]
     spark.ConfigureAndStart(
-        self.leader, self.vms['worker_group'], configure_s3=self.cloud == 'AWS')
+        self.leader, self.vms['worker_group'], configure_s3=self.cloud == 'AWS'
+    )
 
-  def SubmitJob(self,
-                jarfile=None,
-                classname=None,
-                pyspark_file=None,
-                query_file=None,
-                job_poll_interval=None,
-                job_stdout_file=None,
-                job_arguments=None,
-                job_files=None,
-                job_jars=None,
-                job_py_files=None,
-                job_type=None,
-                properties=None):
+  def SubmitJob(
+      self,
+      jarfile=None,
+      classname=None,
+      pyspark_file=None,
+      query_file=None,
+      job_poll_interval=None,
+      job_stdout_file=None,
+      job_arguments=None,
+      job_files=None,
+      job_jars=None,
+      job_py_files=None,
+      job_type=None,
+      properties=None,
+  ):
     """Submit a data processing job to the backend."""
     cmd = self.GetSparkSubmitCommand(
         jarfile=jarfile,
@@ -868,7 +991,8 @@ class UnmanagedDpbSparkCluster(UnmanagedDpbService):
         job_jars=job_jars,
         job_py_files=job_py_files,
         job_type=job_type,
-        properties=properties)
+        properties=properties,
+    )
     start_time = datetime.datetime.now()
     try:
       stdout, _ = self.leader.RobustRemoteCommand(' '.join(cmd))
@@ -893,7 +1017,7 @@ class KubernetesSparkCluster(BaseDpbService):
   """Object representing a Kubernetes dpb service spark cluster."""
 
   CLOUD = container_service.KUBERNETES
-  SERVICE_TYPE = KUBERNETES_SPARK_CLUSTER
+  SERVICE_TYPE = dpb_constants.KUBERNETES_SPARK_CLUSTER
 
   # Constants to sychronize between YAML and Spark configuration
   # TODO(pclay): Consider setting in YAML
@@ -903,7 +1027,9 @@ class KubernetesSparkCluster(BaseDpbService):
 
   def _JobJars(self) -> Dict[str, Dict[str, str]]:
     """Known mappings of jars in the cluster used by GetExecutionJar."""
-    return {self.SPARK_JOB_TYPE: {'examples': spark.SparkExamplesJarPath()}}
+    return {
+        dpb_constants.SPARK_JOB_TYPE: {'examples': spark.SparkExamplesJarPath()}
+    }
 
   # TODO(odiego): Implement GetClusterCreateTime adding K8s cluster create time
 
@@ -934,7 +1060,8 @@ class KubernetesSparkCluster(BaseDpbService):
       self.persistent_fs_prefix = 's3://'
     else:
       raise errors.Config.InvalidValue(
-          f'Unsupported Cloud provider {self.cloud}')
+          f'Unsupported Cloud provider {self.cloud}'
+      )
 
     self.storage_service.PrepareService(location=self.region)
 
@@ -943,8 +1070,9 @@ class KubernetesSparkCluster(BaseDpbService):
 
     if self.k8s_cluster.num_nodes < 2:
       raise errors.Config.InvalidValue(
-          f'Cluster type {KUBERNETES_SPARK_CLUSTER} requires at least 2 nodes.'
-          f'Found {self.k8s_cluster.num_nodes}.')
+          f'Cluster type {dpb_constants.KUBERNETES_SPARK_CLUSTER} requires at'
+          f' least 2 nodes.Found {self.k8s_cluster.num_nodes}.'
+      )
 
   def GetDpbVersion(self) -> Optional[str]:
     return 'spark_' + FLAGS.spark_version
@@ -964,7 +1092,8 @@ class KubernetesSparkCluster(BaseDpbService):
     # https://spark.apache.org/docs/latest/running-on-kubernetes.html#rbac
     # TODO(pclay): Consider moving into manifest
     self.k8s_cluster.CreateServiceAccount(
-        self.SPARK_K8S_SERVICE_ACCOUNT, clusterrole='edit')
+        self.SPARK_K8S_SERVICE_ACCOUNT, clusterrole='edit'
+    )
 
   def _GetDriverName(self):
     return f'spark-driver-{len(self.spark_drivers)}'
@@ -980,11 +1109,12 @@ class KubernetesSparkCluster(BaseDpbService):
     node_cpu = self.k8s_cluster.node_num_cpu
     # TODO(pclay): Validate that we don't have too little memory?
     node_memory_mb = self.k8s_cluster.node_memory_allocatable.m_as(
-        units.mebibyte)
+        units.mebibyte
+    )
     # Reserve 512 MB for system daemons
     node_memory_mb -= 512
     # Remove overhead
-    node_memory_mb /= (1 + self.MEMORY_OVERHEAD_FACTOR)
+    node_memory_mb /= 1 + self.MEMORY_OVERHEAD_FACTOR
     node_memory_mb = int(node_memory_mb)
 
     # Common PKB Spark cluster properties
@@ -995,43 +1125,41 @@ class KubernetesSparkCluster(BaseDpbService):
         worker_cores=node_cpu,
         # Reserve one node for driver
         num_workers=self.k8s_cluster.num_nodes - 1,
-        configure_s3=self.cloud == 'AWS')
+        configure_s3=self.cloud == 'AWS',
+    )
     # k8s specific properties
     properties.update({
-        'spark.driver.host':
-            self.SPARK_DRIVER_SERVICE,
-        'spark.driver.port':
-            str(self.SPARK_DRIVER_PORT),
-        'spark.kubernetes.driver.pod.name':
-            self._GetDriverName(),
+        'spark.driver.host': self.SPARK_DRIVER_SERVICE,
+        'spark.driver.port': str(self.SPARK_DRIVER_PORT),
+        'spark.kubernetes.driver.pod.name': self._GetDriverName(),
         # Tell Spark to under-report cores by 1 to fit next to k8s services
-        'spark.kubernetes.executor.request.cores':
-            str(node_cpu - 1),
-        'spark.kubernetes.container.image':
-            self.image,
+        'spark.kubernetes.executor.request.cores': str(node_cpu - 1),
+        'spark.kubernetes.container.image': self.image,
         # No HDFS available
-        'spark.hadoop.fs.defaultFS':
-            self.base_dir,
-        'spark.kubernetes.memoryOverheadFactor':
-            str(self.MEMORY_OVERHEAD_FACTOR),
+        'spark.hadoop.fs.defaultFS': self.base_dir,
+        'spark.kubernetes.memoryOverheadFactor': str(
+            self.MEMORY_OVERHEAD_FACTOR
+        ),
     })
     # User specified properties
     properties.update(super().GetJobProperties())
     return properties
 
-  def SubmitJob(self,
-                jarfile=None,
-                classname=None,
-                pyspark_file=None,
-                query_file=None,
-                job_poll_interval=None,
-                job_stdout_file=None,
-                job_arguments=None,
-                job_files=None,
-                job_jars=None,
-                job_py_files=None,
-                job_type=None,
-                properties=None):
+  def SubmitJob(
+      self,
+      jarfile=None,
+      classname=None,
+      pyspark_file=None,
+      query_file=None,
+      job_poll_interval=None,
+      job_stdout_file=None,
+      job_arguments=None,
+      job_files=None,
+      job_jars=None,
+      job_py_files=None,
+      job_type=None,
+      properties=None,
+  ):
     """Submit a data processing job to the backend."""
     # Specs can't be copied or created by hand. So we override the command of
     # the spec for each job.
@@ -1044,12 +1172,14 @@ class KubernetesSparkCluster(BaseDpbService):
         job_jars=job_jars,
         job_py_files=job_py_files,
         job_type=job_type,
-        properties=properties)
+        properties=properties,
+    )
     driver_name = self._GetDriverName()
     # Request memory for driver. This should guarantee that driver does not get
     # scheduled on same VM as exectutor and OOM.
     driver_memory_mb = int(
-        self.GetJobProperties()[spark.SPARK_DRIVER_MEMORY].strip('m'))
+        self.GetJobProperties()[spark.SPARK_DRIVER_MEMORY].strip('m')
+    )
     start_time = datetime.datetime.now()
     self.k8s_cluster.ApplyManifest(
         'container/spark/spark-driver.yaml.j2',
@@ -1059,7 +1189,8 @@ class KubernetesSparkCluster(BaseDpbService):
         driver_port=self.SPARK_DRIVER_PORT,
         driver_service=self.SPARK_DRIVER_SERVICE,
         image=self.image,
-        service_account=self.SPARK_K8S_SERVICE_ACCOUNT)
+        service_account=self.SPARK_K8S_SERVICE_ACCOUNT,
+    )
     container = container_service.KubernetesPod(driver_name)
     # increments driver_name for next job
     self.spark_drivers.append(container)
@@ -1088,7 +1219,7 @@ class KubernetesFlinkCluster(BaseDpbService):
   """Object representing a Kubernetes dpb service flink cluster."""
 
   CLOUD = container_service.KUBERNETES
-  SERVICE_TYPE = KUBERNETES_FLINK_CLUSTER
+  SERVICE_TYPE = dpb_constants.KUBERNETES_FLINK_CLUSTER
 
   FLINK_JOB_MANAGER_SERVICE = 'flink-jobmanager'
   DEFAULT_FLINK_IMAGE = 'flink'
@@ -1113,14 +1244,16 @@ class KubernetesFlinkCluster(BaseDpbService):
       self.persistent_fs_prefix = 'gs://'
     else:
       raise errors.Config.InvalidValue(
-          f'Unsupported Cloud provider {self.cloud}')
+          f'Unsupported Cloud provider {self.cloud}'
+      )
 
     self.storage_service.PrepareService(location=self.region)
 
     if self.k8s_cluster.num_nodes < 2:
       raise errors.Config.InvalidValue(
-          f'Cluster type {KUBERNETES_FLINK_CLUSTER} requires at least 2 nodes.'
-          f'Found {self.k8s_cluster.num_nodes}.')
+          f'Cluster type {dpb_constants.KUBERNETES_FLINK_CLUSTER} requires at'
+          f' least 2 nodes.Found {self.k8s_cluster.num_nodes}.'
+      )
 
   def GetDpbVersion(self) -> Optional[str]:
     return self.spec.version or self.DEFAULT_FLINK_IMAGE
@@ -1186,7 +1319,8 @@ class KubernetesFlinkCluster(BaseDpbService):
   def GetJobProperties(self) -> Dict[str, str]:
     node_cpu = self.k8s_cluster.node_num_cpu
     node_memory_mb = self.k8s_cluster.node_memory_allocatable.m_as(
-        units.mebibyte)
+        units.mebibyte
+    )
     # Reserve 512 MB for system daemons
     node_memory_mb -= 512
     node_memory_mb = int(node_memory_mb)
@@ -1262,9 +1396,7 @@ class KubernetesFlinkCluster(BaseDpbService):
 
     return JobResult(run_time=(end_time - start_time).total_seconds())
 
-  @staticmethod
-  def CheckPrerequisites(benchmark_config):
-    del benchmark_config  # Unused
+  def CheckPrerequisites(self):
     # Make sure dpb_job_jarfile is provided when using flink
     assert FLAGS.dpb_job_jarfile
     # dpb_cluster_properties is to be supported
@@ -1278,8 +1410,9 @@ class KubernetesFlinkCluster(BaseDpbService):
     pass
 
 
-def GetDpbServiceClass(cloud: str,
-                       dpb_service_type: str) -> Optional[Type[BaseDpbService]]:
+def GetDpbServiceClass(
+    cloud: str, dpb_service_type: str
+) -> Optional[Type[BaseDpbService]]:
   """Gets the Data Processing Backend class corresponding to 'service_type'.
 
   Args:
@@ -1292,9 +1425,13 @@ def GetDpbServiceClass(cloud: str,
   Raises:
     Exception: An invalid data processing backend service type was provided
   """
-  if dpb_service_type in UNMANAGED_SERVICES:
+  if dpb_service_type in dpb_constants.UNMANAGED_SERVICES:
     cloud = 'Unmanaged'
-  elif dpb_service_type in [KUBERNETES_SPARK_CLUSTER, KUBERNETES_FLINK_CLUSTER]:
+  elif dpb_service_type in [
+      dpb_constants.KUBERNETES_SPARK_CLUSTER,
+      dpb_constants.KUBERNETES_FLINK_CLUSTER,
+  ]:
     cloud = container_service.KUBERNETES
   return resource.GetResourceClass(
-      BaseDpbService, CLOUD=cloud, SERVICE_TYPE=dpb_service_type)
+      BaseDpbService, CLOUD=cloud, SERVICE_TYPE=dpb_service_type
+  )

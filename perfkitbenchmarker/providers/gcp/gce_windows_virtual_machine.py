@@ -20,6 +20,7 @@ from typing import Any, Dict, Tuple
 from absl import flags
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import os_types
+from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker import windows_virtual_machine
 from perfkitbenchmarker.providers.gcp import flags as gcp_flags
@@ -36,7 +37,7 @@ _METADATA_PREEMPT_CMD_WIN = (
 )
 
 FLAGS = flags.FLAGS
-
+ATTACHED_DISK_LETTER = 'F'
 BAT_SCRIPT = """
 :WAIT
 echo waiting for MSSQLSERVER
@@ -63,21 +64,16 @@ class WindowsGceVirtualMachine(
 ):
   """Class supporting Windows GCE virtual machines."""
 
-  DEFAULT_IMAGE_FAMILY = {
-      os_types.WINDOWS2012_CORE: 'windows-2012-r2-core',
+  DEFAULT_X86_IMAGE_FAMILY = {
       os_types.WINDOWS2016_CORE: 'windows-2016-core',
       os_types.WINDOWS2019_CORE: 'windows-2019-core',
       os_types.WINDOWS2022_CORE: 'windows-2022-core',
-      os_types.WINDOWS2012_DESKTOP: 'windows-2012-r2',
       os_types.WINDOWS2016_DESKTOP: 'windows-2016',
       os_types.WINDOWS2019_DESKTOP: 'windows-2019',
       os_types.WINDOWS2022_DESKTOP: 'windows-2022',
   }
 
-  GVNIC_DISABLED_OS_TYPES = [
-      os_types.WINDOWS2012_CORE,
-      os_types.WINDOWS2012_DESKTOP,
-  ]
+  GVNIC_DISABLED_OS_TYPES = []
 
   NVME_START_INDEX = 0
   OS_TYPE = os_types.WINDOWS_CORE_OS_TYPES + os_types.WINDOWS_DESKOP_OS_TYPES
@@ -94,8 +90,11 @@ class WindowsGceVirtualMachine(
     )
 
   def DownloadPreprovisionedData(
-      self, install_path, module_name, filename,
-      timeout=gce_virtual_machine.FIVE_MINUTE_TIMEOUT
+      self,
+      install_path,
+      module_name,
+      filename,
+      timeout=virtual_machine.PREPROVISIONED_DATA_TIMEOUT,
   ):
     """Downloads a data file from a GCS bucket with pre-provisioned data.
 
@@ -117,16 +116,22 @@ class WindowsGceVirtualMachine(
         timeout=timeout,
     )
     self.PushFile(
-        vm_util.PrependTempDir(filename),
-        ntpath.join(install_path, filename)
+        vm_util.PrependTempDir(filename), ntpath.join(install_path, filename)
     )
     vm_util.IssueCommand(['rm', vm_util.PrependTempDir(filename)])
 
   def ShouldDownloadPreprovisionedData(self, module_name, filename):
     """Returns whether or not preprovisioned data is available."""
-    return FLAGS.gcp_preprovisioned_data_bucket and vm_util.IssueCommand(
-        gce_virtual_machine.GenerateStatPreprovisionedDataCommand(
-            module_name, filename).split(' '), raise_on_failure=False)[-1] == 0
+    return (
+        FLAGS.gcp_preprovisioned_data_bucket
+        and vm_util.IssueCommand(
+            gce_virtual_machine.GenerateStatPreprovisionedDataCommand(
+                module_name, filename
+            ).split(' '),
+            raise_on_failure=False,
+        )[-1]
+        == 0
+    )
 
   def _GetWindowsPassword(self):
     """Generates a command to get a VM user's password.
@@ -142,8 +147,9 @@ class WindowsGceVirtualMachine(
     response = json.loads(stdout)
     return response['password']
 
-  def _PostCreate(self):
-    super(WindowsGceVirtualMachine, self)._PostCreate()
+  def Create(self, restore: bool = False) -> None:
+    """Get the windows password from the VM after VM is ready."""
+    super().Create(restore=restore)
     self.password = self._GetWindowsPassword()
 
   def _PreemptibleMetadataKeyValue(self) -> Tuple[str, str]:
@@ -207,7 +213,7 @@ class WindowsGceVirtualMachine(
 
   def GetDefaultImageFamily(self, is_arm: bool) -> str:
     assert not is_arm
-    return self.DEFAULT_IMAGE_FAMILY[self.OS_TYPE]
+    return self.DEFAULT_X86_IMAGE_FAMILY[self.OS_TYPE]
 
   def GetDefaultImageProject(self) -> str:
     if self.OS_TYPE in os_types.WINDOWS_SQLSERVER_OS_TYPES:
@@ -226,7 +232,8 @@ class WindowsGceVirtualMachine(
     """Return Remote python execution command for LM notify script."""
     vm_path = ntpath.join(self.temp_dir, self._LM_NOTICE_SCRIPT)
     return (
-        f'python {vm_path} {gcp_flags.LM_NOTIFICATION_METADATA_NAME.value} >'
+        f'python {vm_path} {gcp_flags.LM_NOTIFICATION_METADATA_NAME.value}'
+        f' {gcp_flags.LM_NOTIFICATION_TIMEOUT.value} >'
         f' {self.temp_dir}\\{self._LM_NOTICE_LOG} 2>&1'
     )
 
@@ -245,17 +252,28 @@ class WindowsGceVirtualMachine(
   def _MetadataPreemptCmd(self) -> str:
     return _METADATA_PREEMPT_CMD_WIN
 
+  def DiskDriveIsLocal(self, device, model):
+    """Helper method to determine if a disk drive is a local ssd to stripe."""
+    if (
+        model.lower().strip() == 'nvme_card'
+        or model.lower().strip() == 'google ephemeraldisk'
+    ):
+      return True
+    return False
+
 
 class WindowsGceSqlServerVirtualMachine(WindowsGceVirtualMachine):
   """Class supporting Windows GCE sql server virtual machines."""
 
-  DEFAULT_IMAGE_FAMILY = {
+  DEFAULT_X86_IMAGE_FAMILY = {
       os_types.WINDOWS2019_SQLSERVER_2017_STANDARD: 'sql-std-2017-win-2019',
       os_types.WINDOWS2019_SQLSERVER_2017_ENTERPRISE: 'sql-ent-2017-win-2019',
       os_types.WINDOWS2019_SQLSERVER_2019_STANDARD: 'sql-std-2019-win-2019',
       os_types.WINDOWS2019_SQLSERVER_2019_ENTERPRISE: 'sql-ent-2019-win-2019',
       os_types.WINDOWS2022_SQLSERVER_2019_STANDARD: 'sql-std-2019-win-2022',
       os_types.WINDOWS2022_SQLSERVER_2019_ENTERPRISE: 'sql-ent-2019-win-2022',
+      os_types.WINDOWS2022_SQLSERVER_2022_ENTERPRISE: 'sql-ent-2022-win-2022',
+      os_types.WINDOWS2022_SQLSERVER_2022_STANDARD: 'sql-std-2022-win-2022',
   }
 
   OS_TYPE = os_types.WINDOWS_SQLSERVER_OS_TYPES

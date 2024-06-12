@@ -19,45 +19,38 @@ and checks for resource existence so that resources can be created and deleted
 reliably.
 """
 import abc
-import itertools
 import logging
 import time
-from typing import List
+from typing import Any, List, TypeVar
 
 from absl import flags
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import vm_util
+from perfkitbenchmarker.configs import auto_registry
 
 FLAGS = flags.FLAGS
 
 _RESOURCE_REGISTRY = {}
+RegisteredType = TypeVar('RegisteredType')
+ResourceType = type[RegisteredType]
 
 
-def GetResourceClass(base_class, **kwargs):
+def GetResourceClass(base_class: ResourceType, **kwargs) -> ResourceType:
   """Returns the subclass with the corresponding attributes.
 
   Args:
-    base_class: The base class of the resource to return
-        (e.g. BaseVirtualMachine).
+    base_class: The base class of the resource to return (e.g.
+      BaseVirtualMachine).
     **kwargs: Every attribute/value of the subclass's REQUIRED_ATTRS that were
-        used to register the subclass.
+      used to register the subclass.
+
   Raises:
     Exception: If no class could be found with matching attributes.
   """
-  key = [base_class.__name__]
-  key += sorted(kwargs.items())
-  if tuple(key) not in _RESOURCE_REGISTRY:
-    raise errors.Resource.SubclassNotFoundError(
-        'No %s subclass defined with the attributes: %s' %
-        (base_class.__name__, kwargs))
-  resource = _RESOURCE_REGISTRY.get(tuple(key))
-
-  # Set the required attributes of the resource class
-  for key, value in kwargs.items():
-    setattr(resource, key, value)
-
-  return resource
+  return auto_registry.GetRegisteredClass(
+      _RESOURCE_REGISTRY, base_class, None, **kwargs
+  )
 
 
 class AutoRegisterResourceMeta(abc.ABCMeta):
@@ -68,36 +61,15 @@ class AutoRegisterResourceMeta(abc.ABCMeta):
   REQUIRED_ATTRS: List[str]
 
   def __init__(cls, name, bases, dct):
-    if (all(hasattr(cls, attr) for attr in cls.REQUIRED_ATTRS) and
-        cls.RESOURCE_TYPE):
-      unset_attrs = [
-          attr for attr in cls.REQUIRED_ATTRS if getattr(cls, attr) is None]
-      # Raise exception if subclass with unset attributes.
-      if unset_attrs and cls.RESOURCE_TYPE != cls.__name__:
-        raise Exception(
-            'Subclasses of %s must have the following attrs set: %s. For %s '
-            'the following attrs were not set: %s.' %
-            (cls.RESOURCE_TYPE, cls.REQUIRED_ATTRS, cls.__name__, unset_attrs))
-      # Flatten list type attributes with cartesian product.
-      # If a class have two list attributes i.e.
-      # class Example(AutoRegisterResourceMeta):
-      #   CLOUD = ['GCP', 'AWS']
-      #   ENGINE = ['mysql', 'postgres']
-      #   ....
-      # GetResourceClass(Example, CLOUD='GCP', ENGINE='mysql')
-      # would return Example.
-      attributes = [[cls.RESOURCE_TYPE]]
-      for attr in sorted(cls.REQUIRED_ATTRS):
-        value = getattr(cls, attr)
-        if not isinstance(value, list):
-          attributes.append([(attr, value)])
-        else:
-          attributes.append([(attr, i) for i in value])
-
-      # Cross product
-      for key in itertools.product(*attributes):
-        _RESOURCE_REGISTRY[tuple(key)] = cls
+    auto_registry.RegisterClass(
+        _RESOURCE_REGISTRY, cls, cls.REQUIRED_ATTRS, cls.RESOURCE_TYPE
+    )
     super(AutoRegisterResourceMeta, cls).__init__(name, bases, dct)
+
+  @classmethod
+  def GetAttributes(mcs) -> list[tuple[Any, ...]]:
+    """Override to manually set the attributes for registering the class."""
+    return []
 
 
 class BaseResource(metaclass=AutoRegisterResourceMeta):
@@ -157,11 +129,11 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
 
     # Creation and deletion time information
     # that we may make use of later.
-    self.create_start_time = None
+    self.create_start_time: float = None
     self.delete_start_time = None
-    self.create_end_time = None
+    self.create_end_time: float = None
     self.delete_end_time = None
-    self.resource_ready_time = None
+    self.resource_ready_time: float = None
     self.metadata = dict()
 
   def GetResourceMetadata(self):
@@ -300,22 +272,28 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
     try:
       if not self._Exists():
         raise errors.Resource.RetryableCreationError(
-            'Creation of %s failed.' % type(self).__name__)
+            'Creation of %s failed.' % type(self).__name__
+        )
     except NotImplementedError:
       pass
     self._WaitUntilRunning()
     self.created = True
     self.create_end_time = time.time()
 
-  @vm_util.Retry(retryable_exceptions=(errors.Resource.RetryableDeletionError,),
-                 timeout=3600)
+  @vm_util.Retry(
+      retryable_exceptions=(errors.Resource.RetryableDeletionError,),
+      timeout=3600,
+  )
   def _DeleteResource(self):
     """Reliably deletes the underlying resource."""
 
     # Retryable method which allows waiting for deletion of the resource.
-    @vm_util.Retry(poll_interval=self.POLL_INTERVAL, fuzz=0, timeout=3600,
-                   retryable_exceptions=(
-                       errors.Resource.RetryableDeletionError,))
+    @vm_util.Retry(
+        poll_interval=self.POLL_INTERVAL,
+        fuzz=0,
+        timeout=3600,
+        retryable_exceptions=(errors.Resource.RetryableDeletionError,),
+    )
     def WaitUntilDeleted():
       if self._IsDeleting():
         raise errors.Resource.RetryableDeletionError('Not yet deleted')
@@ -329,7 +307,8 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
     try:
       if self._Exists():
         raise errors.Resource.RetryableDeletionError(
-            'Deletion of %s failed.' % type(self).__name__)
+            'Deletion of %s failed.' % type(self).__name__
+        )
     except NotImplementedError:
       pass
 
@@ -348,10 +327,12 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
     except NotImplementedError as e:
       raise errors.Resource.RestoreError(
           f'Class {self.__class__} does not have _Restore() implemented but a '
-          'restore file was provided.') from e
+          'restore file was provided.'
+      ) from e
     except Exception as e:
-      raise errors.Resource.RestoreError('Error restoring resource '
-                                         f'{repr(self)}') from e
+      raise errors.Resource.RestoreError(
+          f'Error restoring resource {repr(self)}'
+      ) from e
 
     self.restored = True
     self.UpdateTimeout(FLAGS.timeout_minutes)
@@ -367,10 +348,12 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
       RestoreError: If there is an error while restoring.
     """
 
-    @vm_util.Retry(poll_interval=self.POLL_INTERVAL, fuzz=0,
-                   timeout=self.READY_TIMEOUT,
-                   retryable_exceptions=(
-                       errors.Resource.RetryableCreationError,))
+    @vm_util.Retry(
+        poll_interval=self.POLL_INTERVAL,
+        fuzz=0,
+        timeout=self.READY_TIMEOUT,
+        retryable_exceptions=(errors.Resource.RetryableCreationError,),
+    )
     def WaitUntilReady():
       if not self._IsReady():
         raise errors.Resource.RetryableCreationError('Not yet ready')
@@ -385,7 +368,9 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
       except errors.Resource.RestoreError:
         logging.exception(
             'Encountered an exception while attempting to Restore(). '
-            'Creating: %s', self.create_on_restore_error)
+            'Creating: %s',
+            self.create_on_restore_error,
+        )
         if not self.create_on_restore_error:
           raise
 
@@ -409,10 +394,12 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
     except NotImplementedError as e:
       raise errors.Resource.FreezeError(
           f'Class {self.__class__} does not have _Freeze() implemented but '
-          'Freeze() was called.') from e
+          'Freeze() was called.'
+      ) from e
     except Exception as e:
       raise errors.Resource.FreezeError(
-          f'Error freezing resource {repr(self)}') from e
+          f'Error freezing resource {repr(self)}'
+      ) from e
 
     # If frozen successfully, attempt to update the timeout.
     self.restored = False
@@ -446,7 +433,9 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
       except errors.Resource.FreezeError:
         logging.exception(
             'Encountered an exception while attempting to Freeze(). '
-            'Deleting: %s', self.delete_on_freeze_error)
+            'Deleting: %s',
+            self.delete_on_freeze_error,
+        )
         if not self.delete_on_freeze_error:
           raise
 
@@ -472,7 +461,9 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
     except NotImplementedError:
       logging.exception(
           'Class %s does not have _UpdateTimeout() implemented, which is '
-          'needed for Freeze(). Please add an implementation.', self.__class__)
+          'needed for Freeze(). Please add an implementation.',
+          self.__class__,
+      )
       raise
 
   def GetSamples(self) -> List[sample.Sample]:
@@ -512,3 +503,15 @@ class BaseResource(metaclass=AutoRegisterResourceMeta):
           )
       )
     return samples
+
+  def CheckPrerequisites(self) -> None:
+    """Checks preconditions for the resource.
+
+    Requires resource to be checked in benchmark_spec.CheckPrerequisites()
+    Allows for per-provider validation not available in
+    benchmark.CheckPrerequisites(config).
+
+    Raises:
+      ValueError: If there is a validation issue.
+    """
+    pass

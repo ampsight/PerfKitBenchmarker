@@ -18,10 +18,12 @@ import time
 import unittest
 import object_storage_api_tests  # noqa: importing for flags
 import object_storage_interface
-import validate_service
 
 
-class MockObjectStorageService(object_storage_interface.ObjectStorageServiceBase):  # noqa
+class MockObjectStorageService(
+    object_storage_interface.ObjectStorageServiceBase
+):  # noqa
+
   def __init__(self):
     self.bucket = None
     self.objects = {}
@@ -40,15 +42,18 @@ class MockObjectStorageService(object_storage_interface.ObjectStorageServiceBase
       self.bucket = bucket
     elif self.bucket != bucket:
       raise ValueError(
-          'MockObjectStorageService passed two bucket names: %s and %s' %
-          (self.bucket, bucket))
+          'MockObjectStorageService passed two bucket names: %s and %s'
+          % (self.bucket, bucket)
+      )
 
   def ListObjects(self, bucket, prefix):
     self._CheckBucket(bucket)
 
-    return [value
-            for name, value in self.objects.iteritems()
-            if name.startswith(prefix)]
+    return [
+        value
+        for name, value in self.objects.iteritems()
+        if name.startswith(prefix)
+    ]
 
   def DeleteObjects(self, bucket, objects_to_delete, objects_deleted=None):
     self._CheckBucket(bucket)
@@ -97,11 +102,13 @@ class TestScenarios(unittest.TestCase):
 
   def testListConsistency(self):
     object_storage_api_tests.ListConsistencyBenchmark(
-        MockObjectStorageService())
+        MockObjectStorageService()
+    )
 
   def testSingleStreamThroughput(self):
     object_storage_api_tests.SingleStreamThroughputBenchmark(
-        MockObjectStorageService())
+        MockObjectStorageService()
+    )
 
   def testCleanupBucket(self):
     object_storage_api_tests.CleanupBucket(MockObjectStorageService())
@@ -114,20 +121,6 @@ class TestScenarios(unittest.TestCase):
     # MultiStreamWrites generates.
     object_storage_api_tests.MultiStreamWrites(service)
     object_storage_api_tests.MultiStreamReads(service)
-
-
-class TestValidateService(unittest.TestCase):
-  """Validate the ValidateService script."""
-
-  def setUp(self):
-    self.FLAGS = object_storage_api_tests.FLAGS
-    self.FLAGS([])
-    self.objects_written_file = self.FLAGS.objects_written_file
-    self.FLAGS.objects_written_file = '/tmp/objects-written'
-
-  def testValidateService(self):
-    validate_service.ValidateService(MockObjectStorageService())
-
 
 
 if __name__ == '__main__':

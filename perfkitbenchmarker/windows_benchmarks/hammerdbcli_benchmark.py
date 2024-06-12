@@ -22,7 +22,7 @@ from absl import flags
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import sql_engine_utils
-
+from perfkitbenchmarker.linux_packages import hammerdb as linux_hammerdb
 from perfkitbenchmarker.windows_packages import hammerdb
 
 
@@ -64,6 +64,20 @@ hammerdbcli:
           num_striped_disks: 1
           mount_point: /scratch
     vm_groups:
+      controller:
+        os_type: windows2022_desktop
+        vm_spec:
+          GCP:
+            machine_type: n2-standard-4
+            zone: us-central1-c
+            boot_disk_size: 50
+          AWS:
+            machine_type: m6i.xlarge
+            zone: us-east-1a
+          Azure:
+            machine_type: Standard_D4s_v5
+            zone: eastus
+            boot_disk_type: Premium_LRS
       servers:
         os_type: windows2022_desktop_sqlserver_2019_standard
         vm_spec:
@@ -71,7 +85,6 @@ hammerdbcli:
             machine_type: n2-standard-4
             zone: us-central1-c
             boot_disk_size: 50
-            boot_disk_type: pd-ssd
           AWS:
             machine_type: m6i.xlarge
             zone: us-east-1a
@@ -138,7 +151,27 @@ def GetConfig(user_config):
   Returns:
     loaded benchmark configuration
   """
-  return configs.LoadConfig(BENCHMARK_CONFIG, user_config, BENCHMARK_NAME)
+  config = configs.LoadConfig(BENCHMARK_CONFIG, user_config, BENCHMARK_NAME)
+  config['relational_db']['vm_groups']['controller']['vm_count'] = 0
+  if FLAGS.db_high_availability:
+    # We need two additional vms for sql ha deployment.
+    # First vm to act as the second node in sql cluster
+    # and additional vm to act as a domain controller.
+
+    config['relational_db']['vm_groups']['servers']['vm_count'] = 2
+    config['relational_db']['vm_groups']['controller']['vm_count'] = 1
+    config['relational_db']['vm_groups']['controller']['vm_spec'][FLAGS.cloud][
+        'zone'
+    ] = config['relational_db']['vm_groups']['servers']['vm_spec'][FLAGS.cloud][
+        'zone'
+    ]
+
+    if FLAGS.db_high_availability_type == 'FCIMW':
+      config['relational_db']['vm_groups']['servers']['disk_spec'][FLAGS.cloud][
+          'multi_writer_mode'
+      ] = True
+
+  return config
 
 
 def CheckPrerequisites(_):
@@ -149,7 +182,8 @@ def CheckPrerequisites(_):
   ]:
     raise errors.Setup.InvalidFlagConfigurationError(
         'Non-optimized hammerdbcli_optimized_server_configuration'
-        ' is not implemented.')
+        ' is not implemented.'
+    )
 
 
 def Prepare(benchmark_spec):
@@ -159,14 +193,47 @@ def Prepare(benchmark_spec):
     benchmark_spec: The benchmark specification. Contains all data that is
       required to run the benchmark.
   """
-  hammerdb.SetDefaultConfig()
   relational_db = benchmark_spec.relational_db
   vm = relational_db.client_vm
+  num_cpus = None
+  if hasattr(relational_db, 'server_vm'):
+    server_vm = relational_db.server_vm
+    num_cpus = server_vm.NumCpusForBenchmark()
+  hammerdb.SetDefaultConfig(num_cpus)
   vm.Install('hammerdb')
-  hammerdb.SetupConfig(vm, sql_engine_utils.SQLSERVER,
-                       hammerdb.HAMMERDB_SCRIPT.value, relational_db.endpoint,
-                       relational_db.port, relational_db.spec.database_password,
-                       relational_db.spec.database_username, False)
+
+  is_azure = FLAGS.cloud == 'Azure' and FLAGS.use_managed_db
+  if (
+      benchmark_spec.relational_db.spec.high_availability
+      and benchmark_spec.relational_db.spec.high_availability_type == 'AOAG'
+  ):
+    db_name = linux_hammerdb.MAP_SCRIPT_TO_DATABASE_NAME[
+        linux_hammerdb.HAMMERDB_SCRIPT.value
+    ]
+    relational_db.client_vm_query_tools.IssueSqlCommand(
+        """CREATE DATABASE [{0}];
+        BACKUP DATABASE [{0}] TO DISK = 'F:\\Backup\\{0}.bak';
+        ALTER AVAILABILITY GROUP [{1}] ADD DATABASE [{0}];
+        """.format(db_name, sql_engine_utils.SQLSERVER_AOAG_NAME)
+    )
+  elif is_azure and hammerdb.HAMMERDB_SCRIPT.value == 'tpc_c':
+    # Create the database first only Azure requires creating the database.
+    relational_db.client_vm_query_tools.IssueSqlCommand('CREATE DATABASE tpcc;')
+
+  hammerdb.SetupConfig(
+      vm,
+      sql_engine_utils.SQLSERVER,
+      hammerdb.HAMMERDB_SCRIPT.value,
+      relational_db.endpoint,
+      relational_db.port,
+      relational_db.spec.database_password,
+      relational_db.spec.database_username,
+      is_azure,
+  )
+
+  # SQL Server exhibits better performance when restarted after prepare step
+  if FLAGS.hammerdbcli_restart_before_run:
+    relational_db.RestartDatabase()
 
 
 def SetMinimumRecover(relational_db):

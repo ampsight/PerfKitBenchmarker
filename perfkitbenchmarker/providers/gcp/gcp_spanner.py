@@ -23,7 +23,6 @@ import datetime
 import json
 import logging
 import statistics
-import time
 from typing import Any, Dict, Optional
 
 from absl import flags
@@ -35,6 +34,7 @@ from perfkitbenchmarker import relational_db
 from perfkitbenchmarker import relational_db_spec
 from perfkitbenchmarker import sql_engine_utils
 from perfkitbenchmarker.configs import option_decoders
+from perfkitbenchmarker.configs import spec
 from perfkitbenchmarker.providers.gcp import util
 import requests
 
@@ -76,6 +76,41 @@ flags.DEFINE_string(
     'mandatory to use this flag.',
 )
 
+# Flags related to managed autoscaler
+# https://cloud.google.com/spanner/docs/create-manage-instances#gcloud
+flags.DEFINE_boolean(
+    'cloud_spanner_autoscaler',
+    False,
+    'Turn on the autoscaler for the spanner instance.',
+)
+
+flags.DEFINE_integer(
+    'cloud_spanner_autoscaler_min_processing_units',
+    None,
+    'Minimum number of processing units. Autoscaler will not go lower than'
+    ' this.',
+)
+
+flags.DEFINE_integer(
+    'cloud_spanner_autoscaler_max_processing_units',
+    None,
+    'Maximum number of processing units. Autoscaler will not go higher than'
+    ' this.',
+)
+
+flags.DEFINE_integer(
+    'cloud_spanner_autoscaler_high_priority_cpu_target',
+    None,
+    'The CPU usage when spanner starts scaling.',
+)
+
+flags.DEFINE_integer(
+    'cloud_spanner_autoscaler_storage_target',
+    None,
+    'Storage target when spanner starts scaling.',
+)
+
+
 # Type aliases
 _RelationalDbSpec = relational_db_spec.RelationalDbSpec
 
@@ -84,6 +119,11 @@ _DEFAULT_DESCRIPTION = 'Created by PKB.'
 _DEFAULT_ENDPOINT = 'https://spanner.googleapis.com'
 _DEFAULT_NODES = 1
 _FROZEN_NODE_COUNT = 1
+
+_DEFAULT_MIN_PROCESSING_UNITS = 5000
+_DEFAULT_MAX_PROCESSING_UNITS = 50000
+_DEFAULT_HIGH_PRIORITY_CPU_TARGET = 65
+_DEFAULT_STORAGE_TARGET = 95
 
 # Dialect options
 GOOGLESQL = 'GOOGLE_STANDARD_SQL'
@@ -99,9 +139,12 @@ CPU_API_DELAY_MINUTES = 3
 CPU_API_DELAY_SECONDS = CPU_API_DELAY_MINUTES * 60
 
 # For more information on QPS expectations, see
-# https://cloud.google.com/spanner/docs/instance-configurations#regional-performance
+# https://cloud.google.com/spanner/docs/performance#typical-workloads
 _READ_OPS_PER_NODE = 10000
 _WRITE_OPS_PER_NODE = 2000
+_ADJUSTED_READ_OPS_PER_NODE = 15000
+_ADJUSTED_WRITE_OPS_PER_NODE = 3000
+_ADJUSTED_CONFIG_REGIONS = ['regional-us-east4']
 
 
 @dataclasses.dataclass
@@ -117,6 +160,11 @@ class SpannerSpec(relational_db_spec.RelationalDbSpec):
   spanner_nodes: int
   spanner_load_nodes: int
   spanner_project: str
+  spanner_autoscaler: bool
+  spanner_min_processing_units: int
+  spanner_max_processing_units: int
+  spanner_high_priority_cpu_target: int
+  spanner_storage_target: int
 
   def __init__(
       self,
@@ -145,8 +193,16 @@ class SpannerSpec(relational_db_spec.RelationalDbSpec):
         'spanner_nodes': (option_decoders.IntDecoder, _NONE_OK),
         'spanner_load_nodes': (option_decoders.IntDecoder, _NONE_OK),
         'spanner_project': (option_decoders.StringDecoder, _NONE_OK),
-        'db_spec': (option_decoders.PerCloudConfigDecoder, _NONE_OK),
-        'db_disk_spec': (option_decoders.PerCloudConfigDecoder, _NONE_OK),
+        'db_spec': (spec.PerCloudConfigDecoder, _NONE_OK),
+        'db_disk_spec': (spec.PerCloudConfigDecoder, _NONE_OK),
+        'spanner_autoscaler': (option_decoders.BooleanDecoder, _NONE_OK),
+        'spanner_min_processing_units': (option_decoders.IntDecoder, _NONE_OK),
+        'spanner_max_processing_units': (option_decoders.IntDecoder, _NONE_OK),
+        'spanner_high_priority_cpu_target': (
+            option_decoders.IntDecoder,
+            _NONE_OK,
+        ),
+        'spanner_storage_target': (option_decoders.IntDecoder, _NONE_OK),
     })
     return result
 
@@ -177,6 +233,25 @@ class SpannerSpec(relational_db_spec.RelationalDbSpec):
       config_values['spanner_load_nodes'] = flag_values.cloud_spanner_load_nodes
     if flag_values['cloud_spanner_project'].present:
       config_values['spanner_project'] = flag_values.cloud_spanner_project
+
+    if flag_values['cloud_spanner_autoscaler'].present:
+      config_values['spanner_autoscaler'] = flag_values.cloud_spanner_autoscaler
+    if flag_values['cloud_spanner_autoscaler_min_processing_units'].present:
+      config_values['spanner_min_processing_units'] = (
+          flag_values.cloud_spanner_autoscaler_min_processing_units
+      )
+    if flag_values['cloud_spanner_autoscaler_max_processing_units'].present:
+      config_values['spanner_max_processing_units'] = (
+          flag_values.cloud_spanner_autoscaler_max_processing_units
+      )
+    if flag_values['cloud_spanner_autoscaler_high_priority_cpu_target'].present:
+      config_values['spanner_high_priority_cpu_target'] = (
+          flag_values.cloud_spanner_autoscaler_high_priority_cpu_target
+      )
+    if flag_values['cloud_spanner_autoscaler_storage_target'].present:
+      config_values['spanner_storage_target'] = (
+          flag_values.cloud_spanner_autoscaler_storage_target
+      )
 
 
 class GcpSpannerInstance(relational_db.BaseRelationalDb):
@@ -213,6 +288,20 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
     self.nodes = db_spec.spanner_nodes or _DEFAULT_NODES
     self._load_nodes = db_spec.spanner_load_nodes or self.nodes
     self._api_endpoint = None
+    self._autoscaler = db_spec.spanner_autoscaler
+    self._min_processing_units = (
+        db_spec.spanner_min_processing_units or _DEFAULT_MIN_PROCESSING_UNITS
+    )
+    self._max_processing_units = (
+        db_spec.spanner_max_processing_units or _DEFAULT_MAX_PROCESSING_UNITS
+    )
+    self._high_priority_cpu_target = (
+        db_spec.spanner_high_priority_cpu_target
+        or _DEFAULT_HIGH_PRIORITY_CPU_TARGET
+    )
+    self._storage_target = (
+        db_spec.spanner_storage_target or _DEFAULT_STORAGE_TARGET
+    )
 
     # Cloud Spanner may not explicitly set the following common flags.
     self.project = (
@@ -237,8 +326,18 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
         self, 'spanner', 'instances', 'create', self.instance_id
     )
     cmd.flags['description'] = self._description
-    cmd.flags['nodes'] = self.nodes
     cmd.flags['config'] = self._config
+
+    if self._autoscaler:
+      cmd.use_beta_gcloud = True
+      cmd.flags['autoscaling-min-processing-units'] = self._min_processing_units
+      cmd.flags['autoscaling-max-processing-units'] = self._max_processing_units
+      cmd.flags['autoscaling-high-priority-cpu-target'] = (
+          self._high_priority_cpu_target
+      )
+      cmd.flags['autoscaling-storage-target'] = self._storage_target
+    else:
+      cmd.flags['nodes'] = self.nodes
     _, _, retcode = cmd.Issue(raise_on_failure=False)
     if retcode != 0:
       # TODO(user) Currently loops if the database doesn't exist. To fix
@@ -362,6 +461,14 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
 
   def _SetNodes(self, nodes: int) -> None:
     """Sets the number of nodes on the Spanner instance."""
+    # Not yet supported for user managed instances since instance attributes
+    # are not discovered.
+    if self.user_managed:
+      return
+
+    # Cannot set nodes with autoscaler.
+    if self._autoscaler:
+      return
     current_nodes = self._GetNodes()
     if nodes == current_nodes:
       return
@@ -444,28 +551,61 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
 
   def GetResourceMetadata(self) -> Dict[Any, Any]:
     """Returns useful metadata about the instance."""
-    return {
+    metadata = {
         'gcp_spanner_name': self.instance_id,
         'gcp_spanner_database': self.database,
         'gcp_spanner_database_dialect': self.dialect,
-        'gcp_spanner_node_count': self.nodes,
         'gcp_spanner_config': self._config,
         'gcp_spanner_endpoint': self.GetApiEndPoint(),
-        'gcp_spanner_load_node_cont': self._load_nodes,
+        'gcp_spanner_load_node_count': self._load_nodes,
     }
 
-  def GetAverageCpuUsage(self, duration_minutes: int) -> float:
-    """Gets the average high priority CPU usage through the time duration."""
+    if self._autoscaler:
+      metadata.update({
+          'gcp_spanner_autoscaler': self._autoscaler,
+          'gcp_spanner_min_processing_units': self._min_processing_units,
+          'gcp_spanner_max_processing_units': self._max_processing_units,
+          'gcp_spanner_high_priority_cpu_target': (
+              self._high_priority_cpu_target
+          ),
+          'gcp_spanner_storage_target': self._storage_target,
+      })
+    else:
+      metadata['gcp_spanner_node_count'] = self.nodes
+    return metadata
+
+  def GetAverageCpuUsage(
+      self, duration_minutes: int, end_time: datetime.datetime
+  ) -> float:
+    """Gets the average high priority CPU usage through the time duration.
+
+    Note that there is a delay for the API to get data, so this returns the
+    average CPU usage in the period ending at `end_time` with missing data
+    in the last CPU_API_DELAY_SECONDS.
+
+    Args:
+      duration_minutes: The time duration for which to measure the average CPU
+        usage.
+      end_time: The ending timestamp of the workload.
+
+    Returns:
+      The average CPU usage during the time period.
+    """
+    if duration_minutes * 60 <= CPU_API_DELAY_SECONDS:
+      raise ValueError(
+          f'Spanner API has a {CPU_API_DELAY_SECONDS} sec. delay in receiving'
+          ' data, choose a longer duration to get CPU usage.'
+      )
+
     client = monitoring_v3.MetricServiceClient()
     # It takes up to 3 minutes for CPU metrics to appear.
-    end_timestamp = time.time() - CPU_API_DELAY_SECONDS
     cpu_query = query.Query(
         client,
         project=self.project,
         metric_type=(
             'spanner.googleapis.com/instance/cpu/utilization_by_priority'
         ),
-        end_time=datetime.datetime.utcfromtimestamp(end_timestamp),
+        end_time=end_time,
         minutes=duration_minutes,
     )
     # Filter by high priority
@@ -484,34 +624,54 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
           'Expected 2 metrics (user and system) for Spanner high-priority CPU '
           f'utilization query, got {len(time_series)}'
       )
-    cpu_aggregated = [
-        user.value.double_value + system.value.double_value
-        for user, system in zip(time_series[0].points, time_series[1].points)
-    ]
+    logging.info('Instance %s utilization by minute:', self.instance_id)
+    cpu_aggregated = []
+    for user, system in zip(time_series[0].points, time_series[1].points):
+      point_utilization = user.value.double_value + system.value.double_value
+      point_time = datetime.datetime.fromtimestamp(
+          user.interval.start_time.timestamp()
+      )
+      logging.info('%s: %s', point_time, point_utilization)
+      cpu_aggregated.append(point_utilization)
     average_cpu = statistics.mean(cpu_aggregated)
-    logging.info('CPU aggregated: %s', cpu_aggregated)
     logging.info(
-        'Average CPU for the %s minutes ending at %s: %s',
-        duration_minutes,
-        datetime.datetime.fromtimestamp(end_timestamp),
+        'Instance %s average CPU utilization: %s',
+        self.instance_id,
         average_cpu,
     )
     return average_cpu
 
-  def CalculateRecommendedThroughput(
+  def CalculateTheoreticalMaxThroughput(
       self, read_proportion: float, write_proportion: float
   ) -> int:
-    """Returns the recommended throughput based on the workload and nodes."""
+    """Returns the theoretical max throughput based on the workload and nodes.
+
+    This is the published theoretical max throughput of a Spanner node, see
+    https://cloud.google.com/spanner/docs/cpu-utilization#recommended-max for
+    more info.
+
+    Args:
+      read_proportion: the proportion of read requests in the workload.
+      write_proportion: the propoertion of write requests in the workload.
+
+    Returns:
+      The max total QPS taking into account the published single node limits.
+    """
     if read_proportion + write_proportion != 1:
       raise errors.Benchmarks.RunError(
           'Unrecognized workload, read + write proportion must be equal to 1, '
           f'got {read_proportion} + {write_proportion}.'
       )
+    read_ops_per_node = _READ_OPS_PER_NODE
+    write_ops_per_node = _WRITE_OPS_PER_NODE
+    if self._config in _ADJUSTED_CONFIG_REGIONS:
+      read_ops_per_node = _ADJUSTED_READ_OPS_PER_NODE
+      write_ops_per_node = _ADJUSTED_WRITE_OPS_PER_NODE
     # Calculates the starting throughput based off of each node being able to
     # handle 10k QPS of reads or 2k QPS of writes. For example, for a 50/50
     # workload, run at a QPS target of 1666 reads + 1666 writes = 3333 (round).
     a = np.array([
-        [1 / _READ_OPS_PER_NODE, 1 / _WRITE_OPS_PER_NODE],
+        [1 / read_ops_per_node, 1 / write_ops_per_node],
         [write_proportion, -(1 - write_proportion)],
     ])
     b = np.array([1, 0])

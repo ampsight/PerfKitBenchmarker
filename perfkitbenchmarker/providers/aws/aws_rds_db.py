@@ -38,18 +38,21 @@ _MAP_ENGINE_TO_DEFAULT_VERSION = {
 _SQL_SERVER_ENGINES = (
     sql_engine_utils.SQLSERVER_EXPRESS,
     sql_engine_utils.SQLSERVER_STANDARD,
-    sql_engine_utils.SQLSERVER_ENTERPRISE)
+    sql_engine_utils.SQLSERVER_ENTERPRISE,
+)
 
 _RDS_ENGINES = [
     sql_engine_utils.MYSQL,
     sql_engine_utils.POSTGRES,
     sql_engine_utils.SQLSERVER_EXPRESS,
     sql_engine_utils.SQLSERVER_STANDARD,
-    sql_engine_utils.SQLSERVER_ENTERPRISE]
+    sql_engine_utils.SQLSERVER_ENTERPRISE,
+]
 
 
 class AwsRDSRelationalDb(aws_relational_db.BaseAwsRelationalDb):
   """Implements the RDS database for AWS."""
+
   CLOUD = 'AWS'
   IS_MANAGED = True
   ENGINE = _RDS_ENGINES
@@ -101,8 +104,8 @@ class AwsRDSRelationalDb(aws_relational_db.BaseAwsRelationalDb):
         self.spec.db_disk_spec.disk_type == aws_disk.IO1
         or self.spec.db_disk_spec.disk_type == aws_disk.GP3
     ):
-      if self.spec.db_disk_spec.iops:
-        cmd.append('--iops=%s' % self.spec.db_disk_spec.iops)
+      if self.spec.db_disk_spec.provisioned_iops:
+        cmd.append('--iops=%s' % self.spec.db_disk_spec.provisioned_iops)
 
     vm_util.IssueCommand(cmd)
 
@@ -128,9 +131,9 @@ class AwsRDSRelationalDb(aws_relational_db.BaseAwsRelationalDb):
     """
     metadata = super(AwsRDSRelationalDb, self).GetResourceMetadata()
 
-    if hasattr(self.spec.db_disk_spec, 'iops'):
+    if hasattr(self.spec.db_disk_spec, 'provisioned_iops'):
       metadata.update({
-          'disk_iops': self.spec.db_disk_spec.iops,
+          'disk_iops': self.spec.db_disk_spec.provisioned_iops,
       })
 
     return metadata
@@ -146,9 +149,11 @@ class AwsRDSRelationalDb(aws_relational_db.BaseAwsRelationalDb):
   def _FailoverHA(self):
     """Fail over from master to replica."""
     cmd = util.AWS_PREFIX + [
-        'rds', 'reboot-db-instance',
-        '--db-instance-identifier=%s' % self.instance_id, '--force-failover',
-        '--region=%s' % self.region
+        'rds',
+        'reboot-db-instance',
+        '--db-instance-identifier=%s' % self.instance_id,
+        '--force-failover',
+        '--region=%s' % self.region,
     ]
     vm_util.IssueCommand(cmd)
 
@@ -158,6 +163,7 @@ class AwsRDSRelationalDb(aws_relational_db.BaseAwsRelationalDb):
 
     Args:
       engine (string): type of database (my_sql or postgres).
+
     Returns:
       (string): Default engine version.
     Raises:

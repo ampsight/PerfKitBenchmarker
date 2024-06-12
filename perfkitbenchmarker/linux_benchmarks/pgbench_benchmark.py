@@ -13,45 +13,56 @@
 # limitations under the License.
 """Pgbench benchmark for PostgreSQL databases.
 
-  Pgbench is a TPC-B like database benchmark for Postgres and
-  is published by the PostgreSQL group.
+Pgbench is a TPC-B like database benchmark for Postgres and
+is published by the PostgreSQL group.
 
-  This implementation of pgbench in PKB uses the ManagedRelationalDB
-  resource. A client VM is also required. To change the specs of the
-  database server, change the vm_spec nested inside
-  managed_relational_db spec. To change the specs of the client,
-  change the vm_spec nested directly inside the pgbench spec.
+This implementation of pgbench in PKB uses the ManagedRelationalDB
+resource. A client VM is also required. To change the specs of the
+database server, change the vm_spec nested inside
+managed_relational_db spec. To change the specs of the client,
+change the vm_spec nested directly inside the pgbench spec.
 
-  The scale factor can be used to set the size of the test database.
-  Additionally, the runtime per step, as well as the number of clients
-  at each step can be specified.
+The scale factor can be used to set the size of the test database.
+Additionally, the runtime per step, as well as the number of clients
+at each step can be specified.
 
-  Documentations of pgbench
-  https://www.postgresql.org/docs/10/pgbench.html
+Documentations of pgbench
+https://www.postgresql.org/docs/10/pgbench.html
 
-  This benchmark is written for pgbench 9.5, which is the default
-  (as of 10/2017) version installed on Ubuntu 16.04.
+This benchmark is written for pgbench 9.5, which is the default
+(as of 10/2017) version installed on Ubuntu 16.04.
 """
 
 import re
 from absl import flags
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import flag_util
+from perfkitbenchmarker import sql_engine_utils
 from perfkitbenchmarker.linux_packages import pgbench
 
 flags.DEFINE_integer(
-    'pgbench_scale_factor', 1, 'scale factor used to fill the database',
-    lower_bound=1)
+    'pgbench_scale_factor',
+    1,
+    'scale factor used to fill the database',
+    lower_bound=1,
+)
 flags.DEFINE_integer(
-    'pgbench_seconds_per_test', 10, 'number of seconds to run each test phase',
-    lower_bound=1)
+    'pgbench_seconds_per_test',
+    10,
+    'number of seconds to run each test phase',
+    lower_bound=1,
+)
 flags.DEFINE_integer(
-    'pgbench_seconds_to_pause_before_steps', 30,
-    'number of seconds to pause before each client load step')
+    'pgbench_seconds_to_pause_before_steps',
+    30,
+    'number of seconds to pause before each client load step',
+)
 flag_util.DEFINE_integerlist(
     'pgbench_client_counts',
     flag_util.IntegerList([1]),
-    'array of client counts passed to pgbench', module_name=__name__)
+    'array of client counts passed to pgbench',
+    module_name=__name__,
+)
 flag_util.DEFINE_integerlist(
     'pgbench_job_counts',
     flag_util.IntegerList([]),
@@ -59,7 +70,9 @@ flag_util.DEFINE_integerlist(
     'is the number of worker threads within pgbench. '
     'When this is empty, Pgbench is run with job counts equals to '
     'client counts. If this is specified, it must have the same length as '
-    'pgbench_client_counts.', module_name=__name__)
+    'pgbench_client_counts.',
+    module_name=__name__,
+)
 FLAGS = flags.FLAGS
 
 
@@ -158,9 +171,12 @@ def UpdateBenchmarkSpecWithRunStageFlags(benchmark_spec):
 
 def GetDbSize(relational_db, db_name):
   """Get the size of the database."""
+  if relational_db.engine_type == sql_engine_utils.SPANNER_POSTGRES:
+    return
   stdout, _ = relational_db.client_vm_query_tools.IssueSqlCommand(
-      f'SELECT pg_size_pretty(pg_database_size(\'{db_name}\'))',
-      database_name=TEST_DB_NAME)
+      f"SELECT pg_size_pretty(pg_database_size('{db_name}'))",
+      database_name=TEST_DB_NAME,
+  )
   return ParseSizeFromTable(stdout)
 
 
@@ -175,8 +191,8 @@ def Prepare(benchmark_spec):
   with sample data using FLAGS.pgbench_scale_factor.
 
   Args:
-    benchmark_spec: benchmark_spec object which contains the database server
-                    and client_vm
+    benchmark_spec: benchmark_spec object which contains the database server and
+      client_vm
   """
   vm = benchmark_spec.vms[0]
   vm.Install('pgbench')
@@ -188,8 +204,48 @@ def Prepare(benchmark_spec):
   CreateDatabase(benchmark_spec, DEFAULT_DB_NAME, TEST_DB_NAME)
 
   connection_string = db.client_vm_query_tools.GetConnectionString(TEST_DB_NAME)
-  vm.RobustRemoteCommand(f'pgbench {connection_string} -i '
-                         f'-s {benchmark_spec.scale_factor}')
+
+  if db.engine_type == sql_engine_utils.SPANNER_POSTGRES:
+    db.client_vm_query_tools.Connect(database_name=TEST_DB_NAME)
+    db.client_vm_query_tools.IssueSqlCommand("""START BATCH DDL; \\
+            CREATE TABLE IF NOT EXISTS pgbench_accounts ( \\
+                aid integer primary key  NOT NULL, \\
+                bid integer  NULL, \\
+                abalance integer  NULL, \\
+                filler varchar(84)  NULL \\
+            ); \\
+            CREATE TABLE IF NOT EXISTS pgbench_branches ( \\
+                bid integer primary key  NOT NULL, \\
+                bbalance integer  NULL, \\
+                filler varchar(88)  NULL \\
+            ); \\
+            CREATE TABLE IF NOT EXISTS pgbench_history ( \\
+                tid integer  NOT NULL DEFAULT -1, \\
+                bid integer  NOT NULL DEFAULT -1, \\
+                aid integer  NOT NULL DEFAULT -1, \\
+                delta integer  NULL, \\
+                mtime timestamptz  NULL, \\
+                filler varchar(22)  NULL, \\
+                primary key (tid, bid, aid) \\
+            ); \\
+            CREATE TABLE IF NOT EXISTS pgbench_tellers ( \\
+                tid integer  primary key NOT NULL, \\
+                bid integer  NULL, \\
+                tbalance integer  NULL, \\
+                filler varchar(84)  NULL \\
+            ); \\
+            RUN BATCH;\"""")
+    vm.RobustRemoteCommand(
+        f"""pgbench "host=/tmp port=5432 dbname={TEST_DB_NAME} \\
+        options='-c spanner.force_autocommit=on -c \\
+        spanner.copy_max_parallelism=200 -c spanner.autocommit_dml_mode=\\'partitioned_non_atomic\\''" \\
+        -i -Ig \\
+        --scale={benchmark_spec.scale_factor}"""
+    )
+  else:
+    vm.RobustRemoteCommand(
+        f'pgbench {connection_string} -i -s {benchmark_spec.scale_factor}'
+    )
 
 
 def ParseSizeFromTable(stdout):
@@ -204,6 +260,7 @@ def ParseSizeFromTable(stdout):
 
   Args:
      stdout:  stdout from psql query obtaining the table size.
+
   Returns:
      size in MB that was parsed from the table
   Raises:
@@ -233,10 +290,13 @@ def DoesDatabaseExist(client_vm, connection_string, database_name):
   Returns:
     True if database_name exists, else False
   """
-  command = (f'psql {connection_string} '
-             fr'-lqt | cut -d \| -f 1 | grep -qw {database_name}')
+  command = (
+      f'psql {connection_string} '
+      rf'-lqt | cut -d \| -f 1 | grep -qw {database_name}'
+  )
   _, _, return_value = client_vm.RemoteCommandWithReturnCode(
-      command, ignore_failure=True)
+      command, ignore_failure=True
+  )
   return return_value == 0
 
 
@@ -247,8 +307,8 @@ def CreateDatabase(benchmark_spec, default_database_name, new_database_name):
   recreated.
 
   Args:
-    benchmark_spec: benchmark_spec object which contains the database server
-      and client_vm
+    benchmark_spec: benchmark_spec object which contains the database server and
+      client_vm
     default_database_name: name of the default database guaranteed to exist on
       the server
     new_database_name: name of the new database to create, or drop and recreate
@@ -256,12 +316,14 @@ def CreateDatabase(benchmark_spec, default_database_name, new_database_name):
   client_vm = benchmark_spec.vms[0]
   db = benchmark_spec.relational_db
   connection_string = db.client_vm_query_tools.GetConnectionString(
-      database_name=default_database_name)
+      database_name=default_database_name
+  )
 
   if DoesDatabaseExist(client_vm, connection_string, new_database_name):
     db.client_vm_query_tools.IssueSqlCommand(
         f'DROP DATABASE {new_database_name}',
-        database_name=default_database_name)
+        database_name=default_database_name,
+    )
 
   db.client_vm_query_tools.IssueSqlCommand(
       'CREATE DATABASE {0}'.format(new_database_name),
@@ -273,8 +335,8 @@ def Run(benchmark_spec):
   """Runs the pgbench benchark on the client vm, against the db server.
 
   Args:
-    benchmark_spec: benchmark_spec object which contains the database server
-      and client_vm
+    benchmark_spec: benchmark_spec object which contains the database server and
+      client_vm
 
   Returns:
     a list of sample objects
@@ -285,12 +347,17 @@ def Run(benchmark_spec):
   db_size = GetDbSize(relational_db, TEST_DB_NAME)
   common_metadata = GetMetaData(db_size, benchmark_spec)
 
-  pgbench.RunPgBench(benchmark_spec, relational_db, benchmark_spec.vms[0],
-                     TEST_DB_NAME,
-                     benchmark_spec.client_counts,
-                     benchmark_spec.job_counts,
-                     benchmark_spec.seconds_to_pause,
-                     benchmark_spec.seconds_per_test, common_metadata)
+  pgbench.RunPgBench(
+      benchmark_spec,
+      relational_db,
+      benchmark_spec.vms[0],
+      TEST_DB_NAME,
+      benchmark_spec.client_counts,
+      benchmark_spec.job_counts,
+      benchmark_spec.seconds_to_pause,
+      benchmark_spec.seconds_per_test,
+      common_metadata,
+  )
   return []
 
 

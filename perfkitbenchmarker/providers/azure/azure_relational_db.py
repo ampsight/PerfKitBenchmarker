@@ -62,6 +62,15 @@ class AzureSQLServerIAASRelationalDb(
   """A AWS IAAS database resource."""
 
   CLOUD = provider_info.AZURE
+  TEMPDB_DISK_LETTER = 'D'
+
+  def CreateIpReservation(self) -> str:
+    cluster_ip_address = '.'.join(
+        self.server_vm.internal_ip.split('.')[:-1]+['128'])
+    return cluster_ip_address
+
+  def ReleaseIpReservation(self) -> bool:
+    return True
 
 
 class AzurePostgresIAASRelationalDb(
@@ -97,8 +106,8 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
 
   Note that the client VM's region and the region requested for the database
   must be the same.
-
   """
+
   CLOUD = provider_info.AZURE
   ENGINE = [
       sql_engine_utils.POSTGRES,
@@ -114,7 +123,8 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
     super(AzureRelationalDb, self).__init__(relational_db_spec)
     if util.IsZone(self.spec.db_spec.zone):
       raise errors.Config.InvalidValue(
-          'Availability zones are currently not supported by Azure DBs')
+          'Availability zones are currently not supported by Azure DBs'
+      )
     self.region = util.GetRegionFromZone(self.spec.db_spec.zone)
     self.resource_group = azure_network.GetResourceGroup(self.region)
 
@@ -126,7 +136,6 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
 
     Returns:
       metadata: dict of Azure  DB metadata.
-
     """
     metadata = super(AzureRelationalDb, self).GetResourceMetadata()
     metadata.update({
@@ -146,6 +155,7 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
 
     Args:
       engine (string): type of database (my_sql or postgres).
+
     Returns:
       (string): Default engine version.
     Raises:
@@ -160,7 +170,8 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
       return DEFALUT_SQLSERVER_VERSION
     else:
       raise relational_db.RelationalDbEngineNotFoundError(
-          'Unsupported engine {0}'.format(engine))
+          'Unsupported engine {0}'.format(engine)
+      )
 
   def GetAzCommandForEngine(self):
     engine = self.spec.engine
@@ -179,6 +190,7 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
 
     Args:
      machine_type (string): Azure machine type i.e GP_Gen5_4
+
     Returns:
       (string, string, string): edition, family, vcore
     Raises:
@@ -187,8 +199,10 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
     machine_type = machine_type.split('_')
     if len(machine_type) != 3:
       raise relational_db.UnsupportedError(
-          'Unsupported machine type {0},'
-          ' sample machine type GP_Gen5_2'.format(machine_type))
+          'Unsupported machine type {0}, sample machine type GP_Gen5_2'.format(
+              machine_type
+          )
+      )
     edition = machine_type[0]
     if edition == 'BC':
       edition = 'BusinessCritical'
@@ -196,7 +210,8 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
       edition = 'GeneralPurpose'
     else:
       raise relational_db.UnsupportedError(
-          'Unsupported edition {}. Only supports BC or GP'.format(machine_type))
+          'Unsupported edition {}. Only supports BC or GP'.format(machine_type)
+      )
 
     family = machine_type[1]
     vcore = machine_type[2]
@@ -245,20 +260,22 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
           '--name',
           self.database_name,
           '--new-name',
-          new_name
+          new_name,
       ]
       vm_util.IssueCommand(cmd)
       self.database_name = new_name
     else:
       raise relational_db.RelationalDbEngineNotFoundError(
-          'Unsupported engine {0}'.format(engine))
+          'Unsupported engine {0}'.format(engine)
+      )
 
   def _ApplyDbFlags(self):
     """Applies the MySqlFlags to a managed instance."""
     for flag in FLAGS.db_flags:
       name_and_value = flag.split('=')
       _, stderr, _ = self.SetDbConfiguration(
-          name_and_value[0], name_and_value[1])
+          name_and_value[0], name_and_value[1]
+      )
       if stderr:
         raise KeyError(
             'Invalid MySQL flags: {0}.  Error {1}'.format(
@@ -281,18 +298,22 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
     # and additional increments of 1024 MB up to maximum of 16777216 MB.
     azure_disk_size_mb = self.spec.db_disk_spec.disk_size * 1024
     if azure_disk_size_mb > AZURE_MAX_DB_DISK_SIZE_MB:
-      error_msg = ('Azure disk size was specified as in the disk spec as %s,'
-                   'got rounded to %s which is greater than the '
-                   'maximum of 16777216 MB' % (
-                       self.spec.db_disk_spec.disk_size, azure_disk_size_mb))
+      error_msg = (
+          'Azure disk size was specified as in the disk spec as %s,'
+          'got rounded to %s which is greater than the '
+          'maximum of 16777216 MB'
+          % (self.spec.db_disk_spec.disk_size, azure_disk_size_mb)
+      )
       raise errors.Config.InvalidValue(error_msg)
 
     elif azure_disk_size_mb < AZURE_MIN_DB_DISK_SIZE_MB:
-      error_msg = ('Azure disk size was specified '
-                   'as in the disk spec as %s, got rounded to %s '
-                   'which is smaller than the minimum of 5120 MB' % (
-                       self.spec.db_disk_spec.disk_size, azure_disk_size_mb))
-      raise  errors.Config.InvalidValue(error_msg)
+      error_msg = (
+          'Azure disk size was specified '
+          'as in the disk spec as %s, got rounded to %s '
+          'which is smaller than the minimum of 5120 MB'
+          % (self.spec.db_disk_spec.disk_size, azure_disk_size_mb)
+      )
+      raise errors.Config.InvalidValue(error_msg)
 
     cmd = [
         azure.AZURE_PATH,
@@ -335,7 +356,7 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
         '--admin-user',
         self.spec.database_username,
         '--admin-password',
-        self.spec.database_password
+        self.spec.database_password,
     ]
     vm_util.IssueCommand(cmd)
 
@@ -370,8 +391,9 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
       ]
     else:
       # Sample machine_type: GP_Gen5_2
-      edition, family, vcore = (
-          self.GetConfigFromMachineType(self.spec.db_spec.machine_type))
+      edition, family, vcore = self.GetConfigFromMachineType(
+          self.spec.db_spec.machine_type
+      )
       cmd = [
           azure.AZURE_PATH,
           self.GetAzCommandForEngine(),
@@ -390,9 +412,9 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
           '--capacity',
           vcore,
           '--zone-redundant',
-          'true' if self.spec.high_availability else 'false'
+          'true' if self.spec.high_availability else 'false',
       ]
-    vm_util.IssueCommand(cmd)
+    vm_util.IssueCommand(cmd, timeout=CREATE_AZURE_DB_TIMEOUT)
     self.database_name = DEFAULT_DATABASE_NAME
 
   def _CreateAzureManagedSqlInstance(self):
@@ -404,8 +426,11 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
     elif self.engine_type == sql_engine_utils.SQLSERVER:
       self._CreateSqlServerInstance()
     else:
-      raise NotImplementedError('Unknown how to create Azure data base '
-                                'engine {0}'.format(self.engine_type))
+      raise NotImplementedError(
+          'Unknown how to create Azure data base engine {0}'.format(
+              self.engine_type
+          )
+      )
 
   def _Create(self):
     """Creates the Azure RDS instance.
@@ -413,7 +438,6 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
     Raises:
       NotImplementedError: if unknown how to create self.spec.engine.
       Exception: if attempting to create a non high availability database.
-
     """
     self._CreateAzureManagedSqlInstance()
 
@@ -466,9 +490,7 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
     return self._IsInstanceReady(timeout)
 
   def _PostCreate(self):
-    """Perform general post create operations on the cluster.
-
-    """
+    """Perform general post create operations on the cluster."""
     super()._PostCreate()
 
     cmd = [
@@ -492,18 +514,21 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
 
     if self.spec.engine == 'mysql' or self.spec.engine == 'postgres':
       # Azure will add @domainname after the database username
-      self.spec.database_username = (self.spec.database_username + '@' +
-                                     self.endpoint.split('.')[0])
+      self.spec.database_username = (
+          self.spec.database_username + '@' + self.endpoint.split('.')[0]
+      )
 
   def _Reboot(self):
     """Reboot the managed db."""
     cmd = [
         azure.AZURE_PATH,
         self.GetAzCommandForEngine(),
-        'server',
+        self.SERVER_TYPE,
         'restart',
-        '--resource-group', self.resource_group.name,
-        '--name', self.instance_id
+        '--resource-group',
+        self.resource_group.name,
+        '--name',
+        self.instance_id,
     ]
     vm_util.IssueCommand(cmd)
 
@@ -541,7 +566,8 @@ class AzureRelationalDb(relational_db.BaseRelationalDb):
           state = server_show_json['state']
         else:
           raise relational_db.RelationalDbEngineNotFoundError(
-              'The db engine does not contain a valid state')
+              'The db engine does not contain a valid state'
+          )
 
         if state == 'Ready':
           break

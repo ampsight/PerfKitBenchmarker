@@ -31,6 +31,7 @@ FLEXIBLE_SERVER_MYSQL = 'flexible-server-mysql'
 FLEXIBLE_SERVER_POSTGRES = 'flexible-server-postgres'
 
 MYSQL = 'mysql'
+MARIADB = 'mariadb'
 POSTGRES = 'postgres'
 AURORA_POSTGRES = 'aurora-postgresql'
 AURORA_MYSQL = 'aurora-mysql'
@@ -43,6 +44,7 @@ SPANNER_POSTGRES = 'spanner-postgres'
 ALLOYDB = 'alloydb-postgresql'
 
 ALL_ENGINES = [
+    MARIADB,
     MYSQL,
     POSTGRES,
     AURORA_POSTGRES,
@@ -71,6 +73,9 @@ AWS_AURORA_POSTGRES_ENGINE = 'aurora-postgresql'
 AWS_AURORA_MYSQL_ENGINE = 'aurora-mysql'
 
 DEFAULT_COMMAND = 'default'
+
+SQLSERVER_AOAG_NAME = 'pkb-aoag'
+SQLSERVER_AOAG_DB_NAME = 'pkb-aoag-db'
 
 _PGADAPTER_MAX_SESSIONS = 5000
 _PGADAPTER_CONNECT_WAIT_SEC = 60
@@ -192,6 +197,10 @@ class ISQLQueryTools(metaclass=abc.ABCMeta):
       suppress_stdout: bool = False,
   ):
     """Issue Sql Command."""
+
+    if self.ENGINE_TYPE is None:
+      raise ValueError('ENGINE_TYPE is None')
+
     command_string = None
     # Get the command to issue base on type
     if isinstance(command, dict):
@@ -293,11 +302,13 @@ class PostgresCliQueryTools(ISQLQueryTools):
     sql_command += '-c "%s"' % command
     return sql_command
 
-  def GetConnectionString(self, database_name=''):
+  def GetConnectionString(self, database_name='', endpoint=''):
     if not database_name:
       database_name = self.DEFAULT_DATABASE
+    if not endpoint:
+      endpoint = self.connection_properties.endpoint
     return "'host={0} user={1} password={2} dbname={3}'".format(
-        self.connection_properties.endpoint,
+        endpoint,
         self.connection_properties.database_username,
         self.connection_properties.database_password,
         database_name,
@@ -343,7 +354,9 @@ class SpannerPostgresCliQueryTools(PostgresCliQueryTools):
   # The default database in postgres
   DEFAULT_DATABASE = POSTGRES
 
-  def Connect(self, sessions: Optional[int] = None) -> None:
+  def Connect(
+      self, sessions: Optional[int] = None, database_name: str = ''
+  ) -> None:
     """Connects to the DB using PGAdapter.
 
     See https://cloud.google.com/spanner/docs/sessions for a description
@@ -351,6 +364,7 @@ class SpannerPostgresCliQueryTools(PostgresCliQueryTools):
 
     Args:
       sessions: The number of Spanner minSessions to set for the client.
+      database_name: Database to connect
     """
     self.vm.RemoteCommand('fuser -k 5432/tcp', ignore_failure=True)
     # Connections need some time to cleanup, or the run command fails.
@@ -363,12 +377,13 @@ class SpannerPostgresCliQueryTools(PostgresCliQueryTools):
           f'numChannels={int(_PGADAPTER_MAX_SESSIONS/100)}"'
       )
     properties = self.connection_properties
+    database_name = database_name or properties.database_name
     self.vm.RemoteCommand(
         'java -jar pgadapter.jar '
         '-dir /tmp '
         f'-p {properties.project} '
         f'-i {properties.instance_name} '
-        f'-d {properties.database_name} '
+        f'-d {database_name} '
         f'{sessions_arg} '
         '&> /dev/null &'
     )
@@ -392,8 +407,8 @@ class SpannerPostgresCliQueryTools(PostgresCliQueryTools):
     sql_command += '-c "%s"' % command
     return sql_command
 
-  def GetConnectionString(self, database_name: str = '') -> str:
-    return f'-h {self.connection_properties.endpoint}'
+  def GetConnectionString(self, database_name: str = '', endpoint='') -> str:
+    return '-h localhost'
 
   def GetSysbenchConnectionString(self) -> str:
     return '--pgsql-host=/tmp'
@@ -440,7 +455,9 @@ class MysqlCliQueryTools(ISQLQueryTools):
 
     return mysql_command + '-e "%s"' % command
 
-  def GetConnectionString(self):
+  def GetConnectionString(self, endpoint=''):
+    if not endpoint:
+      endpoint = self.connection_properties.endpoint
     return '-h {0} -P 3306 -u {1} -p{2}'.format(
         self.connection_properties.endpoint,
         self.connection_properties.database_username,
@@ -491,7 +508,7 @@ class SqlServerCliQueryTools(ISQLQueryTools):
     sqlserver_command = sqlserver_command + '-Q "%s"' % command
     return sqlserver_command
 
-  def GetConnectionString(self, database_name=''):
+  def GetConnectionString(self, database_name='', endpoint=''):
     raise NotImplementedError('Connection string currently not supported')
 
   def RunSqlScript(
@@ -552,6 +569,8 @@ def GetDbEngineType(db_engine: str) -> str:
     return SPANNER_POSTGRES
   elif db_engine == SPANNER_GOOGLESQL:
     return SPANNER_GOOGLESQL
+  elif db_engine == MARIADB:
+    return MYSQL
 
   if db_engine not in ENGINE_TYPES:
     raise TypeError('Unsupported engine type', db_engine)
@@ -562,6 +581,8 @@ def GetQueryToolsByEngine(vm, connection_properties):
   """Returns the query tools to use for the engine."""
   engine_type = GetDbEngineType(connection_properties.engine)
   if engine_type == MYSQL:
+    return MysqlCliQueryTools(vm, connection_properties)
+  elif engine_type == MARIADB:
     return MysqlCliQueryTools(vm, connection_properties)
   elif engine_type == POSTGRES:
     return PostgresCliQueryTools(vm, connection_properties)

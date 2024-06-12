@@ -16,7 +16,9 @@
 This class is responsible to provide helper methods for IAAS relational
 database.
 """
+import logging
 import posixpath
+import time
 
 from absl import flags
 from perfkitbenchmarker import data
@@ -68,7 +70,9 @@ class PostgresIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
       kb_to_gb = 1.0 / 1000000
       if not self.postgres_shared_buffer_size:
         self.postgres_shared_buffer_size = int(
-            self.server_vm.total_memory_kb * kb_to_gb / 4
+            self.server_vm.total_memory_kb
+            * kb_to_gb
+            * FLAGS.postgres_shared_buffer_ratio
         )
 
   def GetResourceMetadata(self):
@@ -160,7 +164,7 @@ class PostgresIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
         '{}'.format(self.postgres_shared_buffer_size, postgres_conf_file)
     )
     # Update data path to new location
-    vm.RemoteCommand('sudo rsync -av /var/lib/postgresql /scratch')
+    vm.RemoteCommand(f'sudo rsync -av /var/lib/postgresql {vm.GetScratchDir()}')
 
     # # Use cat to move files because mv will override file permissions
     self.server_vm.RemoteCommand(
@@ -182,3 +186,30 @@ class PostgresIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
       (string): Default version for the given database engine.
     """
     return DEFAULT_POSTGRES_VERSION
+
+  def PrintUnmanagedDbStats(self):
+    """Prints the unmanaged database stats."""
+    # Log the wal size
+    self.server_vm_query_tools.IssueSqlCommand(
+        'SELECT sum(size) from pg_ls_waldir();', superuser=True
+    )
+
+    # Log pg bgwriter stats
+    self.server_vm_query_tools.IssueSqlCommand(
+        'SELECT * FROM pg_stat_bgwriter;', superuser=True
+    )
+
+    start = time.time()
+    db_version = self.spec.engine_version
+    self.server_vm.RemoteCommand(
+        f'sudo pg_ctlcluster {db_version} main stop -f -m fast'
+    )
+    self.server_vm.RemoteCommand(f'sudo pg_ctlcluster {db_version} main start')
+    end = time.time()
+    logging.info('Postgres restart took %.2f seconds', (end - start))
+
+    # Logging the main log of postgres, this log will contains checkpoint
+    # time frame and other useful information.
+    self.server_vm.RemoteCommand(
+        f'sudo cat /var/log/postgresql/postgresql-{db_version}-main.log'
+    )

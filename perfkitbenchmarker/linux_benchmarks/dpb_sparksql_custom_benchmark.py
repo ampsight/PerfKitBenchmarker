@@ -32,12 +32,13 @@ import json
 import logging
 import os
 import time
-from typing import List, Dict
+from typing import Dict, List
 
 from absl import flags
 from perfkitbenchmarker import benchmark_spec as bm_spec
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import data
+from perfkitbenchmarker import dpb_constants
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import object_storage_service
@@ -77,17 +78,21 @@ dpb_sparksql_custom_benchmark:
 """
 
 _QUERY_URI_PATH = flags.DEFINE_string(
-    'dpb_spark_query_uri_path', None,
-    'Uri path of query stored in storage/bucket i.e. gcs|s3|blob_storage.')
+    'dpb_spark_query_uri_path',
+    None,
+    'Uri path of query stored in storage/bucket i.e. gcs|s3|blob_storage.',
+)
 
 _QUERY_SUBSTITUTION_JSON_STRING = flags.DEFINE_string(
-    'dpb_spark_query_param_json_string', '{}',
+    'dpb_spark_query_param_json_string',
+    '{}',
     'Values of the names variable used in query provided via '
     " `dpb_spark_query_uri_path`. It's a comma separated json string where"
     "each value looks like 'key' : 'value'"
     "Imp: 'key' are stripped for spaces and then used, 'value' is used as is."
     'Cluster parameters like $BASE_DIR, $REGION, $CLUSTER_ID can also be used'
-    'as variables in sql query.')
+    'as variables in sql query.',
+)
 FLAGS = flags.FLAGS
 
 SCRIPT_DIR = 'spark_sql_test_scripts'
@@ -146,7 +151,8 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> List[sample.Sample]:
   job_result = cluster.SubmitJob(
       pyspark_file='/'.join([cluster.base_dir, SPARK_SQL_RUNNER_SCRIPT]),
       job_arguments=args,
-      job_type=dpb_service.BaseDpbService.PYSPARK_JOB_TYPE)
+      job_type=dpb_constants.PYSPARK_JOB_TYPE,
+  )
 
   # Spark can only write data to directories not files. So do a recursive copy
   # of that directory and then search it for the single JSON file with the
@@ -155,7 +161,8 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> List[sample.Sample]:
   storage_service.Copy(report_dir, temp_run_dir, recursive=True)
   report_file = None
   for dir_name, _, files in os.walk(
-      os.path.join(temp_run_dir, os.path.basename(report_dir))):
+      os.path.join(temp_run_dir, os.path.basename(report_dir))
+  ):
     for filename in files:
       if filename.endswith('.json'):
         report_file = os.path.join(dir_name, filename)
@@ -167,19 +174,29 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> List[sample.Sample]:
   with open(report_file, 'r') as file:
     result = json.loads(file.read())
     results.append(
-        sample.Sample('sparksql_run_time', result['duration'], 'seconds',
-                      metadata))
+        sample.Sample(
+            'sparksql_run_time', result['duration'], 'seconds', metadata
+        )
+    )
   results.append(
-      sample.Sample('sparksql_total_wall_time', job_result.wall_time, 'seconds',
-                    metadata))
+      sample.Sample(
+          'sparksql_total_wall_time', job_result.wall_time, 'seconds', metadata
+      )
+  )
   results.append(
-      sample.Sample('dpb_sparksql_job_pending', job_result.pending_time,
-                    'seconds', metadata))
+      sample.Sample(
+          'dpb_sparksql_job_pending',
+          job_result.pending_time,
+          'seconds',
+          metadata,
+      )
+  )
   return results
 
 
 def _DownloadTemplatedQuery(
-    storage_service: object_storage_service.ObjectStorageService) -> str:
+    storage_service: object_storage_service.ObjectStorageService,
+) -> str:
   """Downloads the template query to a temporary location.
 
   Args:
@@ -195,7 +212,8 @@ def _DownloadTemplatedQuery(
 
 
 def _GetQuerySubstitutions(
-    cluster: dpb_service.BaseDpbService) -> Dict[str, str]:
+    cluster: dpb_service.BaseDpbService,
+) -> Dict[str, str]:
   """Creates a sql query substitution dictionary.
 
   Substitutions is composed of two set of variables
@@ -213,7 +231,7 @@ def _GetQuerySubstitutions(
   substitute_dict.update({
       '$BASE_DIR': cluster.base_dir,
       '$REGION': cluster.region,
-      '$CLUSTER_ID': cluster.cluster_id
+      '$CLUSTER_ID': cluster.cluster_id,
   })
   return substitute_dict
 

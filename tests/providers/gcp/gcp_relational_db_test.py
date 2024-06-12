@@ -20,7 +20,6 @@ import os
 import unittest
 from absl import flags
 import mock
-
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import relational_db
 from perfkitbenchmarker import relational_db_spec
@@ -78,13 +77,12 @@ def PatchCriticalObjects(stdout='', stderr='', return_code=0):
   """A context manager that patches a few critical objects with mocks."""
   retval = (stdout, stderr, return_code)
   with mock.patch(
-      vm_util.__name__ + '.IssueCommand',
-      return_value=retval) as issue_command, mock.patch(
-          builtins.__name__ +
-          '.open'), mock.patch(vm_util.__name__ +
-                               '.NamedTemporaryFile'), mock.patch(
-                                   util.__name__ + '.GetDefaultProject',
-                                   return_value='fakeproject'):
+      vm_util.__name__ + '.IssueCommand', return_value=retval
+  ) as issue_command, mock.patch(builtins.__name__ + '.open'), mock.patch(
+      vm_util.__name__ + '.NamedTemporaryFile'
+  ), mock.patch(
+      util.__name__ + '.GetDefaultProject', return_value='fakeproject'
+  ):
     yield issue_command
 
 
@@ -92,32 +90,16 @@ def VmGroupSpec():
   return {
       'clients': {
           'vm_spec': {
-              'GCP': {
-                  'zone': 'us-central1-c',
-                  'machine_type': 'n1-standard-1'
-              }
+              'GCP': {'zone': 'us-central1-c', 'machine_type': 'n1-standard-1'}
           },
-          'disk_spec': {
-              'GCP': {
-                  'disk_size': 500,
-                  'disk_type': 'pd-ssd'
-              }
-          }
+          'disk_spec': {'GCP': {'disk_size': 500, 'disk_type': 'pd-ssd'}},
       },
       'servers': {
           'vm_spec': {
-              'GCP': {
-                  'zone': 'us-central1-c',
-                  'machine_type': 'n1-standard-1'
-              }
+              'GCP': {'zone': 'us-central1-c', 'machine_type': 'n1-standard-1'}
           },
-          'disk_spec': {
-              'GCP': {
-                  'disk_size': 500,
-                  'disk_type': 'pd-ssd'
-              }
-          }
-      }
+          'disk_spec': {'GCP': {'disk_size': 500, 'disk_type': 'pd-ssd'}},
+      },
   }
 
 
@@ -125,10 +107,12 @@ class GcpMysqlRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def createMySQLSpecDict(self):
     db_spec = virtual_machine.BaseVmSpec(
-        'NAME', **{
+        'NAME',
+        **{
             'machine_type': 'db-n1-standard-1',
             'zone': 'us-west1-b',
-        })
+        }
+    )
     db_spec.cpus = None
     db_spec.memory = None
     db_disk_spec = disk.BaseDiskSpec('NAME', **{'disk_size': 50})
@@ -148,6 +132,7 @@ class GcpMysqlRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
         'enable_freeze_restore': False,
         'create_on_restore_error': False,
         'delete_on_freeze_error': False,
+        'db_flags': '',
     }
 
   def setUp(self):
@@ -179,8 +164,10 @@ class GcpMysqlRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
 
       self.assertTrue(
           command_string.startswith(
-              'gcloud beta sql instances create pkb-db-instance-123'),
-          command_string)
+              'gcloud beta sql instances create pkb-db-instance-123'
+          ),
+          command_string,
+      )
       self.assertIn('--project fakeproject', command_string)
       self.assertIn('--tier=db-n1-standard-1', command_string)
       self.assertIn('--storage-size=50', command_string)
@@ -207,8 +194,10 @@ class GcpMysqlRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
 
       self.assertTrue(
           command_string.startswith(
-              'gcloud beta sql instances create pkb-db-instance-123'),
-          command_string)
+              'gcloud beta sql instances create pkb-db-instance-123'
+          ),
+          command_string,
+      )
       self.assertIn('--project fakeproject', command_string)
       self.assertIn('--tier=db-n1-standard-1', command_string)
       self.assertIn('--no-backup', command_string)
@@ -222,12 +211,16 @@ class GcpMysqlRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
       command_string = ' '.join(issue_command.call_args[0][0])
       self.assertTrue(
           command_string.startswith(
-              'gcloud sql instances delete pkb-db-instance-123'))
+              'gcloud sql instances delete pkb-db-instance-123'
+          )
+      )
 
   def testIsReady(self):
     path = os.path.join(
-        os.path.dirname(__file__), '../../data',
-        'gcloud-describe-db-instances-available.json')
+        os.path.dirname(__file__),
+        '../../data',
+        'gcloud-describe-db-instances-available.json',
+    )
     with open(path) as fp:
       test_output = fp.read()
 
@@ -237,8 +230,10 @@ class GcpMysqlRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testExists(self):
     path = os.path.join(
-        os.path.dirname(__file__), '../../data',
-        'gcloud-describe-db-instances-available.json')
+        os.path.dirname(__file__),
+        '../../data',
+        'gcloud-describe-db-instances-available.json',
+    )
     with open(path) as fp:
       test_output = fp.read()
 
@@ -259,28 +254,31 @@ class GcpMysqlRelationalDbTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def testParseEndpoint(self):
     path = os.path.join(
-        os.path.dirname(__file__), '../../data',
-        'gcloud-describe-db-instances-available.json')
+        os.path.dirname(__file__),
+        '../../data',
+        'gcloud-describe-db-instances-available.json',
+    )
     with open(path) as fp:
       test_output = fp.read()
 
     with PatchCriticalObjects():
       db = CreateDbFromSpec(self.createMySQLSpecDict())
       self.assertEqual('', db._ParseEndpoint(None))
-      self.assertIn('10.10.0.35',
-                    db._ParseEndpoint(json.loads(test_output)))
+      self.assertIn('10.10.0.35', db._ParseEndpoint(json.loads(test_output)))
 
   def testCreateUnmanagedDb(self):
     FLAGS['use_managed_db'].parse(False)
     FLAGS['project'].parse('test')
+    FLAGS['db_flags'].parse('')
     with PatchCriticalObjects() as issue_command:
       db = CreateIAASDbFromSpec(self.createMySQLSpecDict())
       db._Create()
       self.assertTrue(db._Exists())
-      self.assertEqual(db.endpoint, db.server_vm.internal_ip)
       self.assertEqual(db.spec.database_username, 'root')
       self.assertEqual(db.spec.database_password, 'perfkitbenchmarker')
       self.assertIsNone(issue_command.call_args)
+      db._PostCreate()
+      self.assertEqual(db.endpoint, db.server_vm.internal_ip)
 
 
 class GcpPostgresRelationlDbTestCase(pkb_common_test_case.PkbCommonTestCase):

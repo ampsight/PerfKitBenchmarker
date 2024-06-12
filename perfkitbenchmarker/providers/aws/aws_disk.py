@@ -26,7 +26,9 @@ import json
 import logging
 import string
 import threading
-
+import time
+from typing import Optional
+from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import provider_info
@@ -37,6 +39,7 @@ from perfkitbenchmarker.providers.aws import util
 
 class AwsStateRetryableError(Exception):
   """Error for retrying when an AWS disk is in a transitional state."""
+
 
 VOLUME_EXISTS_STATUSES = frozenset(['creating', 'available', 'in-use', 'error'])
 VOLUME_DELETED_STATUSES = frozenset(['deleting', 'deleted'])
@@ -52,11 +55,6 @@ SC1 = 'sc1'
 
 AWS_REMOTE_DISK_TYPES = [STANDARD, SC1, ST1, GP2, GP3, IO1, IO2]
 
-DISK_TYPE = {
-    disk.STANDARD: STANDARD,
-    disk.REMOTE_SSD: GP2,
-    disk.PIOPS: IO1
-}
 
 # any disk types here, consider adding them to AWS_REMOTE_DISK_TYPES as well.
 DISK_METADATA = {
@@ -80,14 +78,8 @@ DISK_METADATA = {
         disk.MEDIA: disk.SSD,
         disk.REPLICATION: disk.ZONE,
     },
-    ST1: {
-        disk.MEDIA: disk.HDD,
-        disk.REPLICATION: disk.ZONE
-    },
-    SC1: {
-        disk.MEDIA: disk.HDD,
-        disk.REPLICATION: disk.ZONE
-    }
+    ST1: {disk.MEDIA: disk.HDD, disk.REPLICATION: disk.ZONE},
+    SC1: {disk.MEDIA: disk.HDD, disk.REPLICATION: disk.ZONE},
 }
 
 LOCAL_SSD_METADATA = {
@@ -131,7 +123,15 @@ NON_EBS_NVME_TYPES = [
     't1',
 ]
 NON_LOCAL_NVME_TYPES = LOCAL_HDD_PREFIXES + [
-    'c3', 'cr1', 'g2', 'i2', 'm3', 'r3', 'x1', 'x1e']
+    'c3',
+    'cr1',
+    'g2',
+    'i2',
+    'm3',
+    'r3',
+    'x1',
+    'x1e',
+]
 
 # Following dictionary based on
 # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/InstanceStorage.html
@@ -323,6 +323,25 @@ NUM_LOCAL_VOLUMES = {
     'g4ad.4xlarge': 1,
     'g4ad.8xlarge': 1,
     'g4ad.16xlarge': 2,
+    'g5.xlarge': 1,
+    'g5.2xlarge': 1,
+    'g5.4xlarge': 1,
+    'g5.8xlarge': 1,
+    'g5.12xlarge': 1,
+    'g5.16xlarge': 1,
+    'g5.24xlarge': 1,
+    'g5.48xlarge': 2,
+    'g6.xlarge': 1,
+    'g6.2xlarge': 1,
+    'g6.4xlarge': 1,
+    'g6.8xlarge': 2,
+    'g6.16xlarge': 2,
+    'gr6.4xlarge': 1,
+    'gr6.8xlarge': 2,
+    'g6.12xlarge': 4,
+    'g6.24xlarge': 4,
+    'g6.48xlarge': 8,
+    'p5.48xlarge': 8,
 }
 
 
@@ -339,22 +358,16 @@ def LocalDriveIsNvme(machine_type):
 def EbsDriveIsNvme(machine_type):
   """Check if the machine type uses NVMe driver."""
   instance_family = machine_type.split('.')[0].lower()
-  return (instance_family not in NON_EBS_NVME_TYPES or
-          'metal' in machine_type)
+  return instance_family not in NON_EBS_NVME_TYPES or 'metal' in machine_type
 
 
 AWS = 'AWS'
-disk.RegisterDiskTypeMap(AWS, DISK_TYPE)
 
 
 class AwsDiskSpec(disk.BaseDiskSpec):
-  """Object holding the information needed to create an AwsDisk.
+  """Object holding the information needed to create an AwsDisk."""
 
-  Attributes:
-    iops: None or int. IOPS for Provisioned IOPS (SSD) volumes in AWS.
-    throughput: None or int. Throughput for (SSD) volumes in AWS.
-  """
-
+  create_with_vm: bool
   CLOUD = provider_info.AWS
 
   @classmethod
@@ -364,16 +377,14 @@ class AwsDiskSpec(disk.BaseDiskSpec):
     Can be overridden by derived classes to add support for specific flags.
 
     Args:
-      config_values: dict mapping config option names to provided values. May
-          be modified by this function.
+      config_values: dict mapping config option names to provided values. May be
+        modified by this function.
       flag_values: flags.FlagValues. Runtime flags that may override the
-          provided config values.
+        provided config values.
     """
     super(AwsDiskSpec, cls)._ApplyFlags(config_values, flag_values)
-    if flag_values['aws_provisioned_iops'].present:
-      config_values['iops'] = flag_values.aws_provisioned_iops
-    if flag_values['aws_provisioned_throughput'].present:
-      config_values['throughput'] = flag_values.aws_provisioned_throughput
+    if flag_values['aws_create_disks_with_vm'].present:
+      config_values['create_with_vm'] = flag_values.aws_create_disks_with_vm
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -385,26 +396,23 @@ class AwsDiskSpec(disk.BaseDiskSpec):
           arguments to construct in order to decode the named option.
     """
     result = super(AwsDiskSpec, cls)._GetOptionDecoderConstructions()
-    result.update({
-        'iops': (option_decoders.IntDecoder, {
-            'default': None,
-            'none_ok': True
-        })
-    })
-    result.update({
-        'throughput': (option_decoders.IntDecoder, {
-            'default': None,
-            'none_ok': True
-        })
-    })
+    result.update(
+        {
+            'create_with_vm': (
+                option_decoders.BooleanDecoder,
+                {'default': True},
+            )
+        }
+    )
     return result
 
 
 @dataclasses.dataclass
 class AWSDiskIdentifiers:
   """Identifiers of an AWS disk assigned by AWS at creation time."""
-  volume_id: str
-  path: str
+
+  volume_id: Optional[str]
+  path: Optional[str]
 
 
 class AwsDisk(disk.BaseDisk):
@@ -416,29 +424,41 @@ class AwsDisk(disk.BaseDisk):
 
   def __init__(self, disk_spec, zone, machine_type, disk_spec_id=None):
     super(AwsDisk, self).__init__(disk_spec)
-    self.iops = disk_spec.iops
-    self.throughput = disk_spec.throughput
+    self.iops = disk_spec.provisioned_iops
+    self.throughput = disk_spec.provisioned_throughput
     self.id = None
     self.zone = zone
     self.region = util.GetRegionFromZone(zone)
     self.device_letter = None
     self.attached_vm_id = None
+    self.attached_vm_name = None
     self.machine_type = machine_type
     if self.disk_type != disk.LOCAL:
       self.metadata.update(DISK_METADATA.get(self.disk_type, {}))
     else:
-      self.metadata.update((LOCAL_HDD_METADATA
-                            if LocalDiskIsHDD(machine_type)
-                            else LOCAL_SSD_METADATA))
+      self.metadata.update((
+          LOCAL_HDD_METADATA
+          if LocalDiskIsHDD(machine_type)
+          else LOCAL_SSD_METADATA
+      ))
     if self.iops:
       self.metadata['iops'] = self.iops
     if self.throughput:
       self.metadata['throughput'] = self.throughput
     self.disk_spec_id = disk_spec_id
 
+  def IsNvme(self):
+    if self.disk_type == disk.LOCAL:
+      return LocalDriveIsNvme(self.machine_type)
+    elif self.disk_type in AWS_REMOTE_DISK_TYPES:
+      return EbsDriveIsNvme(self.machine_type)
+    else:
+      return False
+
   def AssignDeviceLetter(self, letter_suggestion, nvme_boot_drive_index):
-    if (LocalDriveIsNvme(self.machine_type) and
-        EbsDriveIsNvme(self.machine_type)):
+    if LocalDriveIsNvme(self.machine_type) and EbsDriveIsNvme(
+        self.machine_type
+    ):
       first_device_letter = 'b'
       local_drive_number = ord(letter_suggestion) - ord(first_device_letter)
       logging.info('local drive number is: %d', local_drive_number)
@@ -457,7 +477,8 @@ class AwsDisk(disk.BaseDisk):
         'create-volume',
         '--region=%s' % self.region,
         '--size=%s' % self.disk_size,
-        '--volume-type=%s' % self.disk_type]
+        '--volume-type=%s' % self.disk_type,
+    ]
     if not util.IsRegion(self.zone):
       create_cmd.append('--availability-zone=%s' % self.zone)
     if self.disk_type in [IO1, IO2]:
@@ -468,7 +489,9 @@ class AwsDisk(disk.BaseDisk):
       create_cmd.append('--throughput=%s' % self.throughput)
 
     try:
+      self.create_disk_start_time = time.time()
       stdout, _, _ = vm_util.IssueCommand(create_cmd)
+      self.create_disk_end_time = time.time()
     except errors.VmUtil.IssueCommandError as error:
       error_message = str(error)
       is_quota_error = 'MaxIOPSLimitExceeded' in error_message
@@ -486,9 +509,13 @@ class AwsDisk(disk.BaseDisk):
         'ec2',
         'delete-volume',
         '--region=%s' % self.region,
-        '--volume-id=%s' % self.id]
-    logging.info('Deleting AWS volume %s. This may fail if the disk is not '
-                 'yet detached, but will be retried.', self.id)
+        '--volume-id=%s' % self.id,
+    ]
+    logging.info(
+        'Deleting AWS volume %s. This may fail if the disk is not '
+        'yet detached, but will be retried.',
+        self.id,
+    )
     vm_util.IssueCommand(delete_cmd, raise_on_failure=False)
 
   def _Exists(self):
@@ -497,7 +524,8 @@ class AwsDisk(disk.BaseDisk):
         'ec2',
         'describe-volumes',
         '--region=%s' % self.region,
-        '--filter=Name=volume-id,Values=%s' % self.id]
+        '--filter=Name=volume-id,Values=%s' % self.id,
+    ]
     stdout, _ = util.IssueRetryableCommand(describe_cmd)
     response = json.loads(stdout)
     volumes = response['Volumes']
@@ -511,7 +539,8 @@ class AwsDisk(disk.BaseDisk):
   @vm_util.Retry(
       poll_interval=0.5,
       log_errors=True,
-      retryable_exceptions=(AwsStateRetryableError,))
+      retryable_exceptions=(AwsStateRetryableError,),
+  )
   def _WaitForAttachedState(self):
     """Returns if the state of the disk is attached.
 
@@ -534,9 +563,12 @@ class AwsDisk(disk.BaseDisk):
     response = json.loads(stdout)
     status = response['Volumes'][0]['Attachments'][0]['State']
     if status.lower() != 'attached':
-      logging.info('Disk (id:%s) attaching to '
-                   'VM (id:%s) has status %s.',
-                   self.id, self.attached_vm_id, status)
+      logging.info(
+          'Disk (id:%s) attaching to VM (id:%s) has status %s.',
+          self.id,
+          self.attached_vm_id,
+          status,
+      )
 
       raise AwsStateRetryableError()
     volume_id = response['Volumes'][0]['Attachments'][0]['VolumeId']
@@ -544,67 +576,112 @@ class AwsDisk(disk.BaseDisk):
     return volume_id, device_name
 
   @classmethod
-  def GenerateDeviceNamePrefix(cls, disk_type):
-    """Generates the device name prefix depending on the device type."""
-    if disk_type == disk.LOCAL:
-      return '/dev/xvd'
-    else:
-      return '/dev/xvdb'
+  def GenerateDeviceNamePrefix(cls):
+    """Generates the device name prefix."""
+    return '/dev/xvd'
 
   @classmethod
   def GenerateDeviceLetter(cls, vm_name):
     """Generates the next available device letter for a given VM."""
     with cls._lock:
       if vm_name not in cls.available_device_letters_by_vm:
-        all_available_letters = set(string.ascii_lowercase)
+        # AWS allows the following device names:
+        # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/device_naming.html#available-ec2-device-names
+        ascii_characters = list(string.ascii_lowercase)
+        available_letters = []
+        first_ch = ['a', 'b', 'c', 'd']
+        for ch in first_ch:
+          available_letters.extend(
+              (ch + ascii_character) for ascii_character in ascii_characters
+          )
         # local ssds cannot use 'a' to allow for boot disk naming.
         # remove 'a' as an available device letter,
         # so that both local ssds and remote disks can share this naming
         # convention.
-        all_available_letters.remove('a')
-        cls.available_device_letters_by_vm[vm_name] = all_available_letters
+        ascii_characters.remove('a')
+        # According to the mentioned above, xvdb, xvdc, xvd are not allowed
+        ascii_characters.remove('b')
+        ascii_characters.remove('c')
+        ascii_characters.remove('d')
+        # Getting xvddy and xvddz are invalid names during runtime
+        available_letters.remove('dy')
+        available_letters.remove('dz')
+        available_letters.extend(ascii_characters)
+        cls.available_device_letters_by_vm[vm_name] = set(available_letters)
       device_letter = min(cls.available_device_letters_by_vm[vm_name])
       cls.available_device_letters_by_vm[vm_name].remove(device_letter)
     return device_letter
 
-  def Attach(self, vm):
+  def _Attach(self, vm):
     """Attaches the disk to a VM.
 
     Args:
       vm: The AwsVirtualMachine instance to which the disk will be attached.
     """
     self.device_letter = AwsDisk.GenerateDeviceLetter(vm.name)
+    self.attached_vm_id = vm.id
+    self.attached_vm_name = vm.name
 
-    device_name = (
-        self.GenerateDeviceNamePrefix(self.disk_type) + self.device_letter)
+    device_name = self.GenerateDeviceNamePrefix() + self.device_letter
     attach_cmd = util.AWS_PREFIX + [
         'ec2',
         'attach-volume',
         '--region=%s' % self.region,
         '--instance-id=%s' % vm.id,
         '--volume-id=%s' % self.id,
-        '--device=%s' % device_name]
-    logging.info('Attaching AWS volume %s. This may fail if the disk is not '
-                 'ready, but will be retried.', self.id)
-    util.IssueRetryableCommand(attach_cmd)
+        '--device=%s' % device_name,
+    ]
+    logging.info(
+        'Attaching AWS volume %s. This may fail if the disk is not '
+        'ready, but will be retried.',
+        self.id,
+    )
+    self.attach_start_time = time.time()
+    vm_util.IssueCommand(attach_cmd, raise_on_failure=False)
+    self.attach_end_time = time.time()
     volume_id, device_name = self._WaitForAttachedState()
-    vm.LogDeviceByName(device_name, volume_id)
+    vm.LogDeviceByName(device_name, volume_id, device_name)
     if self.disk_spec_id:
       vm.LogDeviceByDiskSpecId(self.disk_spec_id, device_name)
 
-  def Detach(self):
+  def _Detach(self):
     """Detaches the disk from a VM."""
     detach_cmd = util.AWS_PREFIX + [
         'ec2',
         'detach-volume',
         '--region=%s' % self.region,
         '--instance-id=%s' % self.attached_vm_id,
-        '--volume-id=%s' % self.id]
-    util.IssueRetryableCommand(detach_cmd)
+        '--volume-id=%s' % self.id,
+    ]
+    vm_util.IssueCommand(detach_cmd, raise_on_failure=False)
 
     with self._lock:
-      assert self.attached_vm_id in AwsDisk.available_device_letters_by_vm
-      AwsDisk.available_device_letters_by_vm[self.attached_vm_id].add(
-          self.device_letter)
+      assert self.attached_vm_name in AwsDisk.available_device_letters_by_vm
+      AwsDisk.available_device_letters_by_vm[self.attached_vm_name].add(
+          self.device_letter
+      )
       self.attached_vm_id = None
+      self.attached_vm_name = None
       self.device_letter = None
+
+
+class AwsStripedDisk(disk.StripedDisk):
+  """Object representing multiple azure disks striped together."""
+
+  def _Create(self):
+    create_tasks = []
+    for disk_details in self.disks:
+      create_tasks.append((disk_details.Create, (), {}))
+    background_tasks.RunParallelThreads(create_tasks, max_concurrency=200)
+
+  def _Attach(self, vm):
+    attach_tasks = []
+    for disk_details in self.disks:
+      attach_tasks.append((disk_details.Attach, [vm], {}))
+    background_tasks.RunParallelThreads(attach_tasks, max_concurrency=200)
+
+  def _Detach(self):
+    detach_tasks = []
+    for disk_details in self.disks:
+      detach_tasks.append((disk_details.Detach, (), {}))
+    background_tasks.RunParallelThreads(detach_tasks, max_concurrency=200)

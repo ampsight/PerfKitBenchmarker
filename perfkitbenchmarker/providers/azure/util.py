@@ -17,7 +17,7 @@
 
 import json
 import re
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 from absl import flags
 from perfkitbenchmarker import context
@@ -26,32 +26,48 @@ from perfkitbenchmarker.providers import azure
 import six
 
 AZURE_PATH = azure.AZURE_PATH
-AZURE_SUFFIX = ['--output', 'json']
+OUTPUT_JSON = ['--output', 'json']
 FLAGS = flags.FLAGS
 
 
-def GetAzureStorageConnectionString(storage_account_name, resource_group_args):
+def GetAzureStorageConnectionString(
+    storage_account_name: str,
+    resource_group: Optional[str] = None,
+    subscription: Optional[str] = None):
   """Get connection string."""
-  stdout, _ = vm_util.IssueRetryableCommand(
-      [AZURE_PATH, 'storage', 'account', 'show-connection-string',
-       '--name', storage_account_name] + resource_group_args + AZURE_SUFFIX)
+  cmd = [
+      AZURE_PATH,
+      'storage',
+      'account',
+      'show-connection-string',
+      '--name',
+      storage_account_name,
+  ] + OUTPUT_JSON
+  if resource_group:
+    cmd.extend(['--resource-group', resource_group])
+  if subscription:
+    cmd.extend(['--subscription', subscription])
+  stdout, _ = vm_util.IssueRetryableCommand(cmd)
+
   response = json.loads(stdout)
   return response['connectionString']
-
-
-def GetAzureStorageConnectionArgs(storage_account_name, resource_group_args):
-  """Get connection CLI arguments."""
-  return ['--connection-string',
-          GetAzureStorageConnectionString(storage_account_name,
-                                          resource_group_args)]
 
 
 def GetAzureStorageAccountKey(storage_account_name, resource_group_args):
   """Get storage account key."""
   stdout, _ = vm_util.IssueRetryableCommand(
-      [AZURE_PATH, 'storage', 'account', 'keys', 'list',
-       '--account-name', storage_account_name] +
-      resource_group_args + AZURE_SUFFIX)
+      [
+          AZURE_PATH,
+          'storage',
+          'account',
+          'keys',
+          'list',
+          '--account-name',
+          storage_account_name,
+      ]
+      + resource_group_args
+      + OUTPUT_JSON
+  )
 
   response = json.loads(stdout)
   # A new storage account comes with two keys, but we only need one.
@@ -126,10 +142,9 @@ def IsZone(zone_or_region):
   """Returns whether "zone_or_region" is a zone.
 
   Args:
-    zone_or_region: string, Azure zone or region. Format for Azure
-      availability
+    zone_or_region: string, Azure zone or region. Format for Azure availability
       zone support is "region-availability_zone". Example: eastus2-1 specifies
-        Azure region eastus2 with availability zone 1.
+      Azure region eastus2 with availability zone 1.
   """
 
   return re.match(r'[a-z]+[0-9]?-[0-9]$', zone_or_region, re.IGNORECASE)
@@ -142,8 +157,9 @@ def GetRegionFromZone(zone_or_region: str) -> str:
   if IsZone(zone_or_region):
     return zone_or_region[:-2]
 
-  raise ValueError('%s is not a valid Azure zone or region name' %
-                   zone_or_region)
+  raise ValueError(
+      '%s is not a valid Azure zone or region name' % zone_or_region
+  )
 
 
 def GetZonesInRegion(region: str) -> Set[str]:
@@ -162,7 +178,8 @@ def ShouldKeepZoneFromCLI(zone: str) -> bool:
 def GetZonesFromMachineType(machine_type: str) -> Set[str]:
   """Returns a set of zones for a machine type."""
   stdout, _ = vm_util.IssueRetryableCommand(
-      [AZURE_PATH, 'vm', 'list-skus', '--size', machine_type])
+      [AZURE_PATH, 'vm', 'list-skus', '--size', machine_type]
+  )
   zones = set()
   for item in json.loads(stdout):
     for location_info in item['locationInfo']:
@@ -175,9 +192,9 @@ def GetZonesFromMachineType(machine_type: str) -> Set[str]:
 
 def GetAllRegions() -> Set[str]:
   """Returns all valid regions."""
-  stdout, _ = vm_util.IssueRetryableCommand([
-      AZURE_PATH, 'account', 'list-locations', '--output', 'json'
-  ])
+  stdout, _ = vm_util.IssueRetryableCommand(
+      [AZURE_PATH, 'account', 'list-locations', '--output', 'json']
+  )
   # Filter out staging regions from the output.
   return set([
       item['name'] for item in json.loads(stdout) if _IsRecommendedRegion(item)
@@ -195,9 +212,13 @@ def GetAllZones() -> Set[str]:
 def GetGeoFromRegion(region: str) -> str:
   """Gets valid geo from the region, i.e. region westus2 returns US."""
   stdout, _ = vm_util.IssueRetryableCommand([
-      AZURE_PATH, 'account', 'list-locations',
-      '--output', 'json',
-      '--query', f"[?name == '{region}'].metadata.geographyGroup"
+      AZURE_PATH,
+      'account',
+      'list-locations',
+      '--output',
+      'json',
+      '--query',
+      f"[?name == '{region}'].metadata.geographyGroup",
   ])
   return stdout.splitlines()[1].strip('" ')
 
@@ -205,9 +226,13 @@ def GetGeoFromRegion(region: str) -> str:
 def GetRegionsInGeo(geo: str) -> Set[str]:
   """Gets valid regions in the geo."""
   stdout, _ = vm_util.IssueRetryableCommand([
-      AZURE_PATH, 'account', 'list-locations',
-      '--output', 'json',
-      '--query', f"[?metadata.geographyGroup == '{geo}']"
+      AZURE_PATH,
+      'account',
+      'list-locations',
+      '--output',
+      'json',
+      '--query',
+      f"[?metadata.geographyGroup == '{geo}']",
   ])
   return set([
       item['name'] for item in json.loads(stdout) if _IsRecommendedRegion(item)
@@ -221,3 +246,21 @@ def GetAvailabilityZoneFromZone(zone_or_region):
   if _IsRegion(zone_or_region):
     return None
   raise ValueError('%s is not a valid Azure zone' % zone_or_region)
+
+
+def GetMachineFamily(machine_type):
+  """Returns the machine family of a machine type.
+
+  The family is the machine type with the number of vCPUs removed, hence all
+  machines from the same series shows up as having the same family.
+  See testGetMachineFamily in azure_util_test.py for examples.
+
+  Args:
+    machine_type: Azure machine type
+  """
+  if not machine_type:
+    return None
+  match = re.match(r'^(.*?)\d+(.*)$', machine_type)
+  if match:
+    return match.group(1) + match.group(2)
+  return None

@@ -37,6 +37,7 @@ Each workload runs for at most 30 minutes.
 
 from collections.abc import Mapping, Sequence
 import copy
+import datetime
 import io
 import logging
 import os
@@ -50,6 +51,7 @@ from perfkitbenchmarker import data
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import events
 from perfkitbenchmarker import linux_packages
+from perfkitbenchmarker import resource
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
@@ -100,7 +102,7 @@ flags.DEFINE_boolean(
 flags.DEFINE_boolean(
     'ycsb_load_samples', True, 'Include samples from pre-populating database.'
 )
-flags.DEFINE_boolean(
+SKIP_LOAD_STAGE = flags.DEFINE_boolean(
     'ycsb_skip_load_stage',
     False,
     'If True, skip the data '
@@ -145,19 +147,32 @@ flags.DEFINE_list(
     'Passed to YCSB during the run stage. Comma-separated list '
     'of "key=value" pairs.',
 )
-_THROUGHPUT_TIME_SERIES = flags.DEFINE_bool(
-    'ycsb_throughput_time_series',
+_STATUS = flags.DEFINE_bool(
+    'ycsb_status',
     False,
-    'If true, run prints status which includes a throughput time series (1s '
-    'granularity), and includes the results in the samples.',
+    'If true, run prints status which includes a throughput and latency time'
+    ' series and includes the results in the samples.',
+)
+_STATUS_INTERVAL_SEC = flags.DEFINE_integer(
+    'ycsb_status_interval_sec',
+    10,
+    'The amount of time in between status printing.',
 )
 flags.DEFINE_list(
     'ycsb_threads_per_client',
     ['32'],
-    'Number of threads per '
-    'loader during the benchmark run. Specify a list to vary the '
-    'number of clients. For each thread count, optionally supply '
-    'target qps per client, which cause ycsb to self-throttle.',
+    'Number of threads per loader during the benchmark run. Specify a list to'
+    ' vary the number of clients. For each thread count, optionally supply'
+    ' target qps per client or ycsb_target_qps, which cause ycsb to'
+    ' self-throttle.',
+)
+_TARGET_QPS = flags.DEFINE_integer(
+    'ycsb_target_qps',
+    None,
+    'Total target QPS to use for the run. If there are multiple client VMs,'
+    ' this target QPS will be divided among them if they are run in parallel.'
+    ' TODO: switch burst load and incremental load use target QPS parsed from'
+    ' run params, which should be switched to using this flag.',
 )
 flags.DEFINE_integer(
     'ycsb_preload_threads',
@@ -249,6 +264,12 @@ flags.DEFINE_integer(
     'Run duration in seconds for each throughput target '
     'if we have already reached sustained throughput.',
 )
+_DYNAMIC_LOAD_SLEEP_SEC = flags.DEFINE_integer(
+    'ycsb_dynamic_load_sleep_sec',
+    0,
+    'Sleep duration in seconds between run stages after reaching sustained '
+    'throughput.',
+)
 flags.DEFINE_integer(
     'ycsb_sleep_after_load_in_sec',
     0,
@@ -299,11 +320,162 @@ _ERROR_RATE_THRESHOLD = flags.DEFINE_float(
     'By default, this allows any number of errors.',
 )
 
+# CPU optimization mode flags
+CPU_OPTIMIZATION = flags.DEFINE_bool(
+    'ycsb_cpu_optimization',
+    False,
+    'Whether to run in CPU-optimized mode. The test will increase QPS until '
+    'CPU is over --ycsb_cpu_optimization_target.',
+)
+CPU_OPTIMIZATION_TARGET_MIN = flags.DEFINE_float(
+    'ycsb_cpu_optimization_target_min',
+    0.65,
+    'CPU-optimized mode: minimum target CPU utilization. The end sample must be'
+    ' between this number and --ycsb_cpu_optimization_target, else an exception'
+    ' will be thrown.',
+)
+CPU_OPTIMIZATION_TARGET = flags.DEFINE_float(
+    'ycsb_cpu_optimization_target',
+    0.70,
+    'CPU-optimized mode: maximum target CPU utilization at which to stop the'
+    ' test. The test will continue to increment until the utilization level is'
+    ' reached, and then return the maximum throughput for that usage level.',
+)
+_CPU_OPTIMIZATION_SLEEP_MINS = flags.DEFINE_integer(
+    'ycsb_cpu_optimization_sleep_mins',
+    0,
+    'CPU-optimized mode: time in minutes to sleep between run steps when'
+    ' increasing target QPS.',
+)
+CPU_OPTIMIZATION_INCREMENT_MINS = flags.DEFINE_integer(
+    'ycsb_cpu_optimization_workload_mins',
+    30,
+    'CPU-optimized mode: length of time to run YCSB until incrementing QPS.',
+)
+CPU_OPTIMIZATION_MEASUREMENT_MINS = flags.DEFINE_integer(
+    'ycsb_cpu_optimization_measurement_mins',
+    5,
+    'CPU-optimized mode: length of time to measure average CPU at the end of'
+    ' each step. For example, the default 5 means that only the last 5 minutes'
+    ' of the test will be used for representative CPU utilization. Must be '
+    ' less than or equal to --ycsb_cpu_optimization_workload_mins. Note that '
+    ' some APIs can have a delay in reporting results, so increase this'
+    ' accordingly.',
+)
+
+
+def _ValidateCpuTargetFlags(flags_dict):
+  return (
+      flags_dict['ycsb_cpu_optimization_target']
+      > flags_dict['ycsb_cpu_optimization_target_min']
+  )
+
+
+def _ValidateCpuMeasurementFlag(flags_dict):
+  return (
+      flags_dict['ycsb_cpu_optimization_measurement_mins']
+      <= flags_dict['ycsb_cpu_optimization_workload_mins']
+  )
+
+
+flags.register_multi_flags_validator(
+    ['ycsb_cpu_optimization_target', 'ycsb_cpu_optimization_target_min'],
+    _ValidateCpuTargetFlags,
+    'CPU optimization target must be greater than min target.',
+)
+flags.register_multi_flags_validator(
+    [
+        'ycsb_cpu_optimization_measurement_mins',
+        'ycsb_cpu_optimization_workload_mins',
+    ],
+    _ValidateCpuMeasurementFlag,
+    'CPU measurement minutes must be shorter than or equal to workload'
+    ' duration.',
+)
+
+# Latency threshold mode flags
+_LATENCY_THRESHOLD = flags.DEFINE_bool(
+    'ycsb_latency_threshold_mode',
+    False,
+    'Whether to run in latency threshold mode. The test will report throughput'
+    ' found where latency measured is between'
+    ' --ycsb_latency_threshold_target_min and --ycsb_latency_threshold_target'
+    ' with the goal of being as close to the target as possible. The benchmark'
+    ' will raise if a target is not found.',
+)
+_LATENCY_THRESHOLD_TARGET_MIN = flags.DEFINE_float(
+    'ycsb_latency_threshold_target_min',
+    15.0,
+    'Latency threshold mode: minimum ms latency. The end sample must be between'
+    ' this number and --ycsb_latency_threshold_target, else an exception will'
+    ' be thrown.',
+)
+_LATENCY_THRESHOLD_TARGET = flags.DEFINE_float(
+    'ycsb_latency_threshold_target',
+    20.0,
+    'Latency threshold mode: maximum ms latency at which to stop the test. The'
+    ' test will continue to search until the utilization level is reached,'
+    ' and then return the maximum throughput for that usage level.',
+)
+_LATENCY_THRESHOLD_PERCENTILE = flags.DEFINE_string(
+    'ycsb_latency_threshold_percentile',
+    'p99',
+    'Latency threshold mode: percentile to use for latency threshold.',
+)
+_LATENCY_THRESHOLD_SLEEP_MINS = flags.DEFINE_integer(
+    'ycsb_latency_threshold_sleep_mins',
+    3,
+    'Latency threshold mode: time in minutes to sleep between run steps when'
+    ' changing target QPS.',
+)
+_LATENCY_THRESHOLD_WARMUP_MINS = flags.DEFINE_integer(
+    'ycsb_latency_threshold_warmup_mins',
+    15,
+    'Latency threshold mode: length of time to run YCSB for the warmup step.',
+)
+_LATENCY_THRESHOLD_INCREMENT_MINS = flags.DEFINE_integer(
+    'ycsb_latency_threshold_workload_mins',
+    15,
+    'Latency threshold mode: length of time to run YCSB for each step.',
+)
+
+
+def _ValidateLatencyThresholdFlags(flags_dict):
+  return (
+      flags_dict['ycsb_latency_threshold_target']
+      > flags_dict['ycsb_latency_threshold_target_min']
+  )
+
+
+flags.register_multi_flags_validator(
+    ['ycsb_latency_threshold_target', 'ycsb_latency_threshold_target_min'],
+    _ValidateLatencyThresholdFlags,
+    'Latency threshold target must be greater than min target.',
+)
+
+# Lowest latency mode flags
+_LOWEST_LATENCY = flags.DEFINE_bool(
+    'ycsb_lowest_latency_load',
+    False,
+    'Finds the lowest latency the database can sustain and returns the relevant'
+    ' samples.',
+)
+_LOWEST_LATENCY_TARGET_QPS = flags.DEFINE_integer(
+    'ycsb_lowest_latency_target_qps',
+    None,
+    'Runs the lowest latency workload with a fixed QPS instead of searching.'
+    ' Useful when the optimal throughput throughput is already known.',
+)
+_LOWEST_LATENCY_WARMUP = flags.DEFINE_bool(
+    'ycsb_lowest_latency_warmup',
+    False,
+    'If true, runs a warmup before the actual load.',
+)
+
+
 # Status line pattern
 _STATUS_PATTERN = r'(\d+) sec: \d+ operations; (\d+(\.\d+)?) current ops\/sec'
 _STATUS_GROUPS_PATTERN = r'\[(.+?): (.+?)\]'
-# Status interval default is 10 sec, change to 1 sec.
-_STATUS_INTERVAL_SEC = 1
 
 # Default loading thread count for non-batching backends.
 DEFAULT_PRELOAD_THREADS = 32
@@ -315,9 +487,24 @@ _ycsb_tar_url = None
 _INCREMENTAL_STARTING_QPS = 500
 _INCREMENTAL_TIMELIMIT_SEC = 60 * 5
 
+# The upper-bound number of milliseconds above the measured minimum after which
+# to stop the test.
+_LOWEST_LATENCY_BUFFER = 1
+_LOWEST_LATENCY_STARTING_QPS = 100
+_LOWEST_LATENCY_PERCENTILE = 'p95'
+_LOWEST_LATENCY_CPU_MEASUREMENT_MINS = 20
+
 _ThroughputTimeSeries = dict[int, float]
 # Tuple of (percentile, latency, count)
 _HdrHistogramTuple = tuple[float, float, int]
+
+
+class RetriableCpuSearchBoundsError(Exception):
+  """Raised when CPU mode can't find the requested utilization number."""
+
+
+class RetriableLatencySearchBoundsError(Exception):
+  """Raised when latency mode can't find the requested utilization number."""
 
 
 def SetYcsbTarUrl(url):
@@ -356,13 +543,14 @@ def _GetVersionFromUrl(url):
   return _GetVersion(match.group(0).strip('ycsb-'))
 
 
-def _GetThreadsQpsPerLoaderList():
+def _GetThreadsQpsPerLoaderList(num_vms: int) -> list[list[int]]:
   """Returns the list of [client, qps] per VM to use in staircase load."""
 
-  def _FormatThreadQps(thread_qps):
+  def _FormatThreadQps(thread_qps: str) -> list[int]:
     thread_qps_pair = thread_qps.split(':')
     if len(thread_qps_pair) == 1:
-      thread_qps_pair.append(0)
+      target = int(_TARGET_QPS.value / num_vms) if _TARGET_QPS.value else 0
+      thread_qps_pair.append(target)
     return [int(val) for val in thread_qps_pair]
 
   return [
@@ -419,13 +607,21 @@ def CheckPrerequisites():
   per_thread_target = any(
       [':' in thread_qps for thread_qps in FLAGS.ycsb_threads_per_client]
   )
+  flag_target = _TARGET_QPS.value is not None
+  lowest_latency_target = _LOWEST_LATENCY_TARGET_QPS.value is not None
   dynamic_load = FLAGS.ycsb_dynamic_load
 
-  if run_target + per_thread_target + dynamic_load > 1:
+  if [
+      flag_target,
+      run_target,
+      per_thread_target,
+      dynamic_load,
+      lowest_latency_target,
+  ].count(True) > 1:
     raise errors.Config.InvalidValue(
-        'Setting YCSB target in ycsb_threads_per_client '
-        'or ycsb_run_parameters or applying ycsb_dynamic_load_* flags'
-        ' are mutally exclusive.'
+        'Setting YCSB target in ycsb_target_qps, ycsb_threads_per_client,'
+        ' ycsb_lowest_latency_target_qps, ycsb_run_parameters or applying'
+        ' ycsb_dynamic_load_* flags are mutally exclusive.'
     )
 
   if FLAGS.ycsb_dynamic_load_throughput_lower_bound and not dynamic_load:
@@ -447,14 +643,25 @@ def CheckPrerequisites():
 
   # Both HISTOGRAM and TIMESERIES do not output latencies on a per-interval
   # basis, so we use the more-detailed HDRHISTOGRAM.
-  if (
-      _THROUGHPUT_TIME_SERIES.value
-      and FLAGS.ycsb_measurement_type != ycsb_stats.HDRHISTOGRAM
-  ):
+  if _STATUS.value and FLAGS.ycsb_measurement_type != ycsb_stats.HDRHISTOGRAM:
     raise errors.Config.InvalidValue(
-        'Measuring a throughput histogram requires running with '
+        'Showing status during run requires running with '
         '--ycsb_measurement_type=HDRHISTOGRAM. Other measurement types are '
         'unsupported unless additional parsing is added.'
+    )
+
+  if [
+      dynamic_load,
+      _BURST_LOAD_MULTIPLIER.value is not None,
+      _INCREMENTAL_TARGET_QPS.value is not None,
+      CPU_OPTIMIZATION.value,
+      _LATENCY_THRESHOLD.value,
+      _LOWEST_LATENCY.value,
+  ].count(True) > 1:
+    raise errors.Setup.InvalidFlagConfigurationError(
+        '--ycsb_dynamic_load, --ycsb_burst_load, --ycsb_incremental_load,'
+        ' --ycsb_lowest_latency_load, --ycsb_latency_threshold, and'
+        ' --ycsb_cpu_optimization are mutually exclusive.'
     )
 
 
@@ -596,9 +803,9 @@ class YCSBExecutor:
     parameters.update(kwargs)
 
     # Adding -s prints status which includes average throughput per sec.
-    if _THROUGHPUT_TIME_SERIES.value and command_name == 'run':
+    if _STATUS.value and command_name == 'run':
       command.append('-s')
-      parameters['status.interval'] = _STATUS_INTERVAL_SEC
+      parameters['status.interval'] = _STATUS_INTERVAL_SEC.value
 
     # These are passed as flags rather than properties, so they
     # are handled differently.
@@ -903,13 +1110,26 @@ class YCSBExecutor:
 
       # _GetThreadsQpsPerLoaderList() passes tuple of (client_count, target=0)
       # if no target is passed via flags.
-      for client_count, target_qps_per_vm in _GetThreadsQpsPerLoaderList():
+      for client_count, target_qps_per_vm in _GetThreadsQpsPerLoaderList(
+          len(vms)
+      ):
 
+        @vm_util.Retry(
+            retryable_exceptions=ycsb_stats.CombineHdrLogError,
+            timeout=-1,
+            max_retries=5,
+        )
         def _DoRunStairCaseLoad(
-            client_count, target_qps_per_vm, workload_meta, is_sustained=False
+            client_count: int,
+            target_qps_per_vm: int,
+            workload_meta: Mapping[str, Any],
+            is_sustained: bool = False,
         ):
           parameters['threads'] = client_count
           if target_qps_per_vm:
+            # Threads should be less than the target QPS since YCSB throttles
+            # weirdly when threads is much larger than target.
+            parameters['threads'] = min(client_count, target_qps_per_vm)
             parameters['target'] = int(target_qps_per_vm * len(vms))
           if is_sustained:
             parameters['maxexecutiontime'] = (
@@ -982,6 +1202,16 @@ class YCSBExecutor:
               overall_throughput += s.value
           return overall_throughput, run_samples
 
+        if target_qps_per_vm > 0 and parameters.get('target', 0) > 0:
+          raise errors.Benchmarks.RunError(
+              'Target QPS should only be passed in via one of'
+              ' --ycsb_threads_per_client, --ycsb_target_qps, or parameters.'
+          )
+        if 'target' in parameters:
+          target_qps_per_vm = int(parameters['target'] / len(vms))
+
+        # Consider refactoring so that target_qps_per_vm doesn't need to be
+        # passed in. Target should already be set in parameters.
         target_throughput, run_samples = _DoRunStairCaseLoad(
             client_count, target_qps_per_vm, workload_meta
         )
@@ -993,7 +1223,7 @@ class YCSBExecutor:
         while FLAGS.ycsb_dynamic_load:
           actual_throughput, run_samples = _DoRunStairCaseLoad(
               client_count,
-              target_throughput // len(vms),
+              int(target_throughput // len(vms)),
               workload_meta,
               is_sustained,
           )
@@ -1008,12 +1238,18 @@ class YCSBExecutor:
           )
           if target_throughput is None:
             break
+          if _DYNAMIC_LOAD_SLEEP_SEC.value > 0:
+            logging.info(
+                'Sleeping %s seconds after dynamic load.',
+                _DYNAMIC_LOAD_SLEEP_SEC.value,
+            )
+            time.sleep(_DYNAMIC_LOAD_SLEEP_SEC.value)
 
     return all_results
 
   def Load(self, vms, workloads=None, load_kwargs=None):
     """Load data using YCSB."""
-    if FLAGS.ycsb_skip_load_stage:
+    if SKIP_LOAD_STAGE.value:
       return []
 
     workloads = workloads or GetWorkloadFileList()
@@ -1049,7 +1285,9 @@ class YCSBExecutor:
     else:
       return []
 
-  def Run(self, vms, workloads=None, run_kwargs=None) -> list[sample.Sample]:
+  def Run(
+      self, vms, workloads=None, run_kwargs=None, database=None
+  ) -> list[sample.Sample]:
     """Runs each workload/client count combination."""
     if FLAGS.ycsb_skip_run_stage:
       return []
@@ -1061,12 +1299,15 @@ class YCSBExecutor:
       samples = self._RunBurstMode(vms, workloads, run_kwargs)
     elif _INCREMENTAL_TARGET_QPS.value:
       samples = self._RunIncrementalMode(vms, workloads, run_kwargs)
+    elif CPU_OPTIMIZATION.value:
+      samples = self._RunCpuMode(vms, workloads, run_kwargs, database)
+    elif _LATENCY_THRESHOLD.value:
+      samples = self._RunLatencyThresholdMode(vms, workloads[0], run_kwargs)
+    elif _LOWEST_LATENCY.value:
+      samples = self._RunLowestLatencyMode(vms, workloads, run_kwargs, database)
     else:
       samples = list(self.RunStaircaseLoads(vms, workloads, **run_kwargs))
-    if (
-        FLAGS.ycsb_sleep_after_load_in_sec > 0
-        and not FLAGS.ycsb_skip_load_stage
-    ):
+    if FLAGS.ycsb_sleep_after_load_in_sec > 0 and not SKIP_LOAD_STAGE.value:
       for s in samples:
         s.metadata['sleep_after_load_in_sec'] = (
             FLAGS.ycsb_sleep_after_load_in_sec
@@ -1152,7 +1393,7 @@ class YCSBExecutor:
     # Warm-up phase is shorter and doesn't need results parsing
     FLAGS['ycsb_timelimit'].parse(_INCREMENTAL_TIMELIMIT_SEC)
     for target in incremental_targets:
-      target /= FLAGS.ycsb_client_vms
+      target /= len(vms)
       run_params['target'] = int(target)
       self._SetClientThreadCount(min(ending_threadcount, int(target)))
       self._SetRunParameters(run_params)
@@ -1160,11 +1401,367 @@ class YCSBExecutor:
 
     # Reset back to the original workload args
     FLAGS['ycsb_timelimit'].parse(ending_length)
-    ending_qps /= FLAGS.ycsb_client_vms
+    ending_qps /= len(vms)
     run_params['target'] = int(ending_qps)
     self._SetClientThreadCount(ending_threadcount)
     self._SetRunParameters(run_params)
     return list(self.RunStaircaseLoads(vms, workloads, **run_kwargs))
+
+  def _RunLowestLatencyMode(
+      self,
+      vms: Sequence[virtual_machine.VirtualMachine],
+      workloads: Sequence[str],
+      run_kwargs: Mapping[str, str] = None,
+      database: resource.BaseResource = None,
+  ) -> list[sample.Sample]:
+    """Finds the lowest sustainable latency of the target.
+
+    Args:
+      vms: The client VMs to generate the load.
+      workloads: List of workloads to run.
+      run_kwargs: Extra run arguments.
+      database: Database resource to run against.
+
+    Returns:
+      A list of samples of benchmark results.
+    """
+
+    def _RunWorkload(target_qps: int) -> list[sample.Sample]:
+      """Runs the workload at the target throughput."""
+      run_params = _GetRunParameters()
+      run_params['target'] = target_qps
+      self._SetClientThreadCount(
+          min(target_qps, int(FLAGS.ycsb_threads_per_client[0]))
+      )
+      self._SetRunParameters(run_params)
+      return self.RunStaircaseLoads([vms[0]], workloads, **run_kwargs)
+
+    def _ProcessSamples(
+        samples: list[sample.Sample], database: resource.BaseResource
+    ) -> list[sample.Sample]:
+      """Attaches useful metadata to the result samples."""
+      end_timestamp = datetime.datetime.fromtimestamp(
+          samples[0].timestamp, tz=datetime.timezone.utc
+      )
+      cpu_utilization = 0
+      try:
+        cpu_utilization = database.GetAverageCpuUsage(
+            _LOWEST_LATENCY_CPU_MEASUREMENT_MINS, end_timestamp
+        )
+      except AttributeError:
+        logging.exception(
+            'Database %s does not have GetAverageCpuUsage()'
+            ' implemented, skipping adding CPU metadata.',
+            database,
+        )
+      for s in samples:
+        s.metadata.update({
+            'ycsb_lowest_latency_buffer': _LOWEST_LATENCY_BUFFER,
+            'ycsb_lowest_latency_percentile': _LOWEST_LATENCY_PERCENTILE,
+        })
+        if cpu_utilization:
+          s.metadata['ycsb_lowest_latency_cpu_utilization'] = cpu_utilization
+          s.metadata['ycsb_lowest_latency_cpu_measurement_mins'] = (
+              _LOWEST_LATENCY_CPU_MEASUREMENT_MINS
+          )
+        if _LOWEST_LATENCY_TARGET_QPS.value:
+          s.metadata['ycsb_lowest_latency_fixed_qps'] = (
+              _LOWEST_LATENCY_TARGET_QPS.value
+          )
+      return samples
+
+    if _LOWEST_LATENCY_TARGET_QPS.value:
+      if _LOWEST_LATENCY_WARMUP.value:
+        _RunWorkload(_LOWEST_LATENCY_TARGET_QPS.value)
+      return _ProcessSamples(
+          _RunWorkload(_LOWEST_LATENCY_TARGET_QPS.value), database
+      )
+
+    target = _LOWEST_LATENCY_STARTING_QPS
+    min_read_latency = float('inf')
+    min_update_latency = float('inf')
+    prev_result = ycsb_stats.ThroughputLatencyResult()
+    while True:
+      samples = _RunWorkload(target)
+      result = ycsb_stats.ExtractStats(samples, _LOWEST_LATENCY_PERCENTILE)
+      logging.info('Run stats: %s', result)
+      if (
+          result.read_latency > min_read_latency + _LOWEST_LATENCY_BUFFER
+          or result.update_latency > min_update_latency + _LOWEST_LATENCY_BUFFER
+      ):
+        logging.info(
+            'Found lowest latency at %s ops/s. Run had higher read and/or'
+            ' update latency than threshold %s read %s ms, update %s ms.',
+            prev_result.throughput,
+            _LOWEST_LATENCY_PERCENTILE,
+            prev_result.read_latency,
+            prev_result.update_latency,
+        )
+        return _ProcessSamples(prev_result.samples, database)
+      min_read_latency = min(min_read_latency, result.read_latency)
+      min_update_latency = min(min_update_latency, result.update_latency)
+      prev_result = result
+      target += 100
+
+  def _RunCpuMode(
+      self,
+      vms: list[virtual_machine.VirtualMachine],
+      workloads: Sequence[str],
+      run_kwargs: Mapping[str, Any],
+      database: resource.BaseResource,
+  ) -> list[sample.Sample]:
+    """Runs YCSB until the CPU utilization is over the recommended amount.
+
+    Args:
+      vms: The client VMs that will be used to push the load.
+      workloads: List of workloads to run.
+      run_kwargs: A mapping of additional YCSB run args to pass to the test.
+      database: This class must implement CalculateTheoreticalMaxThroughput and
+        GetAverageCpuUsage.
+
+    Returns:
+      A list of samples from the YCSB test at the specified CPU utilization.
+    """
+
+    def _ExtractThroughput(samples: list[sample.Sample]) -> float:
+      """Gets the throughput recorded in the samples."""
+      for result in samples:
+        if result.metric == 'overall Throughput':
+          return result.value
+      return 0.0
+
+    def _GetReadAndUpdateProportion(workload: str) -> tuple[float, float]:
+      """Gets the starting throughput to start the test with."""
+      with open(workload) as f:
+        workload_args = ParseWorkload(f.read())
+      return float(workload_args['readproportion']), float(
+          workload_args['updateproportion']
+      )
+
+    def _ExecuteWorkload(target_qps: int) -> list[sample.Sample]:
+      """Executes the workload after setting run-specific args."""
+      run_kwargs['target'] = target_qps
+      run_kwargs['maxexecutiontime'] = (
+          CPU_OPTIMIZATION_INCREMENT_MINS.value * 60
+      )
+      return self.RunStaircaseLoads(vms, workloads=workloads, **run_kwargs)
+
+    @vm_util.Retry(
+        retryable_exceptions=RetriableCpuSearchBoundsError,
+        timeout=-1,
+        max_retries=3,
+    )
+    def _RunCpuModeSingleWorkload(workload: str) -> list[sample.Sample]:
+      """Runs the CPU utilization test for a single workload."""
+      read_percent, update_percent = _GetReadAndUpdateProportion(workload)
+      theoretical_max_qps = database.CalculateTheoreticalMaxThroughput(
+          read_percent, update_percent
+      )
+
+      # Execute an initial test to warm up the database.
+      _ExecuteWorkload(theoretical_max_qps)
+      time.sleep(_CPU_OPTIMIZATION_SLEEP_MINS.value * 60)
+
+      lower_bound = 0
+      upper_bound = theoretical_max_qps * 4
+      while lower_bound <= upper_bound:
+        if upper_bound - lower_bound <= theoretical_max_qps * 0.01:
+          raise RetriableCpuSearchBoundsError(
+              'Unable to find the requested CPU utilization, retrying.'
+          )
+        target_qps = int((upper_bound + lower_bound) / 2)
+        run_samples = _ExecuteWorkload(target_qps)
+        measured_qps = _ExtractThroughput(run_samples)
+        end_timestamp = datetime.datetime.fromtimestamp(
+            run_samples[0].timestamp, tz=datetime.timezone.utc
+        )
+        cpu_utilization = database.GetAverageCpuUsage(
+            CPU_OPTIMIZATION_MEASUREMENT_MINS.value, end_timestamp
+        )
+        run_samples.append(
+            sample.Sample(
+                'CPU Normalized Throughput',
+                measured_qps / cpu_utilization * CPU_OPTIMIZATION_TARGET.value,
+                'ops/sec',
+                copy.copy(run_samples[0].metadata),
+            )
+        )
+        logging.info(
+            'Run had throughput target %s and measured throughput %s, with CPU'
+            ' utilization %s.',
+            target_qps,
+            measured_qps,
+            cpu_utilization,
+        )
+        if cpu_utilization < CPU_OPTIMIZATION_TARGET_MIN.value:
+          lower_bound = measured_qps
+        elif cpu_utilization > CPU_OPTIMIZATION_TARGET.value:
+          upper_bound = measured_qps
+        else:
+          logging.info(
+              'Found CPU utilization percentage between target %s and %s',
+              CPU_OPTIMIZATION_TARGET_MIN.value,
+              CPU_OPTIMIZATION_TARGET.value,
+          )
+          for s in run_samples:
+            s.metadata.update({
+                'ycsb_cpu_optimization': True,
+                'ycsb_cpu_utilization': cpu_utilization,
+                'ycsb_cpu_target': CPU_OPTIMIZATION_TARGET.value,
+                'ycsb_cpu_target_min': CPU_OPTIMIZATION_TARGET_MIN.value,
+                'ycsb_cpu_increment_minutes': (
+                    CPU_OPTIMIZATION_INCREMENT_MINS.value
+                ),
+            })
+          return run_samples
+
+        # Sleep between steps for some workloads.
+        if _CPU_OPTIMIZATION_SLEEP_MINS.value:
+          logging.info(
+              'Run phase finished, sleeping for %s minutes before starting the '
+              'next run.',
+              _CPU_OPTIMIZATION_SLEEP_MINS.value,
+          )
+          time.sleep(_CPU_OPTIMIZATION_SLEEP_MINS.value * 60)
+
+    results = []
+    for workload in workloads:
+      results += _RunCpuModeSingleWorkload(workload)
+    return results
+
+  def _RunLatencyThresholdMode(
+      self,
+      vms: list[virtual_machine.VirtualMachine],
+      workload: str,
+      run_kwargs: Mapping[str, Any],
+  ) -> list[sample.Sample]:
+    """Runs YCSB until client side latency is within the threshold.
+
+    Args:
+      vms: The client VMs that will be used to push the load.
+      workload: List of workloads to run.
+      run_kwargs: A mapping of additional YCSB run args to pass to the test.
+
+    Returns:
+      A list of samples from the YCSB test within the specified latency
+      threshold.
+    """
+
+    def _ExecuteWorkload(
+        target_qps: int, duration_mins: int
+    ) -> list[sample.Sample]:
+      """Executes the workload after setting run-specific args."""
+      if target_qps > 0:
+        run_kwargs['target'] = target_qps
+      else:
+        run_kwargs.pop('target', None)
+      run_kwargs['maxexecutiontime'] = duration_mins * 60
+      return self.RunStaircaseLoads(vms, workloads=[workload], **run_kwargs)
+
+    def _AddMetadata(samples: list[sample.Sample]) -> list[sample.Sample]:
+      for s in samples:
+        s.metadata.update({
+            'ycsb_latency_threshold': True,
+            'ycsb_latency_threshold_operation': 'read',
+            'ycsb_latency_threshold_target': _LATENCY_THRESHOLD_TARGET.value,
+            'ycsb_latency_threshold_target_min': (
+                _LATENCY_THRESHOLD_TARGET_MIN.value
+            ),
+            'ycsb_latency_threshold_increment_minutes': (
+                _LATENCY_THRESHOLD_INCREMENT_MINS.value
+            ),
+            'ycsb_latency_threshold_percentile': (
+                _LATENCY_THRESHOLD_PERCENTILE.value
+            ),
+            'ycsb_latency_threshold_sleep_mins': (
+                _LATENCY_THRESHOLD_SLEEP_MINS.value
+            ),
+            'ycsb_latency_threshold_max_throughput_under_sla_sample': True,
+        })
+      return samples
+
+    def _RunLatencyThresholdModeSingleWorkload() -> list[sample.Sample]:
+      """Runs the latency threshold test for a single workload."""
+      max_throughput_samples = _ExecuteWorkload(
+          target_qps=0, duration_mins=_LATENCY_THRESHOLD_WARMUP_MINS.value
+      )
+      for s in max_throughput_samples:
+        s.metadata['ycsb_latency_threshold_max_throughput_sample'] = True
+      max_throughput = ycsb_stats.ExtractStats(
+          max_throughput_samples,
+          percentile=_LATENCY_THRESHOLD_PERCENTILE.value,
+      ).throughput
+      time.sleep(_LATENCY_THRESHOLD_SLEEP_MINS.value * 60)
+
+      lower_bound = 0
+      upper_bound = max_throughput
+      current_max_stats = ycsb_stats.ThroughputLatencyResult()
+      result_samples = []
+      while (
+          lower_bound < (upper_bound - 1)
+          and upper_bound - lower_bound > max_throughput * 0.01
+      ):
+        target_qps = int((upper_bound + lower_bound) / 2)
+        run_samples = _ExecuteWorkload(
+            target_qps, _LATENCY_THRESHOLD_INCREMENT_MINS.value
+        )
+        stats = ycsb_stats.ExtractStats(
+            run_samples, percentile=_LATENCY_THRESHOLD_PERCENTILE.value
+        )
+        logging.info(
+            'Run had throughput target %s and measured stats %s',
+            target_qps,
+            stats,
+        )
+
+        if (
+            stats.throughput > current_max_stats.throughput
+            and stats.read_latency <= _LATENCY_THRESHOLD_TARGET.value
+            and stats.read_latency >= _LATENCY_THRESHOLD_TARGET_MIN.value
+        ):
+          # Compute a normalized QPS to attempt to make subtle differences in
+          # latency more even.
+          read_latency_normalized_qps = (
+              stats.throughput
+              / stats.read_latency
+              * _LATENCY_THRESHOLD_TARGET.value
+          )
+          run_samples.append(
+              sample.Sample(
+                  'Read Latency Normalized Throughput',
+                  read_latency_normalized_qps,
+                  'ops/sec',
+                  copy.copy(run_samples[0].metadata),
+              )
+          )
+          result_samples = run_samples
+          current_max_stats = stats
+
+        if stats.read_latency <= _LATENCY_THRESHOLD_TARGET.value:
+          lower_bound = target_qps
+        else:
+          upper_bound = target_qps
+
+        if _LATENCY_THRESHOLD_SLEEP_MINS.value:
+          logging.info(
+              'Run phase finished, sleeping for %s minutes before starting the '
+              'next run.',
+              _LATENCY_THRESHOLD_SLEEP_MINS.value,
+          )
+          time.sleep(_LATENCY_THRESHOLD_SLEEP_MINS.value * 60)
+
+      if (
+          not result_samples
+          or current_max_stats.read_latency
+          < _LATENCY_THRESHOLD_TARGET_MIN.value
+      ):
+        raise RetriableLatencySearchBoundsError(
+            'Unable to find the requested latency - try modifying the min and'
+            ' target latency.'
+        )
+      return _AddMetadata(result_samples) + max_throughput_samples
+
+    return _RunLatencyThresholdModeSingleWorkload()
 
   def LoadAndRun(self, vms, workloads=None, load_kwargs=None, run_kwargs=None):
     """Load data using YCSB, then run each workload/client count combination.
@@ -1187,7 +1784,7 @@ class YCSBExecutor:
       List of sample.Sample objects.
     """
     load_samples = []
-    if not FLAGS.ycsb_skip_load_stage:
+    if not SKIP_LOAD_STAGE.value:
       load_samples = self.Load(
           vms, workloads=workloads, load_kwargs=load_kwargs
       )

@@ -12,7 +12,6 @@ from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.gcp import gcp_spanner
 from perfkitbenchmarker.providers.gcp import util
 from tests import pkb_common_test_case
-
 import requests
 
 FLAGS = flags.FLAGS
@@ -21,10 +20,12 @@ FLAGS = flags.FLAGS
 def GetTestSpannerInstance(engine='spanner-googlesql'):
   spec_args = {'cloud': 'GCP', 'engine': engine}
   spanner_spec = gcp_spanner.SpannerSpec(
-      'test_component', flag_values=FLAGS, **spec_args)
+      'test_component', flag_values=FLAGS, **spec_args
+  )
   spanner_spec.spanner_database_name = 'test_database'
   spanner_class = relational_db.GetRelationalDbClass(
-      cloud='GCP', is_managed_db=True, engine=engine)
+      cloud='GCP', is_managed_db=True, engine=engine
+  )
   return spanner_class(spanner_spec)
 
 
@@ -35,6 +36,16 @@ class SpannerTest(pkb_common_test_case.PkbCommonTestCase):
     saved_flag_values = flagsaver.save_flag_values()
     FLAGS.run_uri = 'test_uri'
     self.addCleanup(flagsaver.restore_flag_values, saved_flag_values)
+
+  def testFlagOverridesAutoScaler(self):
+    FLAGS['cloud_spanner_autoscaler'].parse('True')
+
+    test_instance = GetTestSpannerInstance()
+    self.assertEqual(test_instance._autoscaler, True)
+    self.assertEqual(test_instance._min_processing_units, 5000)
+    self.assertEqual(test_instance._max_processing_units, 50000)
+    self.assertEqual(test_instance._high_priority_cpu_target, 65)
+    self.assertEqual(test_instance._storage_target, 95)
 
   def testFlagOverrides(self):
     FLAGS['cloud_spanner_config'].parse('regional-us-central1')
@@ -57,17 +68,34 @@ class SpannerTest(pkb_common_test_case.PkbCommonTestCase):
         mock.patch.object(test_instance, '_WaitUntilInstanceReady')
     )
     cmd = self.enter_context(
-        mock.patch.object(
-            vm_util, 'IssueCommand', return_value=[None, None, 0]))
+        mock.patch.object(vm_util, 'IssueCommand', return_value=[None, None, 0])
+    )
 
     test_instance._SetNodes(3)
 
     self.assertIn('--nodes 3', ' '.join(cmd.call_args[0][0]))
 
+  def testSetNodesSkipsIfCountAlreadyCorrect(self):
+    test_instance = GetTestSpannerInstance()
+    self.enter_context(
+        mock.patch.object(test_instance, '_GetNodes', return_value=1)
+    )
+    self.enter_context(
+        mock.patch.object(test_instance, '_WaitUntilInstanceReady')
+    )
+    cmd = self.enter_context(
+        mock.patch.object(vm_util, 'IssueCommand', return_value=[None, None, 0])
+    )
+
+    test_instance._SetNodes(1)
+
+    cmd.assert_not_called()
+
   def testFreezeUsesCorrectNodeCount(self):
     instance = GetTestSpannerInstance()
     mock_set_nodes = self.enter_context(
-        mock.patch.object(instance, '_SetNodes', autospec=True))
+        mock.patch.object(instance, '_SetNodes', autospec=True)
+    )
 
     instance._Freeze()
 
@@ -77,7 +105,8 @@ class SpannerTest(pkb_common_test_case.PkbCommonTestCase):
     instance = GetTestSpannerInstance()
     instance.nodes = 5
     mock_set_nodes = self.enter_context(
-        mock.patch.object(instance, '_SetNodes', autospec=True))
+        mock.patch.object(instance, '_SetNodes', autospec=True)
+    )
 
     instance._Restore()
 
@@ -103,13 +132,20 @@ class SpannerTest(pkb_common_test_case.PkbCommonTestCase):
         mock.patch.object(
             util.GcloudCommand,
             'Issue',
-            side_effect=[(mock_endpoint_response, '', 0),
-                         (mock_labels_response, '', 0)]))
+            side_effect=[
+                (mock_endpoint_response, '', 0),
+                (mock_labels_response, '', 0),
+            ],
+        )
+    )
     self.enter_context(
-        mock.patch.object(util, 'GetAccessToken', return_value='test_token'))
+        mock.patch.object(util, 'GetAccessToken', return_value='test_token')
+    )
     mock_request = self.enter_context(
         mock.patch.object(
-            requests, 'patch', return_value=mock.Mock(status_code=200)))
+            requests, 'patch', return_value=mock.Mock(status_code=200)
+        )
+    )
 
     # Act
     new_labels = {
@@ -127,11 +163,12 @@ class SpannerTest(pkb_common_test_case.PkbCommonTestCase):
                 'labels': {
                     'benchmark': 'test_benchmark_2',
                     'timeout_minutes': '10',
-                    'metadata': 'test_metadata'
+                    'metadata': 'test_metadata',
                 }
             },
-            'fieldMask': 'labels'
-        })
+            'fieldMask': 'labels',
+        },
+    )
 
   @parameterized.named_parameters([
       {
@@ -153,15 +190,53 @@ class SpannerTest(pkb_common_test_case.PkbCommonTestCase):
           'expected_qps': 10000,
       },
   ])
-  def testCalculateStartingThroughput(self, write_proportion, read_proportion,
-                                      expected_qps):
+  def testCalculateStartingThroughput(
+      self, write_proportion, read_proportion, expected_qps
+  ):
     # Arrange
     test_spanner = GetTestSpannerInstance()
     test_spanner.nodes = 3
 
     # Act
-    actual_qps = test_spanner.CalculateRecommendedThroughput(
-        read_proportion, write_proportion)
+    actual_qps = test_spanner.CalculateTheoreticalMaxThroughput(
+        read_proportion, write_proportion
+    )
+
+    # Assert
+    self.assertEqual(expected_qps, actual_qps)
+
+  @parameterized.named_parameters([
+      {
+          'testcase_name': 'AllRead',
+          'write_proportion': 0.0,
+          'read_proportion': 1.0,
+          'expected_qps': 45000,
+      },
+      {
+          'testcase_name': 'AllWrite',
+          'write_proportion': 1.0,
+          'read_proportion': 0.0,
+          'expected_qps': 9000,
+      },
+      {
+          'testcase_name': 'ReadWrite',
+          'write_proportion': 0.5,
+          'read_proportion': 0.5,
+          'expected_qps': 15000,
+      },
+  ])
+  def testCalculateAdjustedStartingThroughput(
+      self, write_proportion, read_proportion, expected_qps
+  ):
+    # Arrange
+    test_spanner = GetTestSpannerInstance()
+    test_spanner._config = 'regional-us-east4'
+    test_spanner.nodes = 3
+
+    # Act
+    actual_qps = test_spanner.CalculateTheoreticalMaxThroughput(
+        read_proportion, write_proportion
+    )
 
     # Assert
     self.assertEqual(expected_qps, actual_qps)

@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Module containing classes for Azure Redis Cache.
-"""
+"""Module containing classes for Azure Redis Cache."""
 
 import json
 import time
+from typing import Optional
 
 from absl import flags
 from perfkitbenchmarker import errors
@@ -42,17 +42,21 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
   # Azure redis could take up to an hour to create
   READY_TIMEOUT = 60 * 60  # 60 minutes
 
+  redis_version: Optional[str] = None
+
   def __init__(self, spec):
     super(AzureRedisCache, self).__init__(spec)
     self.redis_region = FLAGS.cloud_redis_region
     self.resource_group = azure_network.GetResourceGroup(self.redis_region)
     self.azure_redis_size = FLAGS.azure_redis_size
     self.failover_style = FLAGS.redis_failover_style
-    if self.failover_style == managed_memory_store.Failover.FAILOVER_SAME_REGION:
+    if (
+        self.failover_style
+        == managed_memory_store.Failover.FAILOVER_SAME_REGION
+    ):
       self.azure_tier = 'Premium'
     else:
       self.azure_tier = 'Basic'
-    self.redis_version = None
 
   def GetResourceMetadata(self):
     """Returns a dict containing metadata about the cache.
@@ -61,46 +65,49 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
       dict mapping string property key to value.
     """
     result = {
-        'cloud_redis_failover_style':
-            self.failover_style,
-        'cloud_redis_region':
-            self.redis_region,
-        'cloud_redis_azure_tier':
-            self.azure_tier,
-        'cloud_redis_azure_redis_size':
-            self.azure_redis_size,
-        'cloud_redis_version':
-            managed_memory_store.ParseReadableVersion(self.redis_version),
+        'cloud_redis_failover_style': self.failover_style,
+        'cloud_redis_region': self.redis_region,
+        'cloud_redis_azure_tier': self.azure_tier,
+        'cloud_redis_azure_redis_size': self.azure_redis_size,
+        'cloud_redis_version': managed_memory_store.ParseReadableVersion(
+            self.redis_version
+        ),
     }
     return result
 
-  @staticmethod
-  def CheckPrerequisites(benchmark_config):
+  def CheckPrerequisites(self):
     """Check benchmark prerequisites on the input flag parameters.
-
-    Args:
-      benchmark_config: Unused.
 
     Raises:
       errors.Config.InvalidValue: Input flag parameters are invalid.
     """
     if FLAGS.managed_memory_store_version:
       raise errors.Config.InvalidValue(
-          'Custom Redis version not supported on Azure Redis. ')
+          'Custom Redis version not supported on Azure Redis. '
+      )
     if FLAGS.redis_failover_style in [
-        managed_memory_store.Failover.FAILOVER_SAME_ZONE]:
+        managed_memory_store.Failover.FAILOVER_SAME_ZONE
+    ]:
       raise errors.Config.InvalidValue(
-          'Azure redis with failover in the same zone is not supported.')
+          'Azure redis with failover in the same zone is not supported.'
+      )
 
   def _Create(self):
     """Creates the cache."""
     cmd = [
-        azure.AZURE_PATH, 'redis', 'create',
-        '--resource-group', self.resource_group.name,
-        '--location', self.redis_region,
-        '--name', self.name,
-        '--sku', self.azure_tier,
-        '--vm-size', self.azure_redis_size,
+        azure.AZURE_PATH,
+        'redis',
+        'create',
+        '--resource-group',
+        self.resource_group.name,
+        '--location',
+        self.redis_region,
+        '--name',
+        self.name,
+        '--sku',
+        self.azure_tier,
+        '--vm-size',
+        self.azure_redis_size,
         '--enable-non-ssl-port',
     ]
     vm_util.IssueCommand(cmd, timeout=TIMEOUT)
@@ -108,9 +115,13 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
   def _Delete(self):
     """Deletes the cache."""
     cmd = [
-        azure.AZURE_PATH, 'redis', 'delete',
-        '--resource-group', self.resource_group.name,
-        '--name', self.name,
+        azure.AZURE_PATH,
+        'redis',
+        'delete',
+        '--resource-group',
+        self.resource_group.name,
+        '--name',
+        self.name,
         '--yes',
     ]
     vm_util.IssueCommand(cmd, timeout=TIMEOUT)
@@ -121,11 +132,18 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
     Returns:
       stdout, stderr and retcode.
     """
-    stdout, stderr, retcode = vm_util.IssueCommand([
-        azure.AZURE_PATH, 'redis', 'show',
-        '--resource-group', self.resource_group.name,
-        '--name', self.name,
-    ], raise_on_failure=False)
+    stdout, stderr, retcode = vm_util.IssueCommand(
+        [
+            azure.AZURE_PATH,
+            'redis',
+            'show',
+            '--resource-group',
+            self.resource_group.name,
+            '--name',
+            self.name,
+        ],
+        raise_on_failure=False,
+    )
     return stdout, stderr, retcode
 
   def _Exists(self):
@@ -150,8 +168,10 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
       True if cache is ready and false otherwise.
     """
     stdout, _, retcode = self.DescribeCache()
-    if (retcode == 0 and
-        json.loads(stdout).get('provisioningState', None) == 'Succeeded'):
+    if (
+        retcode == 0
+        and json.loads(stdout).get('provisioningState', None) == 'Succeeded'
+    ):
       self.redis_version = json.loads(stdout).get('redisVersion', 'unspecified')
       return True
     return False
@@ -173,18 +193,27 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
     stdout, _, retcode = self.DescribeCache()
     if retcode != 0:
       raise errors.Resource.RetryableGetError(
-          f'Failed to retrieve information on {self.name}.')
+          f'Failed to retrieve information on {self.name}.'
+      )
     response = json.loads(stdout)
     self._ip = response['hostName']
     self._port = response['port']
 
-    stdout, _, retcode = vm_util.IssueCommand([
-        azure.AZURE_PATH, 'redis', 'list-keys',
-        '--resource-group', self.resource_group.name,
-        '--name', self.name,
-    ], raise_on_failure=False)
+    stdout, _, retcode = vm_util.IssueCommand(
+        [
+            azure.AZURE_PATH,
+            'redis',
+            'list-keys',
+            '--resource-group',
+            self.resource_group.name,
+            '--name',
+            self.name,
+        ],
+        raise_on_failure=False,
+    )
     if retcode != 0:
       raise errors.Resource.RetryableGetError(
-          f'Failed to retrieve information on {self.name}.')
+          f'Failed to retrieve information on {self.name}.'
+      )
     response = json.loads(stdout)
     self._password = response['primaryKey']

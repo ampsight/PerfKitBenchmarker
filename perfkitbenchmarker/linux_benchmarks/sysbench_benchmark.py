@@ -20,9 +20,10 @@ This is a set of benchmarks that measures performance of Sysbench Databases on
 As other cloud providers deliver a managed MySQL service, we will add it here.
 """
 
-
+import datetime
 import logging
 import re
+import statistics
 import time
 from typing import List
 
@@ -36,7 +37,7 @@ from perfkitbenchmarker import relational_db
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import sql_engine_utils
 from perfkitbenchmarker import virtual_machine
-
+from perfkitbenchmarker.linux_packages import sysbench
 
 FLAGS = flags.FLAGS
 
@@ -53,6 +54,7 @@ flags.DEFINE_string(
 flags.DEFINE_integer(
     'sysbench_tables', 4, 'The number of tables used in sysbench oltp.lua tests'
 )
+
 flags.DEFINE_integer(
     'sysbench_table_size',
     100000,
@@ -70,12 +72,18 @@ flags.DEFINE_integer(
     'The duration of the warmup run in which results are '
     'discarded, in seconds.',
 )
-flags.DEFINE_integer(
+_RUN_DURATION = flags.DEFINE_integer(
     'sysbench_run_seconds',
     10,
     'The duration of the actual run in which results are '
     'collected, in seconds.',
 )
+_LOAD_CLIENTS = flags.DEFINE_integer(
+    'sysbench_load_client_vms',
+    None,
+    'The number of client vms used in the prepare phase',
+)
+
 _LOAD_THREADS = flags.DEFINE_integer(
     'sysbench_load_threads',
     64,
@@ -92,6 +100,7 @@ flags.DEFINE_integer(
     100,
     'The latency percentile we ask sysbench to compute.',
 )
+
 flags.DEFINE_integer(
     'sysbench_report_interval',
     2,
@@ -121,6 +130,16 @@ _SKIP_LOAD_STAGE = flags.DEFINE_boolean(
     'been loaded on a previous run.',
 )
 
+_AUTO_INCREMENT = flags.DEFINE_boolean(
+    'sysbench_auto_inc', True, 'Auto increment for sysbench'
+)
+
+_SCALE_UP_MAX_CPU_UTILIZATION = flags.DEFINE_float(
+    'sysbench_scale_up_max_cpu_utilization',
+    0.95,
+    'Stop the auto scale up experiment when we reach this cpu utilization',
+)
+
 # See https://github.com/Percona-Lab/sysbench-tpcc/releases for the most
 # up to date version.
 _SYSBENCH_TPCC_TAR = 'sysbench-tpcc.tar.gz'
@@ -130,6 +149,24 @@ BENCHMARK_DATA = {
     ),
 }
 
+_SCALEUP_CLIENTS_TEST = flags.DEFINE_boolean(
+    'sysbench_scaleup_clients_test',
+    False,
+    'Scale up the number of clients running the benchmark. This is a benchmark'
+    ' mode to test how the server reacts when the load increases gradually by'
+    ' having more clients over time. Need to override'
+    ' sysbench.relational_db.vm_groups.clients.vm_count and the number have to'
+    ' be creater than sysbench_scaleup_clients_test_num_clients for this'
+    ' benchmark mode to work',
+)
+
+_SCALEUP_CLIENTS_TEST_NUM_CLIENTS = flags.DEFINE_integer(
+    'sysbench_scaleup_clients_test_num_clients',
+    1,
+    'This defines the number of client we scale up to. Have to be smaller than'
+    ' the number of existing clients.',
+)
+
 SPANNER_TPCC = 'spanner-tpcc'
 
 # Parameters are defined in oltp_common.lua file
@@ -137,10 +174,10 @@ SPANNER_TPCC = 'spanner-tpcc'
 _MAP_WORKLOAD_TO_VALID_UNIQUE_PARAMETERS = {
     'tpcc': set(['scale']),
     SPANNER_TPCC: set(['scale']),
-    'oltp_write_only': set(['table_size']),
-    'oltp_read_only': set(['table_size']),
-    'oltp_read_write': set(['table_size']),
-    'oltp_insert': set(['table_size']),
+    'oltp_write_only': set(['table_size', 'auto-inc']),
+    'oltp_read_only': set(['table_size', 'auto-inc']),
+    'oltp_read_write': set(['table_size', 'auto-inc']),
+    'oltp_insert': set(['table_size', 'auto-inc']),
 }
 
 
@@ -241,30 +278,6 @@ def GetConfig(user_config):
 
 
 # TODO(chunla) Move this to engine specific module
-def _GetSysbenchConnectionParameter(client_vm_query_tools):
-  """Get Sysbench connection parameter."""
-  connection_string = ''
-  if client_vm_query_tools.ENGINE_TYPE == sql_engine_utils.MYSQL:
-    connection_string = (
-        '--mysql-host={0} --mysql-user={1} --mysql-password="{2}" '
-    ).format(
-        client_vm_query_tools.connection_properties.endpoint,
-        client_vm_query_tools.connection_properties.database_username,
-        client_vm_query_tools.connection_properties.database_password,
-    )
-  elif client_vm_query_tools.ENGINE_TYPE == sql_engine_utils.POSTGRES:
-    connection_string = (
-        '--pgsql-host={0} --pgsql-user={1} --pgsql-password="{2}" '
-        '--pgsql-port=5432'
-    ).format(
-        client_vm_query_tools.connection_properties.endpoint,
-        client_vm_query_tools.connection_properties.database_username,
-        client_vm_query_tools.connection_properties.database_password,
-    )
-  return connection_string
-
-
-# TODO(chunla) Move this to engine specific module
 def _GetCommonSysbenchOptions(db: relational_db.BaseRelationalDb):
   """Get Sysbench options."""
   engine_type = db.engine_type
@@ -325,16 +338,32 @@ def _GetDatabaseName(db: relational_db.BaseRelationalDb) -> str:
 
 
 def _InstallLuaScriptsIfNecessary(vm):
+  """Installs the lua scripts if necessary."""
   if _GetSysbenchTestParameter() == 'tpcc':
     vm.InstallPreprovisionedBenchmarkData(
         BENCHMARK_NAME, [_SYSBENCH_TPCC_TAR], '~'
     )
-    vm.RemoteCommand(f'tar -zxvf {_SYSBENCH_TPCC_TAR} --strip-components 1')
-    vm.PushDataFile('sysbench/default_tpcc_common.lua', '~/tpcc_common.lua')
+    vm.RemoteCommand(
+        f'tar -zxvf {_SYSBENCH_TPCC_TAR} --strip-components 1'
+        f' -C {sysbench.SYSBENCH_DIR}'
+    )
+
+    vm.PushDataFile(
+        'sysbench/default_tpcc_common.lua',
+        f'{sysbench.SYSBENCH_DIR}/tpcc_common.lua',
+    )
   if FLAGS.sysbench_testname == SPANNER_TPCC:
-    vm.PushDataFile('sysbench/spanner_pg_tpcc_common.lua', '~/tpcc_common.lua')
-    vm.PushDataFile('sysbench/spanner_pg_tpcc_run.lua', '~/tpcc_run.lua')
-    vm.PushDataFile('sysbench/spanner_pg_tpcc.lua', '~/tpcc.lua')
+    vm.PushDataFile(
+        'sysbench/spanner_pg_tpcc_common.lua',
+        f'{sysbench.SYSBENCH_DIR}/tpcc_common.lua',
+    )
+    vm.PushDataFile(
+        'sysbench/spanner_pg_tpcc_run.lua',
+        f'{sysbench.SYSBENCH_DIR}/tpcc_run.lua',
+    )
+    vm.PushDataFile(
+        'sysbench/spanner_pg_tpcc.lua', f'{sysbench.SYSBENCH_DIR}/tpcc.lua'
+    )
 
 
 def _IsValidFlag(flag):
@@ -343,24 +372,12 @@ def _IsValidFlag(flag):
   )
 
 
-def _GetLoadThreads() -> int:
-  # Data loading is write only so need num_threads less than or equal to the
-  # amount of tables - capped at 64 threads for when number of tables
-  # gets very large. For TPCC, parallelize with threads as long as scale > 1.
-  if FLAGS.sysbench_testname == SPANNER_TPCC:
-    return _LOAD_THREADS.value
-  if _GetSysbenchTestParameter() == 'tpcc':
-    return min(FLAGS.sysbench_scale, 64)
-  return min(FLAGS.sysbench_tables, 64)
-
-
 def _GetSysbenchPrepareCommand(
     db: relational_db.BaseRelationalDb, num_vms: int, vm_index: int
 ) -> str:
   """Returns the sysbench command used to load the database."""
-  num_threads = _GetLoadThreads()
   data_load_cmd_tokens = [
-      'nice',  # run with a niceness of lower priority
+      'cd ~/sysbench/ && nice',  # run with a niceness of lower priority
       '-15',  # to encourage cpu time for ssh commands
       'sysbench',
       _GetSysbenchTestParameter(),
@@ -371,8 +388,14 @@ def _GetSysbenchPrepareCommand(
           else ''
       ),
       ('--scale=%d' % FLAGS.sysbench_scale if _IsValidFlag('scale') else ''),
-      '--threads=%d' % num_threads,
+      '--threads=%d' % _LOAD_THREADS.value,
   ]
+
+  if _IsValidFlag('auto-inc'):
+    if _AUTO_INCREMENT.value:
+      data_load_cmd_tokens.append('--auto-inc=on')
+    else:
+      data_load_cmd_tokens.append('--auto-inc=off')
   if FLAGS.sysbench_testname == SPANNER_TPCC:
     # Supports loading through multiple VMs
     scale = FLAGS.sysbench_scale
@@ -385,6 +408,20 @@ def _GetSysbenchPrepareCommand(
         '--end_scale=%d' % end_scale,
         '--enable_pg_compat_mode=%d'
         % (1 if _SPANNER_PG_COMPAT_MODE.value else 0),
+    ])
+  if (
+      db.engine_type == sql_engine_utils.SPANNER_POSTGRES
+      and FLAGS.sysbench_testname != SPANNER_TPCC
+  ):
+    table_size = FLAGS.sysbench_table_size
+    fill_table_size = table_size / num_vms
+    start_index = fill_table_size * vm_index + 1
+
+    data_load_cmd_tokens.extend([
+        '--start_index=%d' % start_index,
+        '--fill_table_size=%d' % fill_table_size,
+        '--create_secondary=false',
+        '--create_tables=false',
     ])
   return ' '.join(
       data_load_cmd_tokens + _GetCommonSysbenchOptions(db) + ['prepare']
@@ -408,9 +445,21 @@ def _LoadDatabaseInParallel(
     client_vms: list[virtual_machine.VirtualMachine],
 ) -> list[sample.Sample]:
   """Loads the database using the sysbench prepare command."""
-
+  if _LOAD_CLIENTS.value:
+    client_vms = client_vms[: _LOAD_CLIENTS.value]
   db.UpdateCapacityForLoad()
 
+  if (
+      FLAGS.sysbench_testname != SPANNER_TPCC
+      and db.engine_type == sql_engine_utils.SPANNER_POSTGRES
+  ):
+    client_vms[0].RobustRemoteCommand(
+        f'cd ~/sysbench/ && nice -15 sysbench {FLAGS.sysbench_testname}'
+        f' --tables={FLAGS.sysbench_tables} --table_size=0 '
+        ' --threads=20 --auto-inc=off '
+        '--create_secondary=false --db-driver=pgsql'
+        ' --pgsql-host=/tmp prepare'
+    )
   _UpdateSessions(db, _LOAD_THREADS.value)
   # Provision the Sysbench test based on the input flags (load data into DB)
   # Could take a long time if the data to be loaded is large.
@@ -432,6 +481,20 @@ def _LoadDatabaseInParallel(
     if 'FATAL' in stderr:
       raise errors.Benchmarks.RunError('Error while running prepare phase')
 
+  if (
+      FLAGS.sysbench_testname != SPANNER_TPCC
+      and db.engine_type == sql_engine_utils.SPANNER_POSTGRES
+  ):
+    # This command update the secondary index
+    # Run all index update in parallel.
+    client_vms[0].RobustRemoteCommand(
+        'cd ~/sysbench/ && nice -15 sysbench oltp_read_only'
+        f' --tables={FLAGS.sysbench_tables} --table_size=0 '
+        f' --threads={FLAGS.sysbench_tables} --auto-inc=off '
+        '--create_secondary=true --db-driver=pgsql'
+        ' --pgsql-host=/tmp prepare'
+    )
+
   db.UpdateCapacityForRun()
 
   return [
@@ -450,8 +513,33 @@ def _PrepareClients(
 ) -> None:
   """Installs the relevant packages on the clients."""
   # Setup common test tools required on the client VM
-  background_tasks.RunThreaded(lambda vm: vm.Install('sysbench'), client_vms)
+  # Run app install to force reinstalling sysbench.
+  spanner_oltp = (
+      db.engine_type == sql_engine_utils.SPANNER_POSTGRES
+      and FLAGS.sysbench_testname != SPANNER_TPCC
+  )
+  if spanner_oltp:
+    background_tasks.RunThreaded(
+        lambda vm: sysbench.AptInstall(
+            vm,
+            spanner_oltp=spanner_oltp,
+        ),
+        client_vms,
+    )
+  else:
+    background_tasks.RunThreaded(
+        lambda vm: vm.Install('sysbench'),
+        client_vms,
+    )
   background_tasks.RunThreaded(_InstallLuaScriptsIfNecessary, client_vms)
+  if (
+      db.engine_type == sql_engine_utils.SPANNER_POSTGRES
+      and FLAGS.sysbench_testname != SPANNER_TPCC
+  ):
+    background_tasks.RunThreaded(
+        lambda client_query_tools: client_query_tools.InstallPackages(),
+        db.client_vms_query_tools,
+    )
 
   # Some databases install these query tools during _PostCreate, which is
   # skipped if the database is user managed / restored.
@@ -569,26 +657,50 @@ def _ParseSysbenchTransactions(
   ]
 
 
-def _ParseSysbenchLatency(sysbench_output, metadata) -> List[sample.Sample]:
+def _ParseSysbenchLatency(
+    sysbench_outputs: List[str], metadata
+) -> List[sample.Sample]:
   """Parse sysbench latency results."""
-  min_latency = regex_util.ExtractFloat(
-      'min: *([0-9]*[.]?[0-9]+)', sysbench_output
-  )
+  min_latency_array = []
+  average_latency_array = []
+  max_latency_array = []
+  for sysbench_output in sysbench_outputs:
+    min_latency_array.append(
+        regex_util.ExtractFloat('min: *([0-9]*[.]?[0-9]+)', sysbench_output)
+    )
 
-  average_latency = regex_util.ExtractFloat(
-      'avg: *([0-9]*[.]?[0-9]+)', sysbench_output
-  )
-  max_latency = regex_util.ExtractFloat(
-      'max: *([0-9]*[.]?[0-9]+)', sysbench_output
-  )
-  total_latency = regex_util.ExtractFloat(
-      'sum: *([0-9]*[.]?[0-9]+)', sysbench_output
-  )
+    average_latency_array.append(
+        regex_util.ExtractFloat('avg: *([0-9]*[.]?[0-9]+)', sysbench_output)
+    )
+    max_latency_array.append(
+        regex_util.ExtractFloat('max: *([0-9]*[.]?[0-9]+)', sysbench_output)
+    )
+  min_latency_meta = metadata.copy()
+  average_latency_meta = metadata.copy()
+  max_latency_meta = metadata.copy()
+  if len(sysbench_outputs) > 1:
+    min_latency_meta.update({'latency_array': min_latency_array})
+    average_latency_meta.update({'latency_array': average_latency_array})
+    max_latency_meta.update({'latency_array': max_latency_array})
   return [
-      sample.Sample('min_latency', min_latency, 'ms', metadata),
-      sample.Sample('average_latency', average_latency, 'ms', metadata),
-      sample.Sample('max_latency', max_latency, 'ms', metadata),
-      sample.Sample('total_latency', total_latency, 'ms', metadata),
+      sample.Sample(
+          'min_latency',
+          min(min_latency_array),
+          'ms',
+          min_latency_meta,
+      ),
+      sample.Sample(
+          'average_latency',
+          statistics.mean(average_latency_array),
+          'ms',
+          average_latency_meta,
+      ),
+      sample.Sample(
+          'max_latency',
+          max(max_latency_array),
+          'ms',
+          max_latency_meta,
+      ),
   ]
 
 
@@ -677,6 +789,7 @@ def _GetSysbenchRunCommand(
   if _GetSysbenchTestParameter() == 'tpcc':
     run_cmd_tokens.append('--trx_level=%s' % _TXN_ISOLATION_LEVEL.value)
   run_cmd = ' '.join(run_cmd_tokens + _GetCommonSysbenchOptions(db) + ['run'])
+  run_cmd = 'cd ~/sysbench/ && ' + run_cmd
   return run_cmd
 
 
@@ -724,11 +837,11 @@ def _UpdateSessions(
     )
 
 
-def _RunSysbench(vm, metadata, benchmark_spec, sysbench_thread_count):
+def _RunSysbench(vms, metadata, benchmark_spec, sysbench_thread_count):
   """Runs the Sysbench OLTP test.
 
   Args:
-    vm: The VM that will issue the sysbench test.
+    vms: The VMs that will issue the sysbench test.
     metadata: The PKB metadata to be passed along to the final results.
     benchmark_spec: The benchmark specification. Contains all data that is
       required to run the benchmark.
@@ -742,6 +855,7 @@ def _RunSysbench(vm, metadata, benchmark_spec, sysbench_thread_count):
   # as requested by the caller. Second step is the 'real' run where the results
   # are parsed and reported.
   _UpdateSessions(benchmark_spec.relational_db, sysbench_thread_count)
+  vm = vms[0]
 
   warmup_seconds = FLAGS.sysbench_warmup_seconds
   if warmup_seconds > 0:
@@ -752,6 +866,12 @@ def _RunSysbench(vm, metadata, benchmark_spec, sysbench_thread_count):
 
   run_seconds = FLAGS.sysbench_run_seconds
   logging.info('Sysbench real run, duration is %d', run_seconds)
+
+  if _SCALEUP_CLIENTS_TEST.value:
+    return _RunScaleUpClientsBenchmark(
+        vms, run_seconds, benchmark_spec, sysbench_thread_count, metadata
+    )
+
   stdout, _ = _IssueSysbenchCommand(
       vm, run_seconds, benchmark_spec, sysbench_thread_count
   )
@@ -760,9 +880,54 @@ def _RunSysbench(vm, metadata, benchmark_spec, sysbench_thread_count):
 
   return (
       _ParseSysbenchTimeSeries(stdout, metadata)
-      + _ParseSysbenchLatency(stdout, metadata)
+      + _ParseSysbenchLatency([stdout], metadata)
       + _ParseSysbenchTransactions(stdout, metadata)
   )
+
+
+def _RunScaleUpClientsBenchmark(
+    vms, run_seconds, benchmark_spec, sysbench_thread_count, metadata
+):
+  """Runs the Scale Up Clients benchmark. Only TPS and QPS is supported."""
+  scale_up_samples = []
+  for i in range(1, _SCALEUP_CLIENTS_TEST_NUM_CLIENTS.value + 1):
+    new_metadata = metadata.copy()
+    new_metadata['sysbench_scale_up_client_count'] = i
+    command_vm_pairs = [
+        (vm, run_seconds, benchmark_spec, sysbench_thread_count)
+        for vm in vms[:i]
+    ]
+    args = [(command_vm_pair, {}) for command_vm_pair in command_vm_pairs]
+    results = background_tasks.RunThreaded(_IssueSysbenchCommand, args)
+    stdouts = [i[0] for i in results]
+    cpu_utilization = 0
+    if hasattr(benchmark_spec.relational_db, 'GetAverageCpuUsage'):
+      cpu_utilization = benchmark_spec.relational_db.GetAverageCpuUsage(
+          _RUN_DURATION.value // 60, datetime.datetime.now()
+      )
+      new_metadata['cpu_utilization'] = cpu_utilization
+    total_tps = []
+    total_qps = []
+    for stdout in stdouts:
+      current_transactions = _ParseSysbenchTransactions(stdout, new_metadata)
+      total_tps.append(current_transactions[0].value)
+      total_qps.append(current_transactions[1].value)
+    logging.info(
+        'num_clients: %d total_tps: %d total_qps: %d', i, total_tps, total_qps
+    )
+    tps_metadata = new_metadata.copy()
+    tps_metadata.update({'tps': total_tps})
+    qps_metadata = new_metadata.copy()
+    qps_metadata.update({'qps': total_qps})
+    scale_up_samples += [
+        sample.Sample('total_tps', sum(total_tps), 'tps', tps_metadata),
+        sample.Sample('total_qps', sum(total_qps), 'qps', qps_metadata),
+    ] + _ParseSysbenchLatency(stdouts, new_metadata)
+    if cpu_utilization > _SCALE_UP_MAX_CPU_UTILIZATION.value:
+      logging.info('cpu_utilization is over the threadshold, stopping')
+      break
+
+  return scale_up_samples
 
 
 def Run(benchmark_spec):
@@ -777,7 +942,7 @@ def Run(benchmark_spec):
   """
   logging.info('Start benchmarking, Cloud Provider is %s.', FLAGS.cloud)
   results = []
-  client_vm = benchmark_spec.vms[0]
+  client_vms = benchmark_spec.vms
   db = benchmark_spec.relational_db
 
   for thread_count in FLAGS.sysbench_run_threads:
@@ -787,7 +952,7 @@ def Run(benchmark_spec):
     metadata['sysbench_thread_count'] = thread_count
     # The run phase is common across providers. The VMs[0] object contains all
     # information and states necessary to carry out the run.
-    results += _RunSysbench(client_vm, metadata, benchmark_spec, thread_count)
+    results += _RunSysbench(client_vms, metadata, benchmark_spec, thread_count)
   return results
 
 

@@ -21,36 +21,59 @@ TODO: add global table option.
 
 from collections.abc import Collection, Iterable, MutableMapping
 import logging
-import os
 from typing import Any
 
 from absl import flags
 from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import configs
+from perfkitbenchmarker import errors
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import virtual_machine
+from perfkitbenchmarker import vm_util
+from perfkitbenchmarker.linux_packages import aws_credentials
 from perfkitbenchmarker.linux_packages import ycsb
 from perfkitbenchmarker.providers.aws import aws_dynamodb
 
 _INITIAL_WRITES = flags.DEFINE_integer(
-    'aws_dynamodb_ycsb_provision_wcu', 10000,
-    'The provisioned WCU to use during the load phase.')
+    'aws_dynamodb_ycsb_provision_wcu',
+    10000,
+    'The provisioned WCU to use during the load phase.',
+)
 flags.register_validator(
     'aws_dynamodb_ycsb_provision_wcu',
     lambda wcu: wcu >= 1,
-    message='WCU must be >=1 to load successfully.')
+    message='WCU must be >=1 to load successfully.',
+)
 _CONSISTENT_READS = flags.DEFINE_boolean(
-    'aws_dynamodb_ycsb_consistentReads', False,
+    'aws_dynamodb_ycsb_consistentReads',
+    False,
     'Consistent reads cost 2x eventual reads. '
-    "'false' is default which is eventual")
+    "'false' is default which is eventual",
+)
 _MAX_CONNECTIONS = flags.DEFINE_integer(
-    'aws_dynamodb_connectMax', 50,
-    'Maximum number of concurrent dynamodb connections. '
-    'Defaults to 50.')
+    'aws_dynamodb_connectMax',
+    50,
+    'Maximum number of concurrent dynamodb connections. Defaults to 50.',
+)
 _RAMP_UP = flags.DEFINE_boolean(
-    'aws_dynamodb_ycsb_ramp_up', False,
+    'aws_dynamodb_ycsb_ramp_up',
+    False,
     'If true, runs YCSB with a target throughput equal to the provisioned qps '
-    'of the instance and increments until a max throughput is found.'
+    'of the instance and increments until a max throughput is found.',
+)
+_PROVISIONED_QPS = flags.DEFINE_boolean(
+    'aws_dynamodb_ycsb_provisioned_qps',
+    False,
+    'If true, runs YCSB with a target throughput equal to the provisioned qps '
+    'of the instance and returns the result.',
+)
+_CLI_PROFILE = flags.DEFINE_string(
+    'aws_dynamodb_ycsb_cli_profile',
+    None,
+    'Local AWS CLI profile to use with YCSB. Must be long term crendentials. '
+    '"default" will work with basic CLI set up. '
+    'Using an IAM user that only has DynamoDB access limits the scope of '
+    'credentials copied into the VM.',
 )
 FLAGS = flags.FLAGS
 
@@ -92,14 +115,22 @@ def CheckPrerequisites(benchmark_config):
     perfkitbenchmarker.data.ResourceNotFound: On missing resource.
   """
   del benchmark_config
+  if not _CLI_PROFILE.value:
+    raise errors.Config.MissingOption(
+        '--aws_dynamodb_ycsb_cli_profile must be explicitly passed. "default" '
+        'will use the default CLI profile and works with basic long lived '
+        'credentials. Using DynamoDB specific credentials limits what is '
+        'copied into the VM.')
   ycsb.CheckPrerequisites()
 
 
-def _GetYcsbArgs(client: virtual_machine.VirtualMachine,
-                 instance: aws_dynamodb.AwsDynamoDBInstance) -> dict[str, Any]:
+def _GetYcsbArgs(
+    client: virtual_machine.VirtualMachine,
+    instance: aws_dynamodb.AwsDynamoDBInstance,
+) -> dict[str, Any]:
   """Returns args to pass to YCSB."""
   run_kwargs = {
-      'dynamodb.awsCredentialsFile': GetRemoteVMCredentialsFullPath(client),
+      'dynamodb.awsCredentialsFile': GetRemoteCredentialsFullPath(client),
       'dynamodb.primaryKey': instance.primary_key,
       'dynamodb.endpoint': instance.GetEndPoint(),
       'dynamodb.region': instance.region,
@@ -110,7 +141,7 @@ def _GetYcsbArgs(client: virtual_machine.VirtualMachine,
         'dynamodb.primaryKeyType': 'HASH_AND_RANGE',
         'aws_dynamodb_connectMax': _MAX_CONNECTIONS.value,
         'dynamodb.hashKeyName': instance.primary_key,
-        'dynamodb.primaryKey': instance.sort_key
+        'dynamodb.primaryKey': instance.sort_key,
     })
   if _CONSISTENT_READS.value:
     run_kwargs['dynamodb.consistentReads'] = 'true'
@@ -166,6 +197,10 @@ def Run(benchmark_spec):
   samples = []
   if _RAMP_UP.value:
     samples += RampUpRun(benchmark_spec.executor, instance, vms, run_kwargs)
+  elif _PROVISIONED_QPS.value:
+    samples += ExactThroughputRun(
+        benchmark_spec.executor, instance, vms, run_kwargs
+    )
   else:
     samples += list(benchmark_spec.executor.Run(vms, run_kwargs=run_kwargs))
   benchmark_metadata = {
@@ -186,20 +221,33 @@ def _ExtractThroughput(samples: Iterable[sample.Sample]) -> float:
   return 0.0
 
 
-def RampUpRun(executor: ycsb.YCSBExecutor,
-              db: aws_dynamodb.AwsDynamoDBInstance,
-              vms: Collection[virtual_machine.VirtualMachine],
-              run_kwargs: MutableMapping[str, Any]) -> list[sample.Sample]:
+def _GetTargetQps(db: aws_dynamodb.AwsDynamoDBInstance) -> int:
+  """Gets the target QPS for eventual and strong reads."""
+  read_multiplier = 1 if _CONSISTENT_READS.value else 2
+  rcu = 0 if db.rcu <= 25 else db.rcu * read_multiplier
+  wcu = 0 if db.wcu <= 25 else db.wcu
+  return rcu + wcu
+
+
+def RampUpRun(
+    executor: ycsb.YCSBExecutor,
+    db: aws_dynamodb.AwsDynamoDBInstance,
+    vms: Collection[virtual_machine.VirtualMachine],
+    run_kwargs: MutableMapping[str, Any],
+) -> list[sample.Sample]:
   """Runs YCSB starting from provisioned QPS until max throughput is found."""
   # Database is already provisioned with the correct QPS.
-  qps = db.rcu + db.wcu
+  qps = _GetTargetQps(db)
   max_throughput = 0
   while True:
     run_kwargs['target'] = qps
     run_samples = executor.Run(vms, run_kwargs=run_kwargs)
     throughput = _ExtractThroughput(run_samples)
-    logging.info('Run had throughput target %s and measured throughput %s.',
-                 qps, throughput)
+    logging.info(
+        'Run had throughput target %s and measured throughput %s.',
+        qps,
+        throughput,
+    )
 
     if throughput < max_throughput + _QPS_THRESHOLD:
       logging.info('Found maximum throughput %s.', throughput)
@@ -212,6 +260,20 @@ def RampUpRun(executor: ycsb.YCSBExecutor,
     qps += _TARGET_QPS_INCREMENT
 
 
+def ExactThroughputRun(
+    executor: ycsb.YCSBExecutor,
+    db: aws_dynamodb.AwsDynamoDBInstance,
+    vms: Collection[virtual_machine.VirtualMachine],
+    run_kwargs: MutableMapping[str, Any],
+) -> list[sample.Sample]:
+  """Runs YCSB at provisioned QPS."""
+  run_kwargs['target'] = _GetTargetQps(db)
+  run_samples = executor.Run(vms, run_kwargs=run_kwargs)
+  for s in run_samples:
+    s.metadata['provisioned_qps'] = True
+  return run_samples
+
+
 def Cleanup(benchmark_spec):
   """Cleanup YCSB on the target vm.
 
@@ -222,22 +284,29 @@ def Cleanup(benchmark_spec):
   del benchmark_spec
 
 
-def GetRemoteVMCredentialsFullPath(vm):
-  """Returns the full path for first AWS credentials file found."""
-  home_dir, _ = vm.RemoteCommand('echo ~')
-  search_path = os.path.join(
-      home_dir.rstrip('\n'), FLAGS.aws_credentials_remote_path)
-  result, _ = vm.RemoteCommand('grep -irl "key" {0}'.format(search_path))
-  return result.strip('\n').split('\n')[0]
+AWS_CREDENTIALS_FILE = 'aws_credentials.properties'
+
+
+def GetRemoteCredentialsFullPath(vm):
+  """Returns the full path for the generated AWS credentials file."""
+  result, _ = vm.RemoteCommand(f'echo ~/{AWS_CREDENTIALS_FILE}')
+  return result.strip()
+
+
+def GenerateCredentials(vm) -> None:
+  """Generates AWS credentials properties file and pushes it to the VM."""
+  key_id, secret = aws_credentials.GetCredentials(profile=_CLI_PROFILE.value)
+
+  with vm_util.NamedTemporaryFile(prefix=AWS_CREDENTIALS_FILE, mode='w') as f:
+    f.write(f"""
+accessKey={key_id}
+secretKey={secret}
+""")
+    f.close()
+    vm.PushFile(f.name, GetRemoteCredentialsFullPath(vm))
 
 
 def _Install(vm):
   """Install YCSB on client 'vm'."""
   vm.Install('ycsb')
-  # copy AWS creds
-  vm.Install('aws_credentials')
-  # aws credentials file format to ycsb recognized format
-  vm.RemoteCommand('sed -i "s/aws_access_key_id/accessKey/g" {0}'.format(
-      GetRemoteVMCredentialsFullPath(vm)))
-  vm.RemoteCommand('sed -i "s/aws_secret_access_key/secretKey/g" {0}'.format(
-      GetRemoteVMCredentialsFullPath(vm)))
+  GenerateCredentials(vm)

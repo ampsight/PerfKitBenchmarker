@@ -28,6 +28,7 @@ from perfkitbenchmarker import context
 from perfkitbenchmarker import linux_benchmarks
 from perfkitbenchmarker import linux_virtual_machine
 from perfkitbenchmarker import pkb  # pylint:disable=unused-import
+from perfkitbenchmarker import resource
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.configs import benchmark_config_spec
@@ -36,6 +37,35 @@ from perfkitbenchmarker.providers.gcp import util
 
 FLAGS = flags.FLAGS
 FLAGS.mark_as_parsed()
+
+
+# Tests Docker and IB filtered out and having multiple eth with same MTU
+IP_LINK_TEXT = """\
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000
+    link/ether 00:0d:3a:ed:2d:65 brd ff:ff:ff:ff:ff:ff
+3: ib0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 2044 qdisc mq state UP mode DEFAULT group default qlen 256
+    link/infiniband 00:00:01:49:fe:80:00:00:00:00:00:00:00:15:5d:ff:fd:34:02:db brd 00:ff:ff:ff:ff:12:40:1b:80:3a:00:00:00:00:00:00:ff:ff:ff:ff
+4: ib1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 2044 qdisc mq state UP mode DEFAULT group default qlen 256
+    link/infiniband 00:00:01:49:fe:80:00:00:00:00:00:00:00:15:5d:ff:fd:34:02:dc brd 00:ff:ff:ff:ff:12:40:1b:80:3a:00:00:00:00:00:00:ff:ff:ff:ff
+5: ib2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 2044 qdisc mq state UP mode DEFAULT group default qlen 256
+    link/infiniband 00:00:01:49:fe:80:00:00:00:00:00:00:00:15:5d:ff:fd:34:02:dd brd 00:ff:ff:ff:ff:12:40:1b:80:3a:00:00:00:00:00:00:ff:ff:ff:ff
+6: ib3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 2044 qdisc mq state UP mode DEFAULT group default qlen 256
+    link/infiniband 00:00:01:49:fe:80:00:00:00:00:00:00:00:15:5d:ff:fd:34:02:de brd 00:ff:ff:ff:ff:12:40:1b:80:3a:00:00:00:00:00:00:ff:ff:ff:ff
+7: ib4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 2044 qdisc mq state UP mode DEFAULT group default qlen 256
+    link/infiniband 00:00:01:49:fe:80:00:00:00:00:00:00:00:15:5d:ff:fd:34:02:df brd 00:ff:ff:ff:ff:12:40:1b:80:3a:00:00:00:00:00:00:ff:ff:ff:ff
+8: ib5: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 2044 qdisc mq state UP mode DEFAULT group default qlen 256
+    link/infiniband 00:00:01:49:fe:80:00:00:00:00:00:00:00:15:5d:ff:fd:34:02:e0 brd 00:ff:ff:ff:ff:12:40:1b:80:3a:00:00:00:00:00:00:ff:ff:ff:ff
+9: ib6: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 2044 qdisc mq state UP mode DEFAULT group default qlen 256
+    link/infiniband 00:00:01:49:fe:80:00:00:00:00:00:00:00:15:5d:ff:fd:34:02:e1 brd 00:ff:ff:ff:ff:12:40:1b:80:3a:00:00:00:00:00:00:ff:ff:ff:ff
+10: ib7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 2044 qdisc mq state UP mode DEFAULT group default qlen 256
+    link/infiniband 00:00:01:49:fe:80:00:00:00:00:00:00:00:15:5d:ff:fd:34:02:e2 brd 00:ff:ff:ff:ff:12:40:1b:80:3a:00:00:00:00:00:00:ff:ff:ff:ff
+11: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default
+    link/ether 02:42:8a:7d:93:c8 brd ff:ff:ff:ff:ff:ff
+12: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000
+    link/ether 00:0d:3a:ed:2d:67 brd ff:ff:ff:ff:ff:ff
+"""
 
 
 class TestVmSpec(virtual_machine.BaseVmSpec):
@@ -48,6 +78,7 @@ def CreateTestVmSpec() -> TestVmSpec:
 
 class TestOsMixin(virtual_machine.BaseOsMixin):
   """Test class that provides dummy implementations of abstract functions."""
+
   OS_TYPE = 'test_os_type'
   BASE_OS_TYPE = 'debian'
 
@@ -117,9 +148,7 @@ class TestOsMixin(virtual_machine.BaseOsMixin):
     return True
 
 
-class TestVirtualMachine(TestOsMixin, virtual_machine.BaseVirtualMachine):
-  """Test class that has dummy methods for a base virtual machine."""
-  CLOUD = 'test_vm_cloud'
+class TestResource(resource.BaseResource):
 
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
@@ -130,6 +159,14 @@ class TestVirtualMachine(TestOsMixin, virtual_machine.BaseVirtualMachine):
 
   def _Delete(self):
     pass
+
+
+class TestVirtualMachine(
+    TestResource, TestOsMixin, virtual_machine.BaseVirtualMachine
+):
+  """Test class that has dummy methods for a base virtual machine."""
+
+  CLOUD = 'test_vm_cloud'
 
   def _Start(self):
     pass
@@ -146,11 +183,19 @@ class TestVirtualMachine(TestOsMixin, virtual_machine.BaseVirtualMachine):
 
 # Need to provide implementations for all of the abstract methods in
 # order to instantiate linux_virtual_machine.BaseLinuxMixin.
-class TestLinuxVirtualMachine(linux_virtual_machine.BaseLinuxVirtualMachine,
-                              TestVirtualMachine):
+class TestLinuxVirtualMachine(
+    linux_virtual_machine.BaseLinuxVirtualMachine, TestVirtualMachine
+):
 
   def InstallPackages(self, packages):
     pass
+
+
+class TestGceLinuxVirtualMachine(  # pytype: disable=signature-mismatch  # overriding-return-type-checks
+    gce_virtual_machine.GceVirtualMachine, TestLinuxVirtualMachine
+):
+  """Test class that has VM methods for a GCE virtual machine."""
+  pass
 
 
 class TestGceVirtualMachine(TestOsMixin, gce_virtual_machine.GceVirtualMachine):  # pytype: disable=signature-mismatch  # overriding-return-type-checks
@@ -173,19 +218,23 @@ cluster_boot:
 
 
 def CreateBenchmarkSpecFromYaml(
-    yaml_string: str = SIMPLE_CONFIG,
-    benchmark_name: str = 'cluster_boot') -> benchmark_spec.BenchmarkSpec:
+    yaml_string: str = SIMPLE_CONFIG, benchmark_name: str = 'cluster_boot'
+) -> benchmark_spec.BenchmarkSpec:
   config = configs.LoadConfig(yaml_string, {}, benchmark_name)
   return CreateBenchmarkSpecFromConfigDict(config, benchmark_name)
 
 
 def CreateBenchmarkSpecFromConfigDict(
-    config_dict: Dict[str, Any],
-    benchmark_name: str) -> benchmark_spec.BenchmarkSpec:
+    config_dict: Dict[str, Any], benchmark_name: str
+) -> benchmark_spec.BenchmarkSpec:
   config_spec = benchmark_config_spec.BenchmarkConfigSpec(
-      benchmark_name, flag_values=FLAGS, **config_dict)
-  benchmark_module = next((b for b in linux_benchmarks.BENCHMARKS
-                           if b.BENCHMARK_NAME == benchmark_name))
+      benchmark_name, flag_values=FLAGS, **config_dict
+  )
+  benchmark_module = next((
+      b
+      for b in linux_benchmarks.BENCHMARKS
+      if b.BENCHMARK_NAME == benchmark_name
+  ))
   return benchmark_spec.BenchmarkSpec(benchmark_module, config_spec, 'name0')
 
 
@@ -211,8 +260,8 @@ class PkbCommonTestCase(parameterized.TestCase, absltest.TestCase):
     self.addCleanup(context.SetThreadBenchmarkSpec, None)
 
     p = mock.patch(
-        util.__name__ + '.GetDefaultProject',
-        return_value='test_project')
+        util.__name__ + '.GetDefaultProject', return_value='test_project'
+    )
     self.enter_context(p)
 
   # TODO(user): Extend MockIssueCommand to support multiple calls to
@@ -230,8 +279,7 @@ class PkbCommonTestCase(parameterized.TestCase, absltest.TestCase):
       retcode: Int. Return code from running the command.
     """
 
-    p = mock.patch(
-        'subprocess.Popen', spec=subprocess.Popen)
+    p = mock.patch('subprocess.Popen', spec=subprocess.Popen)
     cmd_output = mock.patch.object(vm_util, '_ReadIssueCommandOutput')
 
     self.addCleanup(p.stop)

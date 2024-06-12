@@ -36,6 +36,7 @@ from perfkitbenchmarker import relational_db
 from perfkitbenchmarker import sql_engine_utils
 from perfkitbenchmarker import sqlserver_iaas_relational_db
 from perfkitbenchmarker import vm_util
+from perfkitbenchmarker.providers.gcp import gce_network
 from perfkitbenchmarker.providers.gcp import util
 from six.moves import range
 
@@ -64,6 +65,10 @@ GCP_DATABASE_VERSION_MAPPING = {
         '2017_Enterprise': 'SQLSERVER_2017_ENTERPRISE',
         '2017_Express': 'SQLSERVER_2017_EXPRESS',
         '2017_Web': 'SQLSERVER_2017_WEB',
+        '2019_Standard': 'SQLSERVER_2019_Standard',
+        '2019_Enterprise': 'SQLSERVER_2019_ENTERPRISE',
+        '2019_Express': 'SQLSERVER_2019_EXPRESS',
+        '2019_Web': 'SQLSERVER_2019_WEB',
     },
 }
 
@@ -107,6 +112,31 @@ class GCPSQLServerIAASRelationalDb(
 
   CLOUD = provider_info.GCP
 
+  def __init__(self, relational_db_spec):
+    super(GCPSQLServerIAASRelationalDb, self).__init__(relational_db_spec)
+    self._reserved_ip_address = None
+
+  def CreateIpReservation(self) -> str:
+    ip_address_name = 'fci-ip-{}'.format(FLAGS.run_uri)
+    self._reserved_ip_address = gce_network.GceIPAddress(
+        self.server_vm.project,
+        util.GetRegionFromZone(self.server_vm.zone),
+        ip_address_name,
+        self.server_vm.network.primary_subnet_name,
+    )
+    self._reserved_ip_address.Create()
+    return self._reserved_ip_address.ip_address
+
+  def ReleaseIpReservation(self) -> bool:
+    if self._reserved_ip_address:
+      self._reserved_ip_address.Delete()
+    return self._reserved_ip_address is None
+
+  def _Delete(self):
+    super(GCPSQLServerIAASRelationalDb, self)._Delete()
+    if self._reserved_ip_address:
+      self._reserved_ip_address.Delete()
+
 
 class GCPPostgresIAASRelationalDb(
     postgres_iaas_relational_db.PostgresIAASRelationalDb
@@ -122,6 +152,14 @@ class GCPMysqlIAASRelationalDb(mysql_iaas_relational_db.MysqlIAASRelationalDb):
   CLOUD = provider_info.GCP
 
 
+class GCPMariaDbIAASRelationalDb(
+    mysql_iaas_relational_db.MariaDbIAASRelationalDB
+):
+  """A GCP IAAS database resource."""
+
+  CLOUD = provider_info.GCP
+
+
 class GCPRelationalDb(relational_db.BaseRelationalDb):
   """A GCP CloudSQL database resource.
 
@@ -130,6 +168,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
   ideal; however, a password is still required to connect. Currently only
   MySQL 5.7 and Postgres 9.6 are supported.
   """
+
   CLOUD = provider_info.GCP
   IS_MANAGED = True
 
@@ -156,7 +195,8 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     authorized_network = self._GetAuthorizedNetworks([self.client_vm])
 
     database_version_string = self._GetEngineVersionString(
-        self.spec.engine, self.spec.engine_version)
+        self.spec.engine, self.spec.engine_version
+    )
 
     cmd_string = [
         self,
@@ -179,10 +219,11 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
 
     if self.spec.engine == sql_engine_utils.SQLSERVER:
       # `--root-password` is required when creating SQL Server instances.
-      cmd_string.append('--root-password={0}'.format(
-          self.spec.database_password))
+      cmd_string.append(
+          '--root-password={0}'.format(self.spec.database_password)
+      )
 
-    if (self.spec.db_spec.cpus and self.spec.db_spec.memory):
+    if self.spec.db_spec.cpus and self.spec.db_spec.memory:
       self._ValidateSpec()
       memory = self.spec.db_spec.memory
       cpus = self.spec.db_spec.cpus
@@ -200,8 +241,9 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
 
     if self.spec.backup_enabled:
       cmd_string.append('--backup')
-      cmd_string.append('--backup-start-time={}'.format(
-          self.spec.backup_start_time))
+      cmd_string.append(
+          '--backup-start-time={}'.format(self.spec.backup_start_time)
+      )
     else:
       cmd_string.append('--no-backup')
     cmd = util.GcloudCommand(*cmd_string)
@@ -241,12 +283,14 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
       raise data.ResourceNotFound(
           'Must specify cpu count in benchmark config. See https://'
           'cloud.google.com/sql/docs/postgres/instance-settings for more '
-          'details about size restrictions.')
+          'details about size restrictions.'
+      )
     if not hasattr(self.spec.db_spec, 'memory') or not self.spec.db_spec.memory:
       raise data.ResourceNotFound(
           'Must specify a memory amount in benchmark config. See https://'
           'cloud.google.com/sql/docs/postgres/instance-settings for more '
-          'details about size restrictions.')
+          'details about size restrictions.'
+      )
 
   def _ValidateMachineType(self, memory, cpus):
     """Validates the custom machine type configuration.
@@ -264,26 +308,35 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     if cpus not in [1] + list(range(2, 97, 2)):
       raise ValueError(
           'CPUs (%i) much be 1 or an even number in-between 2 and 96, '
-          'inclusive.' % cpus)
+          'inclusive.' % cpus
+      )
 
     if memory % 256 != 0:
       raise ValueError(
           'Total memory (%dMiB) for a custom machine must be a multiple'
-          'of 256MiB.' % memory)
+          'of 256MiB.' % memory
+      )
     ratio = memory / 1024.0 / cpus
-    if (ratio < CUSTOM_MACHINE_CPU_MEM_RATIO_LOWER_BOUND or
-        ratio > CUSTOM_MACHINE_CPU_MEM_RATIO_UPPER_BOUND):
+    if (
+        ratio < CUSTOM_MACHINE_CPU_MEM_RATIO_LOWER_BOUND
+        or ratio > CUSTOM_MACHINE_CPU_MEM_RATIO_UPPER_BOUND
+    ):
       raise ValueError(
           'The memory (%.2fGiB) per vCPU (%d) of a custom machine '
           'type must be between %.2f GiB and %.2f GiB per vCPU, '
-          'inclusive.' %
-          (memory / 1024.0, cpus, CUSTOM_MACHINE_CPU_MEM_RATIO_LOWER_BOUND,
-           CUSTOM_MACHINE_CPU_MEM_RATIO_UPPER_BOUND))
+          'inclusive.'
+          % (
+              memory / 1024.0,
+              cpus,
+              CUSTOM_MACHINE_CPU_MEM_RATIO_LOWER_BOUND,
+              CUSTOM_MACHINE_CPU_MEM_RATIO_UPPER_BOUND,
+          )
+      )
     if memory < MIN_CUSTOM_MACHINE_MEM_MB:
-      raise ValueError('The total memory (%dMiB) for a custom machine type'
-                       'must be at least %dMiB.' %
-                       (memory,
-                        MIN_CUSTOM_MACHINE_MEM_MB))
+      raise ValueError(
+          'The total memory (%dMiB) for a custom machine type'
+          'must be at least %dMiB.' % (memory, MIN_CUSTOM_MACHINE_MEM_MB)
+      )
 
   def _Delete(self):
     """Deletes the underlying resource.
@@ -293,12 +346,25 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     deleted.
     """
     if hasattr(self, 'replica_instance_id'):
-      cmd = util.GcloudCommand(self, 'sql', 'instances', 'delete',
-                               self.replica_instance_id, '--quiet')
+      cmd = util.GcloudCommand(
+          self,
+          'sql',
+          'instances',
+          'delete',
+          self.replica_instance_id,
+          '--quiet',
+      )
       cmd.Issue(raise_on_failure=False, timeout=DELETE_INSTANCE_TIMEOUT)
 
-    cmd = util.GcloudCommand(self, 'sql', 'instances', 'delete',
-                             self.instance_id, '--quiet', '--async')
+    cmd = util.GcloudCommand(
+        self,
+        'sql',
+        'instances',
+        'delete',
+        self.instance_id,
+        '--quiet',
+        '--async',
+    )
     cmd.Issue(raise_on_failure=False, timeout=DELETE_INSTANCE_TIMEOUT)
 
   def _Exists(self):
@@ -308,8 +374,9 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     default is to assume success when _Create and _Delete do not raise
     exceptions.
     """
-    cmd = util.GcloudCommand(self, 'sql', 'instances', 'describe',
-                             self.instance_id)
+    cmd = util.GcloudCommand(
+        self, 'sql', 'instances', 'describe', self.instance_id
+    )
     stdout, _, _ = cmd.Issue(raise_on_failure=False)
     try:
       json_output = json.loads(stdout)
@@ -318,8 +385,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
       return False
 
   def _IsDBInstanceReady(self, instance_id, timeout=IS_READY_TIMEOUT):
-    cmd = util.GcloudCommand(self, 'sql', 'instances', 'describe',
-                             instance_id)
+    cmd = util.GcloudCommand(self, 'sql', 'instances', 'describe', instance_id)
     start_time = datetime.datetime.now()
 
     while True:
@@ -361,7 +427,8 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
         return False
 
     cmd = util.GcloudCommand(
-        self, 'sql', 'instances', 'describe', self.instance_id)
+        self, 'sql', 'instances', 'describe', self.instance_id
+    )
     stdout, _, _ = cmd.Issue()
     json_output = json.loads(stdout)
     self.endpoint = self._ParseEndpoint(json_output)
@@ -372,6 +439,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
 
     Args:
       describe_instance_json: JSON output.
+
     Returns:
       public IP address (string)
     """
@@ -388,9 +456,15 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
   def SetManagedDatabasePassword(self):
     # The hostname '%' means unrestricted access from any host.
     cmd = util.GcloudCommand(
-        self, 'sql', 'users', 'create', self.spec.database_username,
-        '--host=%', '--instance={0}'.format(self.instance_id),
-        '--password={0}'.format(self.spec.database_password))
+        self,
+        'sql',
+        'users',
+        'create',
+        self.spec.database_username,
+        '--host=%',
+        '--instance={0}'.format(self.instance_id),
+        '--password={0}'.format(self.spec.database_password),
+    )
     _, _, _ = cmd.Issue()
 
     # By default the empty password is a security violation.
@@ -398,21 +472,30 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     default_user = DEFAULT_USERNAME[self.spec.engine]
 
     cmd = util.GcloudCommand(
-        self, 'sql', 'users', 'set-password', default_user,
-        '--host=%', '--instance={0}'.format(self.instance_id),
-        '--password={0}'.format(self.spec.database_password))
+        self,
+        'sql',
+        'users',
+        'set-password',
+        default_user,
+        '--host=%',
+        '--instance={0}'.format(self.instance_id),
+        '--password={0}'.format(self.spec.database_password),
+    )
     _, _, _ = cmd.Issue()
 
   def _PostCreate(self):
-    """Creates the PKB user and sets the password.
-    """
+    """Creates the PKB user and sets the password."""
     super()._PostCreate()
     self.SetManagedDatabasePassword()
 
   def _ApplyDbFlags(self):
     cmd_string = [
-        self, 'sql', 'instances', 'patch', self.instance_id,
-        '--database-flags=%s' % ','.join(FLAGS.db_flags)
+        self,
+        'sql',
+        'instances',
+        'patch',
+        self.instance_id,
+        '--database-flags=%s' % ','.join(FLAGS.db_flags),
     ]
     cmd = util.GcloudCommand(*cmd_string)
     _, stderr, _ = cmd.Issue()
@@ -429,9 +512,7 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
     self._Reboot()
 
   def _Reboot(self):
-    cmd_string = [
-        self, 'sql', 'instances', 'restart', self.instance_id
-    ]
+    cmd_string = [self, 'sql', 'instances', 'restart', self.instance_id]
     cmd = util.GcloudCommand(*cmd_string)
     cmd.Issue()
 
@@ -449,8 +530,9 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
       (string): Default version for the given database engine.
     """
     if engine not in DEFAULT_ENGINE_VERSIONS:
-      raise NotImplementedError('Default engine not specified for '
-                                'engine {0}'.format(engine))
+      raise NotImplementedError(
+          'Default engine not specified for engine {0}'.format(engine)
+      )
     return DEFAULT_ENGINE_VERSIONS[engine]
 
   @staticmethod
@@ -471,14 +553,17 @@ class GCPRelationalDb(relational_db.BaseRelationalDb):
       valid_databases = ', '.join(GCP_DATABASE_VERSION_MAPPING.keys())
       raise NotImplementedError(
           'Database {0} is not supported,supported '
-          'databases include {1}'.format(engine, valid_databases))
+          'databases include {1}'.format(engine, valid_databases)
+      )
 
     version_mapping = GCP_DATABASE_VERSION_MAPPING[engine]
     if version not in version_mapping:
       valid_versions = ', '.join(version_mapping.keys())
       raise NotImplementedError(
-          'Version {0} is not supported,supported '
-          'versions include {1}'.format(version, valid_versions))
+          'Version {0} is not supported,supported versions include {1}'.format(
+              version, valid_versions
+          )
+      )
 
     return version_mapping[version]
 

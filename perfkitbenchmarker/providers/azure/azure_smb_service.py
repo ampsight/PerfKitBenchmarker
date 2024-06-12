@@ -33,14 +33,13 @@ Lifecycle:
 4. On teardown the mount point is first deleted.  Blocks on that returning.
 5. The Azure Files service is then deleted.  Does not block as can take some
    time.
-
 """
 
 import json
 import logging
-from typing import List
 
 from absl import flags
+from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import network
 from perfkitbenchmarker import provider_info
@@ -51,6 +50,10 @@ from perfkitbenchmarker.providers.azure import azure_network
 from perfkitbenchmarker.providers.azure import util
 
 FLAGS = flags.FLAGS
+
+
+class AzureSmbDiskSpec(disk.BaseSMBDiskSpec):
+  CLOUD = provider_info.AZURE
 
 
 class AzureSmbService(smb_service.BaseSmbService):
@@ -75,7 +78,7 @@ class AzureSmbService(smb_service.BaseSmbService):
     self.resource_group = azure_network.GetResourceGroup(self.region)
 
     # set during _Create()
-    self.connection_args: List[str] = None
+    self.connection_string: str = None
     self.storage_account_key: str = None
     self.storage_account_name: str = None
 
@@ -89,7 +92,8 @@ class AzureSmbService(smb_service.BaseSmbService):
     if self.name is None:
       raise errors.Resource.RetryableGetError('Filer not created')
     return '//{storage}.file.core.windows.net/{name}'.format(
-        storage=self.storage_account_name, name=self.name)
+        storage=self.storage_account_name, name=self.name
+    )
 
   def GetStorageAccountAndKey(self):
     logging.debug('Calling GetStorageAccountAndKey on SMB server %s', self.name)
@@ -107,14 +111,19 @@ class AzureSmbService(smb_service.BaseSmbService):
     """
     logging.info('Creating SMB server %s', self.name)
     if FLAGS.smb_tier == 'Standard_LRS':
-      storage_account_number = azure_network.AzureStorageAccount.total_storage_accounts - 1
-      self.storage_account_name = 'pkb%s' % FLAGS.run_uri + 'storage' + str(
-          storage_account_number)
+      storage_account_number = (
+          azure_network.AzureStorageAccount.total_storage_accounts - 1
+      )
+      self.storage_account_name = (
+          'pkb%s' % FLAGS.run_uri + 'storage' + str(storage_account_number)
+      )
     elif FLAGS.smb_tier == 'Premium_LRS':
       storage_account_number = (
-          azure_network.AzureStorageAccount.total_storage_accounts)
-      self.storage_account_name = 'pkb%s' % FLAGS.run_uri + 'filestorage' + str(
-          storage_account_number)
+          azure_network.AzureStorageAccount.total_storage_accounts
+      )
+      self.storage_account_name = (
+          'pkb%s' % FLAGS.run_uri + 'filestorage' + str(storage_account_number)
+      )
       # Premium Files uses a different storage account kind from Standard Files.
       # See links in description for more details.
       self.storage_account = azure_network.AzureStorageAccount(
@@ -123,13 +132,16 @@ class AzureSmbService(smb_service.BaseSmbService):
           name=self.storage_account_name,
           kind='FileStorage',
           resource_group=self.resource_group,
-          use_existing=False)
+          use_existing=False,
+      )
       self.storage_account.Create()
 
-    self.connection_args = util.GetAzureStorageConnectionArgs(
-        self.storage_account_name, self.resource_group.args)
+    self.connection_string = util.GetAzureStorageConnectionString(
+        self.storage_account_name, resource_group=self.resource_group.name
+    )
     self.storage_account_key = util.GetAzureStorageAccountKey(
-        self.storage_account_name, self.resource_group.args)
+        self.storage_account_name, self.resource_group.args
+    )
 
     self._AzureSmbCommand('create')
 
@@ -155,7 +167,7 @@ class AzureSmbService(smb_service.BaseSmbService):
     cmd += ['--name', self.name]
     if verb == 'create':
       cmd += ['--quota', str(FLAGS.data_disk_size)]
-    cmd += self.connection_args
+    cmd += ['--connection-string', self.connection_string]
     stdout, stderr, retcode = vm_util.IssueCommand(cmd, raise_on_failure=False)
     if retcode:
       raise errors.Error('Error running command %s : %s' % (verb, stderr))

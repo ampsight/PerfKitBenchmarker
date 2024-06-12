@@ -20,7 +20,9 @@ benchmarks to PerfKitBenchmarker and demonstrates more features.
 """
 
 import posixpath
+from typing import Any
 
+from perfkitbenchmarker import benchmark_spec as bm_spec
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import vm_util
@@ -48,16 +50,18 @@ sample:
 # mapped to the sha256sum hash. This ensures that when we change versions of the
 # benchmark data or binaries, we update the code.
 BENCHMARK_DATA = {
-    'preprovisioned_data.txt':
-        '4795a1c2517089e4df569afd77c04e949139cf299c87f012b894fccf91df4594'}
+    'preprovisioned_data.txt': (
+        '4795a1c2517089e4df569afd77c04e949139cf299c87f012b894fccf91df4594'
+    )
+}
 
 
-def GetConfig(user_config):
+def GetConfig(user_config: dict[str, Any]) -> dict[str, Any]:
   """Returns the configuration of a benchmark."""
   return configs.LoadConfig(BENCHMARK_CONFIG, user_config, BENCHMARK_NAME)
 
 
-def Prepare(benchmark_spec):
+def Prepare(benchmark_spec: bm_spec.BenchmarkSpec):
   """Prepares the VMs and other resources for running the benchmark.
 
   This is a good place to download binaries onto the VMs, create any data files
@@ -67,15 +71,17 @@ def Prepare(benchmark_spec):
     benchmark_spec: The benchmark spec for this sample benchmark.
   """
   vm = benchmark_spec.vms[0]
-  vm.InstallPreprovisionedBenchmarkData(BENCHMARK_NAME, BENCHMARK_DATA,
-                                        vm_util.VM_TMP_DIR)
+  vm.InstallPreprovisionedBenchmarkData(
+      BENCHMARK_NAME, BENCHMARK_DATA, vm_util.VM_TMP_DIR
+  )
 
-  stdout, _ = vm.RemoteCommand('cat %s' % (posixpath.join(
-      vm_util.VM_TMP_DIR, 'preprovisioned_data.txt')))
+  stdout, _ = vm.RemoteCommand(
+      'cat %s' % (posixpath.join(vm_util.VM_TMP_DIR, 'preprovisioned_data.txt'))
+  )
   assert stdout.strip() == '1234567890'
 
 
-def Run(benchmark_spec):
+def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> list[sample.Sample]:
   """Runs the benchmark and returns a dict of performance data.
 
   It must be possible to run the benchmark multiple times after the Prepare
@@ -95,7 +101,7 @@ def Run(benchmark_spec):
   return [sample.Sample('sample_metric', 123.456, 'sec', metadata)]
 
 
-def Cleanup(benchmark_spec):
+def Cleanup(benchmark_spec: bm_spec.BenchmarkSpec):
   """Cleans up after the benchmark completes.
 
   The state of the VMs should be equivalent to the state before Prepare was

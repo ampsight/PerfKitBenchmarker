@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import re
+from typing import Any
 
 from absl import flags
 from perfkitbenchmarker import container_service
@@ -25,6 +26,8 @@ from perfkitbenchmarker import data
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import kubernetes_helper
 from perfkitbenchmarker import provider_info
+from perfkitbenchmarker import virtual_machine
+from perfkitbenchmarker.configs import container_spec as container_spec_lib
 from perfkitbenchmarker.providers.gcp import flags as gcp_flags
 from perfkitbenchmarker.providers.gcp import gce_disk
 from perfkitbenchmarker.providers.gcp import gce_virtual_machine
@@ -34,11 +37,15 @@ import six
 FLAGS = flags.FLAGS
 
 _CONTAINER_REMOTE_BUILD_CONFIG = flags.DEFINE_string(
-    'container_remote_build_config', None,
-    'The YAML or JSON file to use as the build configuration file.')
+    'container_remote_build_config',
+    None,
+    'The YAML or JSON file to use as the build configuration file.',
+)
 
 NVIDIA_DRIVER_SETUP_DAEMON_SET_SCRIPT = 'https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/cos/daemonset-preloaded.yaml'
-NVIDIA_UNRESTRICTED_PERMISSIONS_DAEMON_SET = 'nvidia_unrestricted_permissions_daemonset.yml'
+NVIDIA_UNRESTRICTED_PERMISSIONS_DAEMON_SET = (
+    'nvidia_unrestricted_permissions_daemonset.yml'
+)
 SERVICE_ACCOUNT_PATTERN = r'.*((?<!iam)|{project}.iam).gserviceaccount.com'
 RELEASE_CHANNELS = ['rapid', 'regular', 'stable']
 ONE_HOUR = 60 * 60
@@ -65,12 +72,13 @@ class GoogleContainerRegistry(container_service.BaseContainerRegistry):
     super(GoogleContainerRegistry, self).__init__(registry_spec)
     self.project = self.project or util.GetDefaultProject()
 
-  def GetFullRegistryTag(self, image):
+  def GetFullRegistryTag(self, image: str) -> str:
     """Gets the full tag of the image."""
     region = util.GetMultiRegionFromRegion(util.GetRegionFromZone(self.zone))
     hostname = '{region}.gcr.io'.format(region=region)
     full_tag = '{hostname}/{project}/{name}'.format(
-        hostname=hostname, project=self.project.replace(':', '/'), name=image)
+        hostname=hostname, project=self.project.replace(':', '/'), name=image
+    )
     return full_tag
 
   def Login(self):
@@ -80,7 +88,7 @@ class GoogleContainerRegistry(container_service.BaseContainerRegistry):
     del cmd.flags['zone']
     cmd.Issue()
 
-  def RemoteBuild(self, image):
+  def RemoteBuild(self, image: container_service.ContainerImage):
     """Build the image remotely."""
     if not _CONTAINER_REMOTE_BUILD_CONFIG.value:
       full_tag = self.GetFullRegistryTag(image.name)
@@ -105,25 +113,31 @@ class GkeCluster(container_service.KubernetesCluster):
 
   CLOUD = provider_info.GCP
 
-  def __init__(self, spec):
-    super(GkeCluster, self).__init__(spec)
+  def __init__(self, spec: container_spec_lib.ContainerClusterSpec):
+    super().__init__(spec)
     self.project = spec.vm_spec.project
     self.cluster_version = FLAGS.container_cluster_version
     self.use_application_default_credentials = True
-    self.zones = self.zone and self.zone.split(',')
+    self.zones = (
+        self.default_nodepool.zone and self.default_nodepool.zone.split(',')
+    )
     if not self.zones:
       raise errors.Config.MissingOption(
-          'container_cluster.vm_spec.GCP.zone is required.')
-    elif len(self.zones) == 1 and util.IsRegion(self.zone):
-      self.region = self.zone
+          'container_cluster.vm_spec.GCP.zone is required.'
+      )
+    elif len(self.zones) == 1 and util.IsRegion(self.default_nodepool.zone):
+      self.region = self.default_nodepool.zone
       self.zones = []
-      logging.info("Interpreting zone '%s' as a region", self.zone)
+      logging.info(
+          "Interpreting zone '%s' as a region", self.default_nodepool.zone
+      )
     else:
       self.region = util.GetRegionFromZone(self.zones[0])
     # Update the environment for gcloud commands:
     if gcp_flags.GKE_API_OVERRIDE.value:
       os.environ['CLOUDSDK_API_ENDPOINT_OVERRIDES_CONTAINER'] = (
-          gcp_flags.GKE_API_OVERRIDE.value)
+          gcp_flags.GKE_API_OVERRIDE.value
+      )
 
     self.enable_nccl_fast_socket = False
     if gcp_flags.GKE_NCCL_FAST_SOCKET.value:
@@ -131,9 +145,27 @@ class GkeCluster(container_service.KubernetesCluster):
         self.enable_nccl_fast_socket = True
       else:
         raise errors.Config.InvalidValue(
-            'NCCL fast socket is only supported on secondary node pools.')
+            'NCCL fast socket is only supported on secondary node pools.'
+        )
 
-  def GetResourceMetadata(self):
+  def InitializeNodePoolForCloud(
+      self,
+      vm_config: virtual_machine.BaseVirtualMachine,
+      nodepool_config: container_service.BaseNodePoolConfig,
+  ):
+    nodepool_config.disk_type = vm_config.boot_disk.boot_disk_type
+    nodepool_config.disk_size = vm_config.boot_disk.boot_disk_size
+    nodepool_config.max_local_disks = vm_config.max_local_disks
+    nodepool_config.gpu_type = vm_config.gpu_type
+    nodepool_config.gpu_count = vm_config.gpu_count
+    nodepool_config.threads_per_core = vm_config.threads_per_core
+    nodepool_config.gce_tags = vm_config.gce_tags
+    nodepool_config.min_cpu_platform = vm_config.min_cpu_platform
+    nodepool_config.network = vm_config.network
+    nodepool_config.cpus: int = vm_config.cpus
+    nodepool_config.memory_mib: int = vm_config.memory_mib
+
+  def GetResourceMetadata(self) -> dict[str, Any]:
     """Returns a dict containing metadata about the cluster.
 
     Returns:
@@ -144,20 +176,20 @@ class GkeCluster(container_service.KubernetesCluster):
     if self.cluster_version in RELEASE_CHANNELS:
       result['gke_release_channel'] = self.cluster_version
 
-    result['boot_disk_type'] = self.vm_config.boot_disk_type
-    result['boot_disk_size'] = self.vm_config.boot_disk_size
-    if self.vm_config.max_local_disks:
-      result['gce_local_ssd_count'] = self.vm_config.max_local_disks
+    result['boot_disk_type'] = self.default_nodepool.disk_type
+    result['boot_disk_size'] = self.default_nodepool.disk_size
+    if self.default_nodepool.max_local_disks:
+      result['gce_local_ssd_count'] = self.default_nodepool.max_local_disks
       # TODO(pclay): support NVME when it leaves alpha
       # Also consider moving FLAGS.gce_ssd_interface into the vm_spec.
       result['gce_local_ssd_interface'] = gce_virtual_machine.SCSI
     result['gke_nccl_fast_socket'] = self.enable_nccl_fast_socket
     if 'nccl' in self.nodepools:
-      result['gpu_type'] = self.nodepools['nccl'].vm_config.gpu_type
-      result['gpu_count'] = self.nodepools['nccl'].vm_config.gpu_count
+      result['gpu_type'] = self.nodepools['nccl'].gpu_type
+      result['gpu_count'] = self.nodepools['nccl'].gpu_count
     return result
 
-  def _GcloudCommand(self, *args, **kwargs):
+  def _GcloudCommand(self, *args, **kwargs) -> util.GcloudCommand:
     """Fix zone and region."""
     cmd = util.GcloudCommand(self, *args, **kwargs)
     if len(self.zones) != 1:
@@ -169,14 +201,17 @@ class GkeCluster(container_service.KubernetesCluster):
     """Creates the cluster."""
     cmd = self._GcloudCommand('container', 'clusters', 'create', self.name)
 
-    self._AddNodeParamsToCmd(self.vm_config, self.num_nodes, None,
-                             container_service.DEFAULT_NODEPOOL, cmd)
+    self._AddNodeParamsToCmd(
+        self.default_nodepool,
+        cmd,
+    )
 
     if self.cluster_version:
       if self.cluster_version in RELEASE_CHANNELS:
         if FLAGS.gke_enable_alpha:
           raise errors.Config.InvalidValue(
-              'Kubernetes Alpha is not compatible with release channels')
+              'Kubernetes Alpha is not compatible with release channels'
+          )
         cmd.flags['release-channel'] = self.cluster_version
       else:
         cmd.flags['cluster-version'] = self.cluster_version
@@ -191,23 +226,27 @@ class GkeCluster(container_service.KubernetesCluster):
     # are a GCP managed service account like the GCE default service account,
     # which we can't tell to which project they belong.
     elif re.match(SERVICE_ACCOUNT_PATTERN, user):
-      logging.info('Re-using configured service-account for GKE Cluster: %s',
-                   user)
+      logging.info(
+          'Re-using configured service-account for GKE Cluster: %s', user
+      )
       cmd.flags['service-account'] = user
       self.use_application_default_credentials = False
     else:
       logging.info('Using default GCE service account for GKE cluster')
       cmd.flags['scopes'] = 'cloud-platform'
 
-    if self.min_nodes != self.num_nodes or self.max_nodes != self.num_nodes:
+    if (
+        self.min_nodes != self.default_nodepool.num_nodes
+        or self.max_nodes != self.default_nodepool.num_nodes
+    ):
       cmd.args.append('--enable-autoscaling')
       cmd.flags['max-nodes'] = self.max_nodes
       cmd.flags['min-nodes'] = self.min_nodes
 
     cmd.flags['cluster-ipv4-cidr'] = f'/{_CalculateCidrSize(self.max_nodes)}'
 
-    if self.vm_config.network:
-      cmd.flags['network'] = self.vm_config.network.network_resource.name
+    if self.default_nodepool.network:
+      cmd.flags['network'] = self.default_nodepool.network.network_resource.name
 
     cmd.flags['metadata'] = util.MakeFormattedDefaultTags()
     cmd.args.append('--no-enable-shielded-nodes')
@@ -218,14 +257,16 @@ class GkeCluster(container_service.KubernetesCluster):
   def _CreateNodePools(self):
     """Creates additional nodepools for the cluster, if applicable."""
     for name, nodepool in six.iteritems(self.nodepools):
-      cmd = self._GcloudCommand('container', 'node-pools', 'create', name,
-                                '--cluster', self.name)
+      cmd = self._GcloudCommand(
+          'container', 'node-pools', 'create', name, '--cluster', self.name
+      )
       self._AddNodeParamsToCmd(
-          nodepool.vm_config, nodepool.vm_count, nodepool.sandbox_config,
-          name, cmd)
+          nodepool,
+          cmd,
+      )
       self._IssueResourceCreationCommand(cmd)
 
-  def _IssueResourceCreationCommand(self, cmd):
+  def _IssueResourceCreationCommand(self, cmd: util.GcloudCommand):
     """Issues a command to gcloud to create resources."""
 
     # This command needs a long timeout due to the many minutes it
@@ -236,45 +277,60 @@ class GkeCluster(container_service.KubernetesCluster):
       raise errors.Resource.CreationError(stderr)
 
   def _AddNodeParamsToCmd(
-      self, vm_config, num_nodes, sandbox_config, name, cmd):
+      self,
+      nodepool_config: container_service.BaseNodePoolConfig,
+      cmd: util.GcloudCommand,
+  ):
     """Modifies cmd to include node specific command arguments."""
     # Apply labels to all nodepools.
     cmd.flags['labels'] = util.MakeFormattedDefaultTags()
+    # Allow a long timeout due to the many minutes it can take to provision a
+    # large GPU-accelerated GKE cluster.
+    # Parameter is not documented well but is available in CLI.
+    cmd.flags['timeout'] = ONE_HOUR
 
-    if vm_config.gpu_count:
-      if 'a2-' not in vm_config.machine_type:
+    if nodepool_config.gpu_count:
+      if 'a2-' not in nodepool_config.machine_type:
         cmd.flags['accelerator'] = (
             gce_virtual_machine.GenerateAcceleratorSpecString(
-                vm_config.gpu_type, vm_config.gpu_count))
-    if vm_config.min_cpu_platform:
-      cmd.flags['min-cpu-platform'] = vm_config.min_cpu_platform
+                nodepool_config.gpu_type, nodepool_config.gpu_count
+            )
+        )
 
-    if vm_config.threads_per_core:
+    gce_tags = FLAGS.gce_tags
+    if nodepool_config.gce_tags:
+      gce_tags = nodepool_config.gce_tags
+    if gce_tags:
+      cmd.flags['tags'] = ','.join(gce_tags)
+    if nodepool_config.min_cpu_platform:
+      cmd.flags['min-cpu-platform'] = nodepool_config.min_cpu_platform
+
+    if nodepool_config.threads_per_core:
       # TODO(user): Remove when threads-per-core is available in GA
       cmd.use_alpha_gcloud = True
-      cmd.flags['threads-per-core'] = vm_config.threads_per_core
+      cmd.flags['threads-per-core'] = nodepool_config.threads_per_core
 
-    if vm_config.boot_disk_size:
-      cmd.flags['disk-size'] = vm_config.boot_disk_size
-    if vm_config.boot_disk_type:
-      cmd.flags['disk-type'] = vm_config.boot_disk_type
-    if vm_config.max_local_disks:
+    if nodepool_config.disk_size:
+      cmd.flags['disk-size'] = nodepool_config.disk_size
+    if nodepool_config.disk_type:
+      cmd.flags['disk-type'] = nodepool_config.disk_type
+    if nodepool_config.max_local_disks:
       # TODO(pclay): Switch to local-ssd-volumes which support NVME when it
       # leaves alpha. See
       # https://cloud.google.com/sdk/gcloud/reference/alpha/container/clusters/create
-      cmd.flags['local-ssd-count'] = vm_config.max_local_disks
+      cmd.flags['local-ssd-count'] = nodepool_config.max_local_disks
 
-    cmd.flags['num-nodes'] = num_nodes
-    # vm_config.zone may be split a comma separated list
-    if vm_config.zone:
-      cmd.flags['node-locations'] = vm_config.zone
+    cmd.flags['num-nodes'] = nodepool_config.num_nodes
+    # zone may be split a comma separated list
+    if nodepool_config.zone:
+      cmd.flags['node-locations'] = nodepool_config.zone
 
-    if vm_config.machine_type is None:
+    if nodepool_config.machine_type is None:
       cmd.flags['machine-type'] = 'custom-{0}-{1}'.format(
-          vm_config.cpus,
-          vm_config.memory_mib)
+          nodepool_config.cpus, nodepool_config.memory_mib
+      )
     else:
-      cmd.flags['machine-type'] = vm_config.machine_type
+      cmd.flags['machine-type'] = nodepool_config.machine_type
 
     if FLAGS.gke_enable_gvnic:
       cmd.args.append('--enable-gvnic')
@@ -282,45 +338,48 @@ class GkeCluster(container_service.KubernetesCluster):
       cmd.args.append('--no-enable-gvnic')
     if (
         self.enable_nccl_fast_socket
-        and name != container_service.DEFAULT_NODEPOOL
+        and nodepool_config.name != container_service.DEFAULT_NODEPOOL
     ):
       cmd.args.append('--enable-fast-socket')
 
     if FLAGS.gke_node_system_config is not None:
       cmd.flags['system-config-from-file'] = FLAGS.gke_node_system_config
 
-    if sandbox_config is not None:
-      cmd.flags['sandbox'] = sandbox_config.ToSandboxFlag()
+    if nodepool_config.sandbox_config is not None:
+      cmd.flags['sandbox'] = nodepool_config.sandbox_config.ToSandboxFlag()
 
     # If using a fixed version (or the default) do not enable upgrades.
     if self.cluster_version not in RELEASE_CHANNELS:
       cmd.args.append('--no-enable-autoupgrade')
 
-    cmd.flags['node-labels'] = f'pkb_nodepool={name}'
+    cmd.flags['node-labels'] = f'pkb_nodepool={nodepool_config.name}'
 
   def _PostCreate(self):
     """Acquire cluster authentication."""
     super(GkeCluster, self)._PostCreate()
-    cmd = self._GcloudCommand('container', 'clusters', 'get-credentials',
-                              self.name)
+    cmd = self._GcloudCommand(
+        'container', 'clusters', 'get-credentials', self.name
+    )
     env = os.environ.copy()
     env['KUBECONFIG'] = FLAGS.kubeconfig
     cmd.IssueRetryable(env=env)
 
-    should_install_nvidia_drivers = (
-        self.vm_config.gpu_count or
-        any(pool.vm_config.gpu_count for pool in self.nodepools.values()))
+    should_install_nvidia_drivers = self.default_nodepool.gpu_count or any(
+        pool.gpu_count for pool in self.nodepools.values()
+    )
     if should_install_nvidia_drivers:
       kubernetes_helper.CreateFromFile(NVIDIA_DRIVER_SETUP_DAEMON_SET_SCRIPT)
       kubernetes_helper.CreateFromFile(
-          data.ResourcePath(NVIDIA_UNRESTRICTED_PERMISSIONS_DAEMON_SET))
+          data.ResourcePath(NVIDIA_UNRESTRICTED_PERMISSIONS_DAEMON_SET)
+      )
 
     # GKE does not wait for kube-dns by default
     logging.info('Waiting for kube-dns')
     self.WaitForResource(
         'deployment/kube-dns',
         condition_name='Available',
-        namespace='kube-system')
+        namespace='kube-system',
+    )
 
   def _GetInstanceGroups(self):
     cmd = self._GcloudCommand('container', 'node-pools', 'list')
@@ -367,3 +426,14 @@ class GkeCluster(container_service.KubernetesCluster):
     # https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/gce-pd-csi-driver
     # PD-SSD
     return 'premium-rwo'
+
+  def ResizeNodePool(
+      self, new_size: int, node_pool: str = container_service.DEFAULT_NODEPOOL
+  ):
+    """Change the number of nodes in the node pool."""
+    cmd = self._GcloudCommand('container', 'clusters', 'resize', self.name)
+    cmd.flags['num-nodes'] = new_size
+    # updates default node pool by default
+    if node_pool != container_service.DEFAULT_NODEPOOL:
+      cmd.flags['node-pool'] = node_pool
+    cmd.Issue()

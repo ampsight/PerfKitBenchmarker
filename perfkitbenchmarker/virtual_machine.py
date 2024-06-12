@@ -21,6 +21,7 @@ operate on the VM: boot, shutdown, etc.
 
 import abc
 import contextlib
+import copy
 import enum
 import logging
 import os.path
@@ -34,13 +35,15 @@ from absl import flags
 import jinja2
 from perfkitbenchmarker import background_workload
 from perfkitbenchmarker import benchmark_lookup
-from perfkitbenchmarker import context as pkb_context
 from perfkitbenchmarker import data
 from perfkitbenchmarker import disk
+from perfkitbenchmarker import disk_strategies
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import events
+from perfkitbenchmarker import flags as pkb_flags
 from perfkitbenchmarker import os_types
 from perfkitbenchmarker import package_lookup
+from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.configs import option_decoders
@@ -50,6 +53,7 @@ import six
 FLAGS = flags.FLAGS
 DEFAULT_USERNAME = 'perfkit'
 QUOTA_EXCEEDED_MESSAGE = 'Creation failed due to quota exceeded: '
+PREPROVISIONED_DATA_TIMEOUT = 600
 
 
 def ValidateVmMetadataFlag(options_list):
@@ -58,8 +62,7 @@ def ValidateVmMetadataFlag(options_list):
   All provided options must be in the form of key:value.
 
   Args:
-    options_list: A list of strings parsed from the provided value for the
-      flag.
+    options_list: A list of strings parsed from the provided value for the flag.
 
   Returns:
     True if the list of options provided as the value for the flag meets
@@ -72,50 +75,66 @@ def ValidateVmMetadataFlag(options_list):
   for option in options_list:
     if ':' not in option[1:-1]:
       raise flags.ValidationError(
-          '"%s" not in expected key:value format' % option)
+          '"%s" not in expected key:value format' % option
+      )
   return True
+
 
 # vm_metadata flag name
 VM_METADATA = 'vm_metadata'
 
 flags.DEFINE_boolean(
-    'dedicated_hosts', False,
+    'dedicated_hosts',
+    False,
     'If True, use hosts that only have VMs from the same '
-    'benchmark running on them.')
+    'benchmark running on them.',
+)
 flags.DEFINE_integer(
-    'num_vms_per_host', None,
+    'num_vms_per_host',
+    None,
     'The number of VMs per dedicated host. If None, VMs will be packed on a '
     'single host until no more can be packed at which point a new host will '
-    'be created.')
+    'be created.',
+)
 flags.DEFINE_integer(
-    'num_cpus_override', None,
+    'num_cpus_override',
+    None,
     'Rather than detecting the number of CPUs present on the machine, use this '
     'value if set. Some benchmarks will use this number to automatically '
     'scale their configurations; this can be used as a method to control '
     'benchmark scaling. It will also change the num_cpus metadata '
-    'published along with the benchmark data.')
-flags.DEFINE_list(VM_METADATA, [], 'Metadata to add to the vm. It expects'
-                  'key:value pairs.')
+    'published along with the benchmark data.',
+)
+flags.DEFINE_list(
+    VM_METADATA, [], 'Metadata to add to the vm. It expectskey:value pairs.'
+)
 flags.register_validator(VM_METADATA, ValidateVmMetadataFlag)
 flags.DEFINE_bool(
-    'skip_firewall_rules', False,
+    'skip_firewall_rules',
+    False,
     'If set, this run will not create firewall rules. This is useful if the '
     'user project already has all of the firewall rules in place and/or '
-    'creating new ones is expensive')
+    'creating new ones is expensive',
+)
 flags.DEFINE_bool(
-    'preprovision_ignore_checksum', False,
+    'preprovision_ignore_checksum',
+    False,
     'Ignore checksum verification for preprovisioned data. '
-    'Not recommended, please use with caution')
+    'Not recommended, please use with caution',
+)
 flags.DEFINE_boolean(
-    'connect_via_internal_ip', False,
+    'connect_via_internal_ip',
+    False,
     'Whether to use internal IP addresses for running commands on and pushing '
     'data to VMs. By default, PKB interacts with VMs using external IP '
-    'addresses.')
+    'addresses.',
+)
 _ASSIGN_EXTERNAL_IP = flags.DEFINE_boolean(
     'assign_external_ip',
     True,
     'If True, an external (public) IP will be created for VMs. '
-    'If False, --connect_via_internal_ip may also be needed.')
+    'If False, --connect_via_internal_ip may also be needed.',
+)
 flags.DEFINE_string(
     'boot_startup_script',
     None,
@@ -124,6 +143,22 @@ flags.DEFINE_string(
         'Requires provider support, only implemented for Linux VMs '
         'on GCP, AWS, Azure for now.'
     ),
+)
+_REQUIRED_CPU_VERSION = flags.DEFINE_string(
+    'required_cpu_version',
+    None,
+    'The required CPU version. Benchmark will fail if CPU does not match.'
+    ' The version is defined as the fields in /proc/cpuinfo that define the cpu'
+    ' version joined by underscores. On x86, the fields are (Vendor ID,'
+    ' cpu family, Model, Stepping) (e.g. GenuineIntel_6_143_8). On ARM, the'
+    ' fields are (CPU implementer, CPU architecture, CPU variant, CPU part).'
+    ' This is only useful when a machine type comprises of multiple CPU'
+    ' versions.',
+)
+_REQUIRED_CPU_VERSION_RETRIES = flags.DEFINE_integer(
+    'required_cpu_version_retries',
+    5,
+    'The number of times to retry if the required CPU version does not match.',
 )
 
 
@@ -146,12 +181,17 @@ _BOOT_COMPLETION_IP_SUBSET = flags.DEFINE_enum_class(
 )
 # Deprecated. Use connect_via_internal_ip.
 flags.DEFINE_boolean(
-    'ssh_via_internal_ip', False,
+    'ssh_via_internal_ip',
+    False,
     'Whether to use internal IP addresses for running commands on and pushing '
     'data to VMs. By default, PKB interacts with VMs using external IP '
-    'addresses.')
-flags.DEFINE_boolean('retry_on_rate_limited', True,
-                     'Whether to retry commands when rate limited.')
+    'addresses.',
+)
+flags.DEFINE_boolean(
+    'retry_on_rate_limited',
+    True,
+    'Whether to retry commands when rate limited.',
+)
 
 GPU_K80 = 'k80'
 GPU_P100 = 'p100'
@@ -178,24 +218,54 @@ CPUARCH_X86_64 = 'x86_64'
 CPUARCH_AARCH64 = 'aarch64'
 
 flags.DEFINE_integer(
-    'gpu_count', None,
-    'Number of gpus to attach to the VM. Requires gpu_type to be '
-    'specified.')
+    'gpu_count',
+    None,
+    'Number of gpus to attach to the VM. Requires gpu_type to be specified.',
+)
 flags.DEFINE_enum(
-    'gpu_type', None, VALID_GPU_TYPES,
-    'Type of gpus to attach to the VM. Requires gpu_count to be '
-    'specified.')
+    'gpu_type',
+    None,
+    VALID_GPU_TYPES,
+    'Type of gpus to attach to the VM. Requires gpu_count to be specified.',
+)
 
 
-def GetVmSpecClass(cloud):
-  """Returns the VmSpec class corresponding to 'cloud'."""
-  return spec.GetSpecClass(BaseVmSpec, CLOUD=cloud)
+def GetVmSpecClass(cloud: str, platform: Optional[str] = None):
+  """Returns the VmSpec class with corresponding attributes.
+
+  Args:
+    cloud: The cloud being used.
+    platform: The vm platform being used (see enum above). If not provided,
+      defaults to flag value.
+
+  Returns:
+    A child of BaseVmSpec with the corresponding attributes.
+  """
+  if platform is None:
+    platform = provider_info.VM_PLATFORM.value
+  return spec.GetSpecClass(BaseVmSpec, CLOUD=cloud, PLATFORM=platform)
 
 
-def GetVmClass(cloud, os_type):
-  """Returns the VM class corresponding to 'cloud' and 'os_type'."""
-  return resource.GetResourceClass(BaseVirtualMachine,
-                                   CLOUD=cloud, OS_TYPE=os_type)
+def GetVmClass(cloud: str, os_type: str, platform: Optional[str] = None):
+  """Returns the VM class with corresponding attributes.
+
+  Args:
+    cloud: The cloud being used.
+    os_type: The os type of the VM.
+    platform: The vm platform being used (see enum above). If not provided,
+      defaults to flag value.
+
+  Returns:
+    A child of BaseVirtualMachine with the corresponding attributes.
+  """
+  if platform is None:
+    platform = provider_info.VM_PLATFORM.value
+  return resource.GetResourceClass(
+      BaseVirtualMachine,
+      CLOUD=cloud,
+      OS_TYPE=os_type,
+      PLATFORM=platform,
+  )
 
 
 class BaseVmSpec(spec.BaseSpec):
@@ -209,14 +279,14 @@ class BaseVmSpec(spec.BaseSpec):
     gpu_type: None or string. Type of gpus to attach to the VM.
     image: The disk image to boot from.
     assign_external_ip: Bool.  If true, create an external (public) IP.
-    install_packages: If false, no packages will be installed. This is
-        useful if benchmark dependencies have already been installed.
-    background_cpu_threads: The number of threads of background CPU usage
-        while running the benchmark.
+    install_packages: If false, no packages will be installed. This is useful if
+      benchmark dependencies have already been installed.
+    background_cpu_threads: The number of threads of background CPU usage while
+      running the benchmark.
     background_network_mbits_per_sec: The number of megabits per second of
-        background network traffic during the benchmark.
-    background_network_ip_type: The IP address type (INTERNAL or
-        EXTERNAL) to use for generating background network workload.
+      background network traffic during the benchmark.
+    background_network_ip_type: The IP address type (INTERNAL or EXTERNAL) to
+      use for generating background network workload.
     disable_interrupt_moderation: If true, disables interrupt moderation.
     disable_rss: = If true, disables rss.
     boot_startup_script: Startup script to run during boot.
@@ -224,12 +294,14 @@ class BaseVmSpec(spec.BaseSpec):
   """
 
   SPEC_TYPE = 'BaseVmSpec'
+  SPEC_ATTRS = ['CLOUD', 'PLATFORM']
   CLOUD = None
+  PLATFORM = provider_info.DEFAULT_VM_PLATFORM
 
   def __init__(self, *args, **kwargs):
     self.zone = None
     self.cidr = None
-    self.machine_type = None
+    self.machine_type: str
     self.gpu_count = None
     self.gpu_type = None
     self.image = None
@@ -242,6 +314,7 @@ class BaseVmSpec(spec.BaseSpec):
     self.disable_rss = None
     self.vm_metadata: Dict[str, Any] = None
     self.boot_startup_script: str = None
+    self.internal_ip: str
     super(BaseVmSpec, self).__init__(*args, **kwargs)
 
   @classmethod
@@ -252,9 +325,9 @@ class BaseVmSpec(spec.BaseSpec):
 
     Args:
       config_values: dict mapping config option names to provided values. Is
-          modified by this function.
+        modified by this function.
       flag_values: flags.FlagValues. Runtime flags that may override the
-          provided config values.
+        provided config values.
 
     Returns:
       dict mapping config option names to values derived from the config
@@ -269,13 +342,16 @@ class BaseVmSpec(spec.BaseSpec):
       config_values['machine_type'] = flag_values.machine_type
     if flag_values['background_cpu_threads'].present:
       config_values['background_cpu_threads'] = (
-          flag_values.background_cpu_threads)
+          flag_values.background_cpu_threads
+      )
     if flag_values['background_network_mbits_per_sec'].present:
       config_values['background_network_mbits_per_sec'] = (
-          flag_values.background_network_mbits_per_sec)
+          flag_values.background_network_mbits_per_sec
+      )
     if flag_values['background_network_ip_type'].present:
       config_values['background_network_ip_type'] = (
-          flag_values.background_network_ip_type)
+          flag_values.background_network_ip_type
+      )
     if flag_values['dedicated_hosts'].present:
       config_values['use_dedicated_host'] = flag_values.dedicated_hosts
     if flag_values['num_vms_per_host'].present:
@@ -288,7 +364,8 @@ class BaseVmSpec(spec.BaseSpec):
       config_values['assign_external_ip'] = flag_values.assign_external_ip
     if flag_values['disable_interrupt_moderation'].present:
       config_values['disable_interrupt_moderation'] = (
-          flag_values.disable_interrupt_moderation)
+          flag_values.disable_interrupt_moderation
+      )
     if flag_values['disable_rss'].present:
       config_values['disable_rss'] = flag_values.disable_rss
     if flag_values['vm_metadata'].present:
@@ -298,10 +375,12 @@ class BaseVmSpec(spec.BaseSpec):
 
     if 'gpu_count' in config_values and 'gpu_type' not in config_values:
       raise errors.Config.MissingOption(
-          'gpu_type must be specified if gpu_count is set')
+          'gpu_type must be specified if gpu_count is set'
+      )
     if 'gpu_type' in config_values and 'gpu_count' not in config_values:
       raise errors.Config.MissingOption(
-          'gpu_count must be specified if gpu_type is set')
+          'gpu_count must be specified if gpu_type is set'
+      )
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -317,43 +396,78 @@ class BaseVmSpec(spec.BaseSpec):
     """
     result = super(BaseVmSpec, cls)._GetOptionDecoderConstructions()
     result.update({
-        'disable_interrupt_moderation': (option_decoders.BooleanDecoder, {
-            'default': False}),
+        'disable_interrupt_moderation': (
+            option_decoders.BooleanDecoder,
+            {'default': False},
+        ),
         'disable_rss': (option_decoders.BooleanDecoder, {'default': False}),
-        'image': (option_decoders.StringDecoder, {'none_ok': True,
-                                                  'default': None}),
-        'install_packages': (option_decoders.BooleanDecoder, {'default': True}),
-        'machine_type': (option_decoders.StringDecoder, {'none_ok': True,
-                                                         'default': None}),
+        'image': (
+            option_decoders.StringDecoder,
+            {'none_ok': True, 'default': None},
+        ),
+        'install_packages': (
+            option_decoders.BooleanDecoder,
+            {'default': True},
+        ),
+        'machine_type': (
+            option_decoders.StringDecoder,
+            {'none_ok': True, 'default': None},
+        ),
         'assign_external_ip': (
             option_decoders.BooleanDecoder,
             {'default': True},
         ),
-        'gpu_type': (option_decoders.EnumDecoder, {
-            'valid_values': VALID_GPU_TYPES,
-            'default': None}),
-        'gpu_count': (option_decoders.IntDecoder, {'min': 1, 'default': None}),
-        'zone': (option_decoders.StringDecoder, {'none_ok': True,
-                                                 'default': None}),
-        'cidr': (option_decoders.StringDecoder, {'none_ok': True,
-                                                 'default': None}),
-        'use_dedicated_host': (option_decoders.BooleanDecoder,
-                               {'default': False}),
-        'num_vms_per_host': (option_decoders.IntDecoder,
-                             {'default': None}),
-        'background_network_mbits_per_sec': (option_decoders.IntDecoder, {
-            'none_ok': True, 'default': None}),
-        'background_network_ip_type': (option_decoders.EnumDecoder, {
-            'default': vm_util.IpAddressSubset.EXTERNAL,
-            'valid_values': [vm_util.IpAddressSubset.EXTERNAL,
-                             vm_util.IpAddressSubset.INTERNAL]}),
-        'background_cpu_threads': (option_decoders.IntDecoder, {
-            'none_ok': True, 'default': None}),
-        'boot_startup_script': (option_decoders.StringDecoder, {
-            'none_ok': True, 'default': None}),
-        'vm_metadata': (option_decoders.ListDecoder, {
-            'item_decoder': option_decoders.StringDecoder(),
-            'default': []})})
+        'gpu_type': (
+            option_decoders.EnumDecoder,
+            {'valid_values': VALID_GPU_TYPES, 'default': None},
+        ),
+        'gpu_count': (
+            option_decoders.IntDecoder,
+            {'min': 1, 'default': None},
+        ),
+        'zone': (
+            option_decoders.StringDecoder,
+            {'none_ok': True, 'default': None},
+        ),
+        'cidr': (
+            option_decoders.StringDecoder,
+            {'none_ok': True, 'default': None},
+        ),
+        'use_dedicated_host': (
+            option_decoders.BooleanDecoder,
+            {'default': False},
+        ),
+        'num_vms_per_host': (option_decoders.IntDecoder, {'default': None}),
+        'background_network_mbits_per_sec': (
+            option_decoders.IntDecoder,
+            {'none_ok': True, 'default': None},
+        ),
+        'background_network_ip_type': (
+            option_decoders.EnumDecoder,
+            {
+                'default': vm_util.IpAddressSubset.EXTERNAL,
+                'valid_values': [
+                    vm_util.IpAddressSubset.EXTERNAL,
+                    vm_util.IpAddressSubset.INTERNAL,
+                ],
+            },
+        ),
+        'background_cpu_threads': (
+            option_decoders.IntDecoder,
+            {'none_ok': True, 'default': None},
+        ),
+        'boot_startup_script': (
+            option_decoders.StringDecoder,
+            {'none_ok': True, 'default': None},
+        ),
+        'vm_metadata': (
+            option_decoders.ListDecoder,
+            {
+                'item_decoder': option_decoders.StringDecoder(),
+                'default': [],
+            },
+        ),
+    })
     return result
 
 
@@ -367,9 +481,10 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
   Attributes:
     bootable_time: The time when the VM finished booting.
     hostname: The VM's hostname.
-    remote_access_ports: A list of ports which must be opened on the firewall
-        in order to access the VM.
+    remote_access_ports: A list of ports which must be opened on the firewall in
+      order to access the VM.
   """
+
   # Represents whether the VM type can be (cleanly) rebooted. Should be false
   # for a class if rebooting causes issues, e.g. for KubernetesVirtualMachine
   # needing to reboot often indicates a design problem since restarting a
@@ -385,7 +500,7 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
   user_name: str  # mixed from BaseVirtualMachine
   disable_interrupt_moderation: str  # mixed from BaseVirtualMachine
   disable_rss: str  # mixed from BaseVirtualMachine
-  num_disable_cpus: str  # mixed from BaseVirtualMachine
+  num_disable_cpus: int  # mixed from BaseVirtualMachine
   ip_address: str  # mixed from BaseVirtualMachine
   internal_ip: str  # mixed from BaseVirtualMachine
   can_connect_via_internal_ip: bool  # mixed from BaseVirtualMachine
@@ -412,14 +527,14 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     # Cached values
     self._reachable = {}
     self._total_memory_kb = None
-    self._num_cpus = None
+    self.num_cpus: int = None
     self._is_smt_enabled = None
     # Update to Json type if ever available:
     # https://github.com/python/typing/issues/182
     self.os_metadata: Dict[str, Union[str, int, list[str]]] = {}
-    assert type(
-        self).BASE_OS_TYPE in os_types.BASE_OS_TYPES, '%s is not in %s' % (
-            type(self).BASE_OS_TYPE, os_types.BASE_OS_TYPES)
+    assert (
+        type(self).BASE_OS_TYPE in os_types.BASE_OS_TYPES
+    ), '%s is not in %s' % (type(self).BASE_OS_TYPE, os_types.BASE_OS_TYPES)
 
   @property
   @classmethod
@@ -441,16 +556,12 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     """
     return self.os_metadata
 
-  def CreateRamDisk(self, disk_spec):
-    """Create and mount Ram disk."""
-    raise NotImplementedError()
-
   def RemoteCommand(
       self,
       command: str,
       ignore_failure: bool = False,
       timeout: Optional[float] = None,
-      **kwargs
+      **kwargs,
   ) -> Tuple[str, str]:
     """Runs a command on the VM.
 
@@ -460,8 +571,8 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     Args:
       command: A valid bash command.
       ignore_failure: Ignore any failure if set to true.
-      timeout: The time to wait in seconds for the command before exiting.
-          None means no timeout.
+      timeout: The time to wait in seconds for the command before exiting. None
+        means no timeout.
       **kwargs: Additional command arguments.
 
     Returns:
@@ -521,7 +632,8 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     """
     if not self.IS_REBOOTABLE:
       raise errors.VirtualMachine.VirtualMachineError(
-          "Trying to reboot a VM that isn't rebootable.")
+          "Trying to reboot a VM that isn't rebootable."
+      )
 
     vm_bootable_time = None
 
@@ -682,8 +794,7 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     raise NotImplementedError()
 
   def VMLastBootTime(self):
-    """Returns the time the VM was last rebooted as reported by the VM.
-    """
+    """Returns the time the VM was last rebooted as reported by the VM."""
     raise NotImplementedError()
 
   def OnStartup(self):
@@ -694,7 +805,16 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     events.on_vm_startup.send(vm=self)
     # Resets the cached SMT enabled status and number cpus value.
     self._is_smt_enabled = None
-    self._num_cpus = None
+    self.num_cpus = None
+
+  def RecordAdditionalMetadata(self):
+    """After the VM has been prepared, store VM metadata."""
+    # Skip metadata capture if the VM lacks a boot time, indicating that prior
+    # VM connection attempts failed.
+    if not self.bootable_time:
+      return
+    if self.num_cpus is None:
+      self.num_cpus = self._GetNumCpus()
 
   def PrepareVMEnvironment(self):
     """Performs any necessary setup on the VM specific to the OS.
@@ -744,8 +864,8 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
 
     Args:
       source_path: The location of the file or directory on the LOCAL machine.
-      remote_path: The destination of the file on the REMOTE machine, default
-          is the home directory.
+      remote_path: The destination of the file on the REMOTE machine, default is
+        the home directory.
     """
     self.RemoteCopy(source_path, remote_path)
 
@@ -754,9 +874,9 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
 
     Args:
       local_path: string. The destination path of the file or directory on the
-          local machine.
+        local machine.
       remote_path: string. The source path of the file or directory on the
-          remote machine.
+        remote machine.
     """
     self.RemoteCopy(local_path, remote_path, copy_to=False)
 
@@ -768,6 +888,7 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
       remote_path: The destination for 'data_file' on the VM. If not specified,
         the file will be placed in the user's home directory.
       should_double_copy: Indicates whether to first copy to the home directory
+
     Raises:
       perfkitbenchmarker.data.ResourceNotFound: if 'data_file' does not exist.
     """
@@ -775,7 +896,7 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     if should_double_copy:
       home_file_path = '~/' + data_file
       self.PushFile(file_path, home_file_path)
-      copy_cmd = (' '.join(['cp', home_file_path, remote_path]))
+      copy_cmd = ' '.join(['cp', home_file_path, remote_path])
       self.RemoteCommand(copy_cmd)
     else:
       self.PushFile(file_path, remote_path)
@@ -803,8 +924,9 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     template = environment.from_string(template_contents)
     prefix = 'pkb-' + os.path.basename(template_path)
 
-    with vm_util.NamedTemporaryFile(prefix=prefix, dir=vm_util.GetTempDir(),
-                                    delete=False, mode='w') as tf:
+    with vm_util.NamedTemporaryFile(
+        prefix=prefix, dir=vm_util.GetTempDir(), delete=False, mode='w'
+    ) as tf:
       tf.write(template.render(vm=self, **context))
       tf.close()
       self.RemoteCopy(tf.name, remote_path)
@@ -839,6 +961,10 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
 
     return scratch_disk
 
+  def PrepareScratchDisk(self, scratch_disk, disk_spec):
+    """Expose internal prepare scratch disk."""
+    self._PrepareScratchDisk(scratch_disk, disk_spec)
+
   def _PrepareScratchDisk(self, scratch_disk, disk_spec):
     """Helper method to format and mount scratch disk.
 
@@ -847,17 +973,6 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
       disk_spec: The BaseDiskSpec object corresponding to the disk.
     """
     raise NotImplementedError()
-
-  @property
-  def num_cpus(self):
-    """Gets the number of CPUs on the VM.
-
-    Returns:
-      The number of CPUs on the VM.
-    """
-    if self._num_cpus is None:
-      self._num_cpus = self._GetNumCpus()
-    return self._num_cpus
 
   def NumCpusForBenchmark(self, report_only_physical_cpus=False):
     """Gets the number of CPUs for benchmark configuration purposes.
@@ -871,8 +986,8 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     disabled.
 
     Args:
-      report_only_physical_cpus: Whether to report only the physical
-      (non-SMT) CPUs.  Default is to report all vCPUs.
+      report_only_physical_cpus: Whether to report only the physical (non-SMT)
+        CPUs.  Default is to report all vCPUs.
 
     Returns:
       The number of CPUs for benchmark configuration purposes.
@@ -990,8 +1105,9 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     """
     raise NotImplementedError()
 
-  def CheckPreprovisionedData(self, install_path, module_name, filename,
-                              expected_sha256):
+  def CheckPreprovisionedData(
+      self, install_path, module_name, filename, expected_sha256
+  ):
     """Checks preprovisioned data for a checksum.
 
     Checks the expected 256sum against the actual sha256sum. Called after the
@@ -1001,7 +1117,7 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
 
     Args:
       install_path: The install path on this VM. The benchmark is installed at
-          this path in a subdirectory of the benchmark name.
+        this path in a subdirectory of the benchmark name.
       module_name: Name of the benchmark associated with this data file.
       filename: The name of the file that was downloaded.
       expected_sha256: The expected sha256 checksum value.
@@ -1011,26 +1127,28 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
       raise errors.Setup.BadPreprovisionedDataError(
           'Invalid sha256sum for %s/%s: %s (actual) != %s (expected). Might '
           'want to run using --preprovision_ignore_checksum '
-          '(not recommended).' % (
-              module_name, filename, actual_sha256, expected_sha256))
+          '(not recommended).'
+          % (module_name, filename, actual_sha256, expected_sha256)
+      )
 
   def TestConnectRemoteAccessPort(self, port=None, socket_timeout=0.5):
     """Tries to connect to remote access port and throw if it fails.
 
     Args:
-      port: Integer of the port to connect to. Defaults to
-          the default remote connection port of the VM.
+      port: Integer of the port to connect to. Defaults to the default remote
+        connection port of the VM.
       socket_timeout: The number of seconds to wait on the socket before failing
-          and retrying. If this is too low, the connection may never succeed. If
-          this is too high it will add latency (because the current connection
-          may fail after a time that a new connection would succeed).
-          Defaults to 500ms.
+        and retrying. If this is too low, the connection may never succeed. If
+        this is too high it will add latency (because the current connection may
+        fail after a time that a new connection would succeed). Defaults to
+        500ms.
     """
     if not port:
       port = self.primary_remote_access_port
     # TODO(user): refactor to reuse sockets?
-    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) \
-        as sock:
+    with contextlib.closing(
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ) as sock:
       # Before the IP is reachable the socket times out (and throws). After that
       # it throws immediately.
       sock.settimeout(socket_timeout)  # seconds
@@ -1047,27 +1165,14 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     """Whether SMT is enabled on the vm."""
     raise NotImplementedError()
 
-  def _GetNfsService(self):
-    """Returns the NfsService created in the benchmark spec.
-
-    Before calling this method check that the disk.disk_type is equal to
-    disk.NFS or else an exception will be raised.
-
-    Returns:
-      The nfs_service.BaseNfsService service for this cloud.
-
-    Raises:
-      CreationError: If no NFS service was created.
-    """
-    nfs = getattr(pkb_context.GetThreadBenchmarkSpec(), 'nfs_service')
-    if nfs is None:
-      raise errors.Resource.CreationError('No NFS Service created')
-    return nfs
-
   # TODO(pclay): Implement on Windows, make abstract and non Optional
   @property
   def cpu_arch(self) -> Optional[str]:
     """The basic CPU architecture of the VM."""
+    return None
+
+  def GetCPUVersion(self) -> Optional[str]:
+    """Get the CPU version of the VM."""
     return None
 
 
@@ -1085,7 +1190,9 @@ class DeprecatedOsMixin(BaseOsMixin):
     assert self.OS_TYPE
     assert self.END_OF_LIFE
     warning = "os_type '%s' is deprecated and will be removed after %s." % (
-        self.OS_TYPE, self.END_OF_LIFE)
+        self.OS_TYPE,
+        self.END_OF_LIFE,
+    )
     if self.ALTERNATIVE_OS:
       warning += " Use '%s' instead." % self.ALTERNATIVE_OS
     logging.warning(warning)
@@ -1117,8 +1224,8 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     scratch_disks: list of BaseDisk objects. Scratch disks attached to the VM.
     max_local_disks: The number of local disks on the VM that can be used as
       scratch disks or that can be striped together.
-    background_cpu_threads: The number of threads of background CPU usage
-      while running the benchmark.
+    background_cpu_threads: The number of threads of background CPU usage while
+      running the benchmark.
     background_network_mbits_per_sec: Number of mbits/sec of background network
       usage while running the benchmark.
     background_network_ip_type: Type of IP address to use for generating
@@ -1133,7 +1240,9 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
   is_static = False
 
   RESOURCE_TYPE = 'BaseVirtualMachine'
-  REQUIRED_ATTRS = ['CLOUD', 'OS_TYPE']
+  REQUIRED_ATTRS = ['CLOUD', 'OS_TYPE', 'PLATFORM']
+  # TODO(user): Define this value in all individual children.
+  PLATFORM = provider_info.DEFAULT_VM_PLATFORM
 
   _instance_counter_lock = threading.Lock()
   _instance_counter = 0
@@ -1158,8 +1267,9 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     self.gpu_type = vm_spec.gpu_type
     self.image = vm_spec.image
     self.install_packages = vm_spec.install_packages
-    self.can_connect_via_internal_ip = (FLAGS.ssh_via_internal_ip
-                                        or FLAGS.connect_via_internal_ip)
+    self.can_connect_via_internal_ip = (
+        FLAGS.ssh_via_internal_ip or FLAGS.connect_via_internal_ip
+    )
     self.boot_completion_ip_subset = _BOOT_COMPLETION_IP_SUBSET.value
     self.assign_external_ip = vm_spec.assign_external_ip
     self.ip_address = None
@@ -1175,7 +1285,8 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     self.remote_disk_counter = 0
     self.background_cpu_threads = vm_spec.background_cpu_threads
     self.background_network_mbits_per_sec = (
-        vm_spec.background_network_mbits_per_sec)
+        vm_spec.background_network_mbits_per_sec
+    )
     self.background_network_ip_type = vm_spec.background_network_ip_type
     self.use_dedicated_host = None
     self.num_vms_per_host = None
@@ -1190,13 +1301,15 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     self.vm_group = None
     self.id = None
     self.is_aarch64 = False
+    self.cpu_version = None
     self.create_operation_name = None
     self.create_return_time = None
     self.is_running_time = None
     self.boot_startup_script = vm_spec.boot_startup_script
     if self.OS_TYPE == os_types.CORE_OS and self.boot_startup_script:
       raise errors.Setup.InvalidConfigurationError(
-          'Startup script are not supported on CoreOS.')
+          'Startup script are not supported on CoreOS.'
+      )
 
   @property
   @classmethod
@@ -1206,7 +1319,8 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
 
   def __repr__(self):
     return '<BaseVirtualMachine [ip={0}, internal_ip={1}]>'.format(
-        self.ip_address, self.internal_ip)
+        self.ip_address, self.internal_ip
+    )
 
   def __str__(self):
     if self.ip_address:
@@ -1218,7 +1332,8 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     if not self.created:
       raise errors.VirtualMachine.VirtualMachineError(
           'VM was not properly created, but PKB is attempting to connect to '
-          'it anyways. Caller should guard against VM not being created.')
+          'it anyways. Caller should guard against VM not being created.'
+      )
     if self.can_connect_via_internal_ip:
       return self.internal_ip
     if not self.ip_address:
@@ -1235,6 +1350,45 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     elif self.internal_ip:
       return [self.internal_ip]
     return []
+
+  def SetDiskSpec(self, disk_spec, disk_count):
+    """Set Disk Specs of the current VM."""
+    # This method will be depreciate soon.
+    if disk_spec.disk_type == disk.LOCAL and disk_count is None:
+      disk_count = self.max_local_disks
+    self.disk_specs = [copy.copy(disk_spec) for _ in range(disk_count)]
+    # In the event that we need to create multiple disks from the same
+    # DiskSpec, we need to ensure that they have different mount points.
+    if disk_count > 1 and disk_spec.mount_point:
+      for i, vm_disk_spec in enumerate(self.disk_specs):
+        vm_disk_spec.mount_point += str(i)
+
+  def SetupAllScratchDisks(self):
+    """Set up all scratch disks of the current VM."""
+    # This method will be depreciate soon.
+    # Prepare vm scratch disks:
+    if any((spec.disk_type == disk.RAM for spec in self.disk_specs)):
+      disk_strategies.SetUpRamDiskStrategy(self, self.disk_specs[0]).SetUpDisk()
+      return
+    if any((spec.disk_type == disk.NFS for spec in self.disk_specs)):
+      disk_strategies.SetUpNFSDiskStrategy(self, self.disk_specs[0]).SetUpDisk()
+      return
+
+    if any((spec.disk_type == disk.SMB for spec in self.disk_specs)):
+      disk_strategies.SetUpSMBDiskStrategy(self, self.disk_specs[0]).SetUpDisk()
+      return
+
+    if any((spec.disk_type == disk.LOCAL for spec in self.disk_specs)):
+      self.SetupLocalDisks()
+
+    for disk_spec_id, disk_spec in enumerate(self.disk_specs):
+      self.CreateScratchDisk(disk_spec_id, disk_spec)
+      # TODO(user): Simplify disk logic.
+      if disk_spec.num_striped_disks > 1:
+        # scratch disks has already been created and striped together.
+        break
+    # This must come after Scratch Disk creation to support the
+    # Containerized VM case
 
   def CreateScratchDisk(self, disk_spec_id, disk_spec):
     """Create a VM's scratch disk.
@@ -1257,15 +1411,65 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
 
     Args:
       disk_num: The number of the disk to mount.
+
     Returns:
       The mounted disk directory.
-
     """
     if disk_num >= len(self.scratch_disks):
       raise errors.Error(
-          'GetScratchDir(disk_num=%s) is invalid, max disk_num is %s' % (
-              disk_num, len(self.scratch_disks)))
+          'GetScratchDir(disk_num=%s) is invalid, max disk_num is %s'
+          % (disk_num, len(self.scratch_disks))
+      )
     return self.scratch_disks[disk_num].mount_point
+
+  def CreateAndBoot(self):
+    """Creates a single VM and waits for boot to complete.
+
+    This is done repeatedly to get --required_cpu_version if it is set.
+    """
+
+    def CreateAndBootOnce():
+      self.Create()
+      logging.info('VM: %s (%s)', self.ip_address, self.internal_ip)
+      logging.info('Waiting for boot completion.')
+      self.AllowRemoteAccessPorts()
+      self.WaitForBootCompletion()
+      self.cpu_version = self.GetCPUVersion()
+      if (
+          _REQUIRED_CPU_VERSION.value
+          and _REQUIRED_CPU_VERSION.value != self.cpu_version
+      ):
+        self.Delete()
+        raise errors.Resource.RetryableCreationError(
+            f'Guest arch {self.cpu_version} is not enforced guest arch'
+            f' {_REQUIRED_CPU_VERSION.value}. Deleting VM and scratch disk and'
+            ' recreating.',
+        )
+
+    try:
+      vm_util.Retry(
+          max_retries=_REQUIRED_CPU_VERSION_RETRIES.value,
+          retryable_exceptions=errors.Resource.RetryableCreationError,
+      )(CreateAndBootOnce)()
+    except vm_util.RetriesExceededRetryError as exc:
+      raise errors.Benchmarks.InsufficientCapacityCloudFailure(
+          f'{_REQUIRED_CPU_VERSION.value} was not obtained after'
+          f' {_REQUIRED_CPU_VERSION_RETRIES.value} retries.'
+      ) from exc
+
+  def PrepareAfterBoot(self):
+    """Prepares a VM after it has booted.
+
+    This function will prepare a scratch disk if required.
+
+    Raises:
+        Exception: If --vm_metadata is malformed.
+    """
+    self.AddMetadata()
+    self.OnStartup()
+    self.SetupAllScratchDisks()
+    self.PrepareVMEnvironment()
+    self.RecordAdditionalMetadata()
 
   def AllowIcmp(self):
     """Opens ICMP protocol on the firewall corresponding to the VM if exists."""
@@ -1336,8 +1540,11 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
       result['num_disable_cpus'] = self.num_disable_cpus
     if self.num_cpus is not None:
       result['num_cpus'] = self.num_cpus
-      if self.NumCpusForBenchmark() != self.num_cpus:
-        result['num_benchmark_cpus'] = self.NumCpusForBenchmark()
+    if (
+        self.num_cpus is not None
+        and self.NumCpusForBenchmark() != self.num_cpus
+    ):
+      result['num_benchmark_cpus'] = self.NumCpusForBenchmark()
     # Some metadata is unique per VM.
     # Update publisher._VM_METADATA_TO_LIST to add more
     if self.id is not None:
@@ -1346,6 +1553,8 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
       result['name'] = self.name
     if self.ip_address is not None:
       result['ip_address'] = self.ip_address
+    if pkb_flags.RECORD_PROCCPU.value and self.cpu_version:
+      result['cpu_version'] = self.cpu_version
     return result
 
   def SimulateMaintenanceEvent(self):
@@ -1372,15 +1581,21 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     """Extract LM notifications from log file."""
     raise NotImplementedError()
 
-  def _InstallData(self, preprovisioned_data, module_name, filenames,
-                   install_path, fallback_url):
+  def _InstallData(
+      self,
+      preprovisioned_data,
+      module_name,
+      filenames,
+      install_path,
+      fallback_url,
+  ):
     """Installs preprovisioned_data on this VM.
 
     Args:
       preprovisioned_data: The dict mapping filenames to sha256sum hashes.
       module_name: The name of the module defining the preprovisioned data.
       filenames: An iterable of preprovisioned data filenames for a particular
-      module.
+        module.
       install_path: The path to download the data file.
       fallback_url: The dict mapping filenames to fallback url for downloading.
 
@@ -1398,11 +1613,14 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
       sha256sum = preprovisioned_data.get(filename)
       try:
         preprovisioned = self.ShouldDownloadPreprovisionedData(
-            module_name, filename)
+            module_name, filename
+        )
       except NotImplementedError:
-        logging.info('The provider does not implement '
-                     'ShouldDownloadPreprovisionedData. Attempting to '
-                     'download the data via URL')
+        logging.info(
+            'The provider does not implement '
+            'ShouldDownloadPreprovisionedData. Attempting to '
+            'download the data via URL'
+        )
         preprovisioned = False
       if not FLAGS.preprovision_ignore_checksum and not sha256sum:
         raise errors.Setup.BadPreprovisionedDataError(
@@ -1410,7 +1628,8 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
             'to run using --preprovision_ignore_checksum (not recommended). '
             'See README.md for information about preprovisioned data. '
             'Cannot find file in /data directory either, fail to upload from '
-            'local directory.' % (filename, module_name))
+            'local directory.' % (filename, module_name)
+        )
 
       if preprovisioned:
         self.DownloadPreprovisionedData(install_path, module_name, filename)
@@ -1418,8 +1637,8 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
         self.Install('wget')
         file_name = os.path.basename(url)
         self.RemoteCommand(
-            'wget -O {0} {1}'.format(
-                os.path.join(install_path, file_name), url))
+            'wget -O {0} {1}'.format(os.path.join(install_path, file_name), url)
+        )
       else:
         raise errors.Setup.BadPreprovisionedDataError(
             'Cannot find preprovisioned file %s inside preprovisioned bucket '
@@ -1427,13 +1646,16 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
             'preprovisioned data. '
             'Cannot find fallback url of the file to download from web. '
             'Cannot find file in /data directory either, fail to upload from '
-            'local directory.' % (filename, module_name))
+            'local directory.' % (filename, module_name)
+        )
       if not FLAGS.preprovision_ignore_checksum:
         self.CheckPreprovisionedData(
-            install_path, module_name, filename, sha256sum)
+            install_path, module_name, filename, sha256sum
+        )
 
-  def InstallPreprovisionedBenchmarkData(self, benchmark_name, filenames,
-                                         install_path):
+  def InstallPreprovisionedBenchmarkData(
+      self, benchmark_name, filenames, install_path
+  ):
     """Installs preprovisioned benchmark data on this VM.
 
     Some benchmarks require importing many bytes of data into the virtual
@@ -1453,10 +1675,10 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
 
     Args:
       benchmark_name: The name of the benchmark defining the preprovisioned
-          data. The benchmark's module must define the dict BENCHMARK_DATA
-          mapping filenames to sha256sum hashes.
+        data. The benchmark's module must define the dict BENCHMARK_DATA mapping
+        filenames to sha256sum hashes.
       filenames: An iterable of preprovisioned data filenames for a particular
-          benchmark.
+        benchmark.
       install_path: The path to download the data file.
 
     Raises:
@@ -1467,21 +1689,29 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     benchmark_module = benchmark_lookup.BenchmarkModule(benchmark_name)
     if not benchmark_module:
       raise errors.Setup.BadPreprovisionedDataError(
-          'Cannot install preprovisioned data for undefined benchmark %s.' %
-          benchmark_name)
+          'Cannot install preprovisioned data for undefined benchmark %s.'
+          % benchmark_name
+      )
     try:
       # TODO(user): Change BENCHMARK_DATA to PREPROVISIONED_DATA.
       preprovisioned_data = benchmark_module.BENCHMARK_DATA
     except AttributeError:
       raise errors.Setup.BadPreprovisionedDataError(
           'Benchmark %s does not define a BENCHMARK_DATA dict with '
-          'preprovisioned data.' % benchmark_name)
+          'preprovisioned data.' % benchmark_name
+      )
     fallback_url = getattr(benchmark_module, 'BENCHMARK_DATA_URL', {})
-    self._InstallData(preprovisioned_data, benchmark_name, filenames,
-                      install_path, fallback_url)
+    self._InstallData(
+        preprovisioned_data,
+        benchmark_name,
+        filenames,
+        install_path,
+        fallback_url,
+    )
 
-  def InstallPreprovisionedPackageData(self, package_name, filenames,
-                                       install_path):
+  def InstallPreprovisionedPackageData(
+      self, package_name, filenames, install_path
+  ):
     """Installs preprovisioned Package data on this VM.
 
     Some benchmarks require importing many bytes of data into the virtual
@@ -1501,11 +1731,11 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
 
     Args:
       package_name: The name of the package file defining the preprovisoned
-      data. The default vaule is None. If the package_name is provided, the
-      package file must define the dict PREPROVISIONED_DATA mapping filenames to
-      sha256sum hashes.
+        data. The default vaule is None. If the package_name is provided, the
+        package file must define the dict PREPROVISIONED_DATA mapping filenames
+        to sha256sum hashes.
       filenames: An iterable of preprovisioned data filenames for a particular
-      package.
+        package.
       install_path: The path to download the data file.
 
     Raises:
@@ -1516,17 +1746,20 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     package_module = package_lookup.PackageModule(package_name)
     if not package_module:
       raise errors.Setup.BadPreprovisionedDataError(
-          'Cannot install preprovisioned data for undefined package %s.' %
-          package_name)
+          'Cannot install preprovisioned data for undefined package %s.'
+          % package_name
+      )
     try:
       preprovisioned_data = package_module.PREPROVISIONED_DATA
     except AttributeError:
       raise errors.Setup.BadPreprovisionedDataError(
           'Package %s does not define a PREPROVISIONED_DATA dict with '
-          'preprovisioned data.' % package_name)
+          'preprovisioned data.' % package_name
+      )
     fallback_url = getattr(package_module, 'PACKAGE_DATA_URL', {})
-    self._InstallData(preprovisioned_data, package_name, filenames,
-                      install_path, fallback_url)
+    self._InstallData(
+        preprovisioned_data, package_name, filenames, install_path, fallback_url
+    )
 
   def ShouldDownloadPreprovisionedData(self, module_name, filename):
     """Returns whether or not preprovisioned data is available.
@@ -1546,7 +1779,13 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     """Installs the cloud specific cli along with credentials on this vm."""
     raise NotImplementedError()
 
-  def DownloadPreprovisionedData(self, install_path, module_name, filename):
+  def DownloadPreprovisionedData(
+      self,
+      install_path: str,
+      module_name: str,
+      filename: str,
+      timeout: int = PREPROVISIONED_DATA_TIMEOUT,
+  ):
     """Downloads preprovisioned benchmark data.
 
     This function should be overridden by each cloud provider VM. The file
@@ -1560,6 +1799,7 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
       install_path: The install path on this VM.
       module_name: Name of the module associated with this data file.
       filename: The name of the file that was downloaded.
+      timeout: Timeout value for downloading preprovisioned data, default 5 min.
     """
     raise NotImplementedError()
 
@@ -1586,9 +1826,9 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
 
     Args:
       use_api: boolean, If use_api is false, method will attempt to query
-      metadata service to check vm preemption. If use_api is true, method will
-      attempt to use API to detect vm preemption query if metadata service
-      detecting fails.
+        metadata service to check vm preemption. If use_api is true, method will
+        attempt to use API to detect vm preemption query if metadata service
+        detecting fails.
     """
     if not self.IsInterruptible():
       return

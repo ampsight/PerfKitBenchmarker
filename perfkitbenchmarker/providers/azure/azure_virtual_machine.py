@@ -24,7 +24,6 @@ All VM specifics are self-contained and the class provides methods to
 operate on the VM: boot, shutdown, etc.
 """
 
-
 import abc
 import collections
 import itertools
@@ -41,6 +40,7 @@ from perfkitbenchmarker import custom_virtual_machine_spec
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import linux_virtual_machine
+from perfkitbenchmarker import os_types
 from perfkitbenchmarker import placement_group
 from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import resource
@@ -50,13 +50,13 @@ from perfkitbenchmarker import windows_virtual_machine
 from perfkitbenchmarker.configs import option_decoders
 from perfkitbenchmarker.providers import azure
 from perfkitbenchmarker.providers.azure import azure_disk
+from perfkitbenchmarker.providers.azure import azure_disk_strategies
 from perfkitbenchmarker.providers.azure import azure_network
 from perfkitbenchmarker.providers.azure import util
-from six.moves import range
 import yaml
 
 FLAGS = flags.FLAGS
-NUM_LOCAL_VOLUMES = {
+NUM_LOCAL_VOLUMES: dict[str, int] = {
     'Standard_L8s_v2': 1,
     'Standard_L16s_v2': 2,
     'Standard_L32s_v2': 4,
@@ -74,35 +74,72 @@ NUM_LOCAL_VOLUMES = {
     'Standard_L32as_v3': 4,
     'Standard_L48as_v3': 6,
     'Standard_L64as_v3': 8,
-    'Standard_L80as_v3': 10
+    'Standard_L80as_v3': 10,
 }
 
 _MACHINE_TYPES_ONLY_SUPPORT_GEN2_IMAGES = (
-    'Standard_ND96asr_v4', 'Standard_ND96asr_A100_v4',
-    'Standard_ND96amsr_A100_v4', 'Standard_M208ms_v2', 'Standard_M208s_v2',
-    'Standard_M416ms_v2', 'Standard_M416s_v2', 'Standard_ND40rs_v2',
-    'Standard_M32ms_v2', 'Standard_M64s_v2', 'Standard_M64ms_v2',
-    'Standard_M128s_v2', 'Standard_M128ms_v2', 'Standard_M192is_v2',
-    'Standard_M192ims_v2', 'Standard_M32dms_v2', 'Standard_M64ds_v2',
-    'Standard_M128ds_v2', 'Standard_M128dms_v2', 'Standard_M192ids_v2',
-    'Standard_M192idms_v2', 'Standard_DC2s_v2', 'Standard_DC2s_v3',
-    'Standard_DC32ds_v3', 'Standard_DC32s_v3', 'Standard_DC48ds_v3',
-    'Standard_DC48s_v3', 'Standard_DC4ds_v3', 'Standard_DC4s_v2',
-    'Standard_DC4s_v3', 'Standard_DC8_v2', 'Standard_DC8ds_v3',
-    'Standard_DC8s_v3', 'Standard_FX12mds', 'Standard_FX24mds',
-    'Standard_FX36mds', 'Standard_FX48mds', 'Standard_FX4mds',
-    'Standard_M64dms_v2', 'Standard_DC16ds_v3', 'Standard_DC16s_v3',
-    'Standard_DC1ds_v3', 'Standard_DC1s_v3', 'Standard_DC24ds_v3',
-    'Standard_DC24s_v3', 'Standard_DC2ds_v3', 'Standard_DC1s_v2')
+    'Standard_ND96asr_v4',
+    'Standard_ND96asr_A100_v4',
+    'Standard_ND96amsr_A100_v4',
+    'Standard_ND96isr_H100_v5',
+    'Standard_M208ms_v2',
+    'Standard_M208s_v2',
+    'Standard_M416ms_v2',
+    'Standard_M416s_v2',
+    'Standard_ND40rs_v2',
+    'Standard_M32ms_v2',
+    'Standard_M64s_v2',
+    'Standard_M64ms_v2',
+    'Standard_M128s_v2',
+    'Standard_M128ms_v2',
+    'Standard_M192is_v2',
+    'Standard_M192ims_v2',
+    'Standard_M32dms_v2',
+    'Standard_M64ds_v2',
+    'Standard_M128ds_v2',
+    'Standard_M128dms_v2',
+    'Standard_M192ids_v2',
+    'Standard_M192idms_v2',
+    'Standard_DC2s_v2',
+    'Standard_DC2s_v3',
+    'Standard_DC32ds_v3',
+    'Standard_DC32s_v3',
+    'Standard_DC48ds_v3',
+    'Standard_DC48s_v3',
+    'Standard_DC4ds_v3',
+    'Standard_DC4s_v2',
+    'Standard_DC4s_v3',
+    'Standard_DC8_v2',
+    'Standard_DC8ds_v3',
+    'Standard_DC8s_v3',
+    'Standard_FX12mds',
+    'Standard_FX24mds',
+    'Standard_FX36mds',
+    'Standard_FX48mds',
+    'Standard_FX4mds',
+    'Standard_M64dms_v2',
+    'Standard_DC16ds_v3',
+    'Standard_DC16s_v3',
+    'Standard_DC1ds_v3',
+    'Standard_DC1s_v3',
+    'Standard_DC24ds_v3',
+    'Standard_DC24s_v3',
+    'Standard_DC2ds_v3',
+    'Standard_DC1s_v2',
+)
 
 # https://docs.microsoft.com/en-us/azure/virtual-machines/windows/scheduled-events
-_SCHEDULED_EVENTS_CMD = ('curl -H Metadata:true http://169.254.169.254/metadata'
-                         '/scheduledevents?api-version=2019-01-01')
+_SCHEDULED_EVENTS_CMD = (
+    'curl -H Metadata:true http://169.254.169.254/metadata'
+    '/scheduledevents?api-version=2019-01-01'
+)
 
-_SCHEDULED_EVENTS_CMD_WIN = ('Invoke-RestMethod -Headers @{"Metadata"="true"} '
-                             '-Uri http://169.254.169.254/metadata/'
-                             'scheduledevents?api-version=2019-01-01 | '
-                             'ConvertTo-Json')
+_SCHEDULED_EVENTS_CMD_WIN = (
+    'Invoke-RestMethod -Headers @{"Metadata"="true"} '
+    '-Uri http://169.254.169.254/metadata/'
+    'scheduledevents?api-version=2019-01-01 | '
+    'ConvertTo-Json'
+)
 
 # Recognized Errors
 _OS_PROVISIONING_TIMED_OUT = 'OSProvisioningTimedOut'
@@ -115,10 +152,33 @@ AZURE_ARM_TYPES = [
 
 CONFIDENTIAL_MILAN_TYPES = [
     r'(Standard_DC[0-9]+as?d?s_v5)',
-    r'(Standard_EC[0-9]+as?d?s_v5)'
+    r'(Standard_EC[0-9]+as?d?s_v5)',
 ]
 
-FIVE_MINUTE_TIMEOUT = 300
+# Reference -
+# https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch#virtual-machines-sizes
+TRUSTED_LAUNCH_UNSUPPORTED_TYPES = AZURE_ARM_TYPES + [
+    r'(Standard_A[0-9]+_v2)',
+    r'(Standard_D[0-9]+_v2)',
+    r'(Standard_D[0-9]+_v3)',
+    r'(Standard_E[0-9]+_v3)',
+    r'(Standard_M[0-9]+.*)',
+    r'(Standard_ND[0-9]+a.*)',
+]
+
+TRUSTED_LAUNCH_UNSUPPORTED_OS_TYPES = [
+    os_types.ROCKY_LINUX8,
+    os_types.ROCKY_LINUX9,
+]
+
+NVME_MACHINE_FAMILIES = [
+    'Standard_Eibs_v5',
+    'Standard_Ebs_v5',
+    'Standard_Eibds_v5',
+    'Standard_Ebds_v5',
+    'Standard_Ms_v3',
+    'Standard_Mds_v3',
+]
 
 
 class AzureVmSpec(virtual_machine.BaseVmSpec):
@@ -137,8 +197,10 @@ class AzureVmSpec(virtual_machine.BaseVmSpec):
 
   def __init__(self, *args, **kwargs):
     super(AzureVmSpec, self).__init__(*args, **kwargs)
-    if isinstance(self.machine_type,
-                  custom_virtual_machine_spec.AzurePerformanceTierDecoder):
+    if isinstance(
+        self.machine_type,
+        custom_virtual_machine_spec.AzurePerformanceTierDecoder,
+    ):
       self.tier = self.machine_type.tier
       self.compute_units = self.machine_type.compute_units
       self.machine_type = None
@@ -163,7 +225,8 @@ class AzureVmSpec(virtual_machine.BaseVmSpec):
       config_values['machine_type'] = yaml.safe_load(flag_values.machine_type)
     if flag_values['azure_accelerated_networking'].present:
       config_values['accelerated_networking'] = (
-          flag_values.azure_accelerated_networking)
+          flag_values.azure_accelerated_networking
+      )
     if flag_values['azure_low_priority_vms'].present:
       config_values['low_priority'] = flag_values.azure_low_priority_vms
 
@@ -178,20 +241,17 @@ class AzureVmSpec(virtual_machine.BaseVmSpec):
     """
     result = super(AzureVmSpec, cls)._GetOptionDecoderConstructions()
     result.update({
-        'machine_type':
-            (custom_virtual_machine_spec.AzureMachineTypeDecoder, {}),
-        'accelerated_networking': (option_decoders.BooleanDecoder, {
-            'default': False
-        }),
-        'boot_disk_size': (option_decoders.IntDecoder, {
-            'default': None
-        }),
-        'boot_disk_type': (option_decoders.StringDecoder, {
-            'default': None
-        }),
-        'low_priority': (option_decoders.BooleanDecoder, {
-            'default': False
-        }),
+        'machine_type': (
+            custom_virtual_machine_spec.AzureMachineTypeDecoder,
+            {},
+        ),
+        'accelerated_networking': (
+            option_decoders.BooleanDecoder,
+            {'default': False},
+        ),
+        'boot_disk_size': (option_decoders.IntDecoder, {'default': None}),
+        'boot_disk_type': (option_decoders.StringDecoder, {'default': None}),
+        'low_priority': (option_decoders.BooleanDecoder, {'default': False}),
     })
     return result
 
@@ -211,8 +271,14 @@ class AzurePublicIPAddress(resource.BaseResource):
 
   def _Create(self):
     cmd = [
-        azure.AZURE_PATH, 'network', 'public-ip', 'create', '--location',
-        self.region, '--name', self.name
+        azure.AZURE_PATH,
+        'network',
+        'public-ip',
+        'create',
+        '--location',
+        self.region,
+        '--name',
+        self.name,
     ] + self.resource_group.args
 
     if self.availability_zone:
@@ -225,10 +291,12 @@ class AzurePublicIPAddress(resource.BaseResource):
 
     _, stderr, retcode = vm_util.IssueCommand(cmd, raise_on_failure=False)
 
-    if retcode and re.search(r'Cannot create more than \d+ public IP addresses',
-                             stderr):
+    if retcode and re.search(
+        r'Cannot create more than \d+ public IP addresses', stderr
+    ):
       raise errors.Benchmarks.QuotaFailure(
-          virtual_machine.QUOTA_EXCEEDED_MESSAGE + stderr)
+          virtual_machine.QUOTA_EXCEEDED_MESSAGE + stderr
+      )
 
   def _Exists(self):
     if self._deleted:
@@ -236,10 +304,18 @@ class AzurePublicIPAddress(resource.BaseResource):
 
     stdout, _, _ = vm_util.IssueCommand(
         [
-            azure.AZURE_PATH, 'network', 'public-ip', 'show', '--output',
-            'json', '--name', self.name
-        ] + self.resource_group.args,
-        raise_on_failure=False)
+            azure.AZURE_PATH,
+            'network',
+            'public-ip',
+            'show',
+            '--output',
+            'json',
+            '--name',
+            self.name,
+        ]
+        + self.resource_group.args,
+        raise_on_failure=False,
+    )
     try:
       json.loads(stdout)
       return True
@@ -247,10 +323,19 @@ class AzurePublicIPAddress(resource.BaseResource):
       return False
 
   def GetIPAddress(self):
-    stdout, _ = vm_util.IssueRetryableCommand([
-        azure.AZURE_PATH, 'network', 'public-ip', 'show', '--output', 'json',
-        '--name', self.name
-    ] + self.resource_group.args)
+    stdout, _ = vm_util.IssueRetryableCommand(
+        [
+            azure.AZURE_PATH,
+            'network',
+            'public-ip',
+            'show',
+            '--output',
+            'json',
+            '--name',
+            self.name,
+        ]
+        + self.resource_group.args
+    )
 
     response = json.loads(stdout)
     return response['ipAddress']
@@ -262,12 +347,14 @@ class AzurePublicIPAddress(resource.BaseResource):
 class AzureNIC(resource.BaseResource):
   """Class to represent an Azure NIC."""
 
-  def __init__(self,
-               network: azure_network.AzureNetwork,
-               name: str,
-               public_ip: Optional[str],
-               accelerated_networking: bool,
-               private_ip=None):
+  def __init__(
+      self,
+      network: azure_network.AzureNetwork,
+      name: str,
+      public_ip: Optional[str],
+      accelerated_networking: bool,
+      private_ip=None,
+  ):
     super(AzureNIC, self).__init__()
     self.network = network
     self.name = name
@@ -291,8 +378,12 @@ class AzureNIC(resource.BaseResource):
       cmd += ['--subnet', self.network.subnet.id]
     else:
       # auto created subnet
-      cmd += ['--vnet-name', self.network.subnet.vnet.name,
-              '--subnet', self.network.subnet.name]
+      cmd += [
+          '--vnet-name',
+          self.network.subnet.vnet.name,
+          '--subnet',
+          self.network.subnet.name,
+      ]
     if self.public_ip:
       cmd += ['--public-ip-address', self.public_ip]
     if self.private_ip:
@@ -310,10 +401,18 @@ class AzureNIC(resource.BaseResource):
     # the resource doesn't exist, but no-op 'set' does.
     stdout, _, _ = vm_util.IssueCommand(
         [
-            azure.AZURE_PATH, 'network', 'nic', 'show', '--output', 'json',
-            '--name', self.name
-        ] + self.resource_group.args,
-        raise_on_failure=False)
+            azure.AZURE_PATH,
+            'network',
+            'nic',
+            'show',
+            '--output',
+            'json',
+            '--name',
+            self.name,
+        ]
+        + self.resource_group.args,
+        raise_on_failure=False,
+    )
     try:
       json.loads(stdout)
       return True
@@ -323,10 +422,19 @@ class AzureNIC(resource.BaseResource):
   def GetInternalIP(self):
     """Grab some data."""
 
-    stdout, _ = vm_util.IssueRetryableCommand([
-        azure.AZURE_PATH, 'network', 'nic', 'show', '--output', 'json',
-        '--name', self.name
-    ] + self.resource_group.args)
+    stdout, _ = vm_util.IssueRetryableCommand(
+        [
+            azure.AZURE_PATH,
+            'network',
+            'nic',
+            'show',
+            '--output',
+            'json',
+            '--name',
+            self.name,
+        ]
+        + self.resource_group.args
+    )
 
     response = json.loads(stdout)
     ip_config = response['ipConfigurations'][0]
@@ -360,7 +468,7 @@ class AzureDedicatedHostGroup(resource.BaseResource):
 
   def _Create(self):
     """See base class."""
-    create_cmd = ([
+    create_cmd = [
         azure.AZURE_PATH,
         'vm',
         'host',
@@ -375,7 +483,7 @@ class AzureDedicatedHostGroup(resource.BaseResource):
         # https://docs.microsoft.com/en-us/azure/virtual-machines/windows/dedicated-hosts#high-availability-considerations
         '--platform-fault-domain-count',
         '1',
-    ] + self.resource_group.args)
+    ] + self.resource_group.args
 
     if self.availability_zone:
       create_cmd.extend(['--zone', self.availability_zone])
@@ -384,7 +492,7 @@ class AzureDedicatedHostGroup(resource.BaseResource):
 
   def _Delete(self):
     """See base class."""
-    delete_cmd = ([
+    delete_cmd = [
         azure.AZURE_PATH,
         'vm',
         'host',
@@ -392,14 +500,21 @@ class AzureDedicatedHostGroup(resource.BaseResource):
         'delete',
         '--host-group',
         self.name,
-    ] + self.resource_group.args)
+    ] + self.resource_group.args
     vm_util.IssueCommand(delete_cmd)
 
   def _Exists(self):
     """See base class."""
     show_cmd = [
-        azure.AZURE_PATH, 'vm', 'host', 'group', 'show', '--output', 'json',
-        '--name', self.name
+        azure.AZURE_PATH,
+        'vm',
+        'host',
+        'group',
+        'show',
+        '--output',
+        'json',
+        '--name',
+        self.name,
     ] + self.resource_group.args
     stdout, _, _ = vm_util.IssueCommand(show_cmd, raise_on_failure=False)
     try:
@@ -414,13 +529,15 @@ def _GetSkuType(machine_type):
   # TODO(user): add support for FSv2 machine types when no longer in preview
   # https://docs.microsoft.com/en-us/azure/virtual-machines/windows/dedicated-hosts
   sku = ''
+  assert isinstance(machine_type, str)
   if re.match('Standard_D[0-9]*s_v3', machine_type):
     sku = 'DSv3-Type1'
   elif re.match('Standard_E[0-9]*s_v3', machine_type):
     sku = 'ESv3-Type1'
   else:
-    raise ValueError('Dedicated hosting does not support machine type %s.' %
-                     machine_type)
+    raise ValueError(
+        'Dedicated hosting does not support machine type %s.' % machine_type
+    )
   return sku
 
 
@@ -433,12 +550,12 @@ class AzureDedicatedHost(resource.BaseResource):
     region: The region the host will exist in.
     resource_group: The group of resources for the host.
   """
+
   _lock = threading.Lock()
   # globals guarded by _lock
   host_group_map = {}
 
-  def __init__(self, name, region, resource_group, sku_type,
-               availability_zone):
+  def __init__(self, name, region, resource_group, sku_type, availability_zone):
     super(AzureDedicatedHost, self).__init__()
     self.name = name + '-Host'
     self.region = region
@@ -452,16 +569,16 @@ class AzureDedicatedHost(resource.BaseResource):
     """See base class."""
     with self._lock:
       if self.region not in self.host_group_map:
-        new_host_group = AzureDedicatedHostGroup(self.name, self.region,
-                                                 self.resource_group,
-                                                 self.availability_zone)
+        new_host_group = AzureDedicatedHostGroup(
+            self.name, self.region, self.resource_group, self.availability_zone
+        )
         new_host_group.Create()
         self.host_group_map[self.region] = new_host_group.name
       self.host_group = self.host_group_map[self.region]
 
   def _Create(self):
     """See base class."""
-    create_cmd = ([
+    create_cmd = [
         azure.AZURE_PATH,
         'vm',
         'host',
@@ -480,12 +597,12 @@ class AzureDedicatedHost(resource.BaseResource):
         # benchmarks require
         '--platform-fault-domain',
         '0',
-    ] + self.resource_group.args)
+    ] + self.resource_group.args
     vm_util.IssueCommand(create_cmd)
 
   def _Delete(self):
     """See base class."""
-    delete_cmd = ([
+    delete_cmd = [
         azure.AZURE_PATH,
         'vm',
         'host',
@@ -495,7 +612,7 @@ class AzureDedicatedHost(resource.BaseResource):
         '--name',
         self.name,
         '--yes',
-    ] + self.resource_group.args)
+    ] + self.resource_group.args
     vm_util.IssueCommand(delete_cmd)
 
   def _Exists(self):
@@ -524,11 +641,13 @@ def _MachineTypeIsArm(machine_type):
   """Check if the machine type uses ARM."""
   return any(
       re.search(machine_series, machine_type)
-      for machine_series in AZURE_ARM_TYPES)
+      for machine_series in AZURE_ARM_TYPES
+  )
 
 
 class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
   """Object representing an Azure Virtual Machine."""
+
   CLOUD = provider_info.AZURE
 
   _lock = threading.Lock()
@@ -548,6 +667,8 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     # Format for Azure availability zone support is "region-availability_zone"
     # Example: eastus2-1 is Azure region eastus2 with availability zone 1.
 
+    assert isinstance(self.zone, str)
+    assert isinstance(self.machine_type, str)
     self.region = util.GetRegionFromZone(self.zone)
     self.availability_zone = util.GetAvailabilityZoneFromZone(self.zone)
     self.use_dedicated_host = vm_spec.use_dedicated_host
@@ -555,10 +676,12 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.network = azure_network.AzureNetwork.GetNetwork(self)
     self.firewall = azure_network.AzureFirewall.GetFirewall()
     if azure_disk.HasTempDrive(self.machine_type):
-      self.max_local_disks = NUM_LOCAL_VOLUMES.get(self.machine_type, 1)
+      self.max_local_disks = NUM_LOCAL_VOLUMES.get(
+          self.machine_type, 1
+      )
     else:
       self.max_local_disks = 0
-    self._lun_counter = itertools.count()
+    self.lun_counter = itertools.count()
     self._deleted = False
     self.resource_group = azure_network.GetResourceGroup()
 
@@ -583,6 +706,13 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
         re.search(machine_series, self.machine_type)
         for machine_series in CONFIDENTIAL_MILAN_TYPES
     )
+    self.trusted_launch_unsupported_type = (
+        any(
+            re.search(machine_series, self.machine_type)
+            for machine_series in TRUSTED_LAUNCH_UNSUPPORTED_TYPES
+        )
+        or self.OS_TYPE in TRUSTED_LAUNCH_UNSUPPORTED_OS_TYPES
+    )
     arm_arch = 'neoverse-n1' if _MachineTypeIsArm(self.machine_type) else None
     if arm_arch:
       self.host_arch = arm_arch
@@ -594,6 +724,13 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
         self.image = type(self).GEN2_IMAGE_URN
       else:
         raise errors.Benchmarks.UnsupportedConfigError('No Azure gen2 image.')
+    elif self.SupportsNVMe():
+      if hasattr(type(self), 'GEN2_IMAGE_URN'):
+        self.image = type(self).GEN2_IMAGE_URN
+        self.image_supports_nvme = True
+      else:
+        self.image = type(self).IMAGE_URN
+        self.image_supports_nvme = False
     elif arm_arch:
       if hasattr(type(self), 'ARM_IMAGE_URN'):
         self.image = type(self).ARM_IMAGE_URN
@@ -612,17 +749,16 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.low_priority_status_code = None
     self.spot_early_termination = False
     self.ultra_ssd_enabled = False
-
-    disk_spec = disk.BaseDiskSpec('azure_os_disk')
-    disk_spec.disk_type = (
-        vm_spec.boot_disk_type or self.storage_account.storage_type)
-    if vm_spec.boot_disk_size:
-      disk_spec.disk_size = vm_spec.boot_disk_size
-    self.os_disk = azure_disk.AzureDisk(
-        disk_spec,
-        self,
-        None,
-        is_image=True)
+    self.boot_disk_size = vm_spec.boot_disk_size
+    self.boot_disk_type = vm_spec.boot_disk_type
+    self.create_os_disk_strategy = (
+        azure_disk_strategies.AzureCreateOSDiskStrategy(
+            self, disk.BaseDiskSpec('azure_os_disk'), 1
+        )
+    )
+    self.create_disk_strategy = azure_disk_strategies.GetCreateDiskStrategy(
+        self, None, 0
+    )
 
   @property
   @classmethod
@@ -639,13 +775,18 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     if self.use_dedicated_host:
       with self._lock:
         self.host_list = self.host_map[(self.host_series_sku, self.region)]
-        if (not self.host_list or (self.num_vms_per_host and
-                                   self.host_list[-1].fill_fraction +
-                                   1.0 / self.num_vms_per_host > 1.0)):
-          new_host = AzureDedicatedHost(self.name, self.region,
-                                        self.resource_group,
-                                        self.host_series_sku,
-                                        self.availability_zone)
+        if not self.host_list or (
+            self.num_vms_per_host
+            and self.host_list[-1].fill_fraction + 1.0 / self.num_vms_per_host
+            > 1.0
+        ):
+          new_host = AzureDedicatedHost(
+              self.name,
+              self.region,
+              self.resource_group,
+              self.host_series_sku,
+              self.availability_zone,
+          )
           self.host_list.append(new_host)
           new_host.Create()
         self.host = self.host_list[-1]
@@ -653,27 +794,36 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
           self.host.fill_fraction += 1.0 / self.num_vms_per_host
 
   def _RequiresUltraDisk(self):
-    return any(disk_spec.disk_type == azure_disk.ULTRA_STORAGE
-               for disk_spec in self.disk_specs)
+    return hasattr(self.create_disk_strategy, 'disk_specs') and any(
+        disk_spec.disk_type == azure_disk.ULTRA_STORAGE
+        for disk_spec in self.create_disk_strategy.disk_specs
+    )
 
   def _Create(self):
     """See base class."""
-    disk_size_args = []
-    if self.os_disk.disk_size:
-      disk_size_args = ['--os-disk-size-gb', str(self.os_disk.disk_size)]
+    assert self.network is not None
 
+    os_disk_args = self.create_os_disk_strategy.GetCreationCommand()[
+        'create-disk'
+    ]
     confidential_args = []
     if self.machine_type_is_confidential:
       confidential_args = [
-          '--enable-vtpm', 'true',
-          '--enable-secure-boot', 'true',
-          '--security-type', 'ConfidentialVM',
-          '--os-disk-security-encryption-type', 'VMGuestStateOnly',
+          '--enable-vtpm',
+          'true',
+          '--enable-secure-boot',
+          'true',
+          '--security-type',
+          'ConfidentialVM',
+          '--os-disk-security-encryption-type',
+          'VMGuestStateOnly',
       ]
 
     tags = {}
     tags.update(self.vm_metadata)
     tags.update(util.GetResourceTags(self.resource_group.timeout_minutes))
+    # Signal (along with timeout_utc) that VM is short lived.
+    tags['vm_nature'] = 'ephemeral'
     tag_args = ['--tags'] + util.FormatTags(tags)
 
     create_cmd = (
@@ -689,17 +839,19 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
             self.machine_type,
             '--admin-username',
             self.user_name,
-            '--storage-sku',
-            f'os={self.os_disk.disk_type}',
             '--name',
             self.name,
-        ]  # pyformat: disable
-        + disk_size_args
+        ]
+        + os_disk_args
         + confidential_args
         + self.resource_group.args
         + self.nic.args
         + tag_args
     )
+    if self.SupportsNVMe() and self.image_supports_nvme:
+      create_cmd.extend(['--disk-controller-type', 'NVMe'])
+    if self.trusted_launch_unsupported_type:
+      create_cmd.extend(['--security-type', 'Standard'])
     if self.boot_startup_script:
       create_cmd.extend(['--custom-data', self.boot_startup_script])
 
@@ -714,7 +866,8 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     # deployed to particular hosts.
     if self.use_dedicated_host:
       create_cmd.extend(
-          ['--host-group', self.host.host_group, '--host', self.host.name])
+          ['--host-group', self.host.host_group, '--host', self.host.name]
+      )
       num_hosts = len(self.host_list)
 
     if self.network.placement_group:
@@ -731,14 +884,24 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     # Uses a custom default because create has a very long tail.
     azure_vm_create_timeout = 1800
     _, stderr, retcode = vm_util.IssueCommand(
-        create_cmd, timeout=azure_vm_create_timeout, raise_on_failure=False)
+        create_cmd, timeout=azure_vm_create_timeout, raise_on_failure=False
+    )
     if retcode:
       if 'quota' in stderr.lower():
         raise errors.Benchmarks.QuotaFailure(
-            virtual_machine.QUOTA_EXCEEDED_MESSAGE + stderr)
+            virtual_machine.QUOTA_EXCEEDED_MESSAGE + stderr
+        )
+      elif self.low_priority and (
+          re.search(r'requested VM size \S+ is not available', stderr)
+          or re.search(r'not available in location .+ for subscription', stderr)
+          or re.search(
+              r'Following SKUs have failed for Capacity Restrictions', stderr
+          )
+      ):
+        raise errors.Benchmarks.InsufficientCapacityCloudFailure(stderr)
       elif re.search(
-          r'requested VM size \S+ is not available', stderr) or re.search(
-              r'not available in location .+ for subscription', stderr):
+          r'requested VM size \S+ is not available', stderr
+      ) or re.search(r'not available in location .+ for subscription', stderr):
         raise errors.Benchmarks.UnsupportedConfigError(stderr)
       elif self.low_priority and 'OverconstrainedAllocationRequest' in stderr:
         raise errors.Benchmarks.InsufficientCapacityCloudFailure(stderr)
@@ -748,50 +911,66 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
         raise errors.Resource.CreationError(
             f'Failed to create VM: {self.machine_type} is likely a confidential'
             ' machine, which PKB does not support at this time.\n\n'
-            f' Full error: {stderr} return code: {retcode}')
+            f' Full error: {stderr} return code: {retcode}'
+        )
       elif "cannot boot Hypervisor Generation '1'" in stderr:
         raise errors.Resource.CreationError(
             f'Failed to create VM: {self.machine_type} is unable to support V1 '
             'Hypervision. Please update _MACHINE_TYPES_ONLY_SUPPORT_GEN2_IMAGES'
             ' in azure_virtual_machine.py.\n\n'
-            f' Full error: {stderr} return code: {retcode}')
-      elif (self.use_dedicated_host and 'AllocationFailed' in stderr):
+            f' Full error: {stderr} return code: {retcode}'
+        )
+      elif self.use_dedicated_host and 'AllocationFailed' in stderr:
         if self.num_vms_per_host:
           raise errors.Resource.CreationError(
               'Failed to create host: %d vms of type %s per host exceeds '
-              'memory capacity limits of the host' %
-              (self.num_vms_per_host, self.machine_type))
+              'memory capacity limits of the host'
+              % (self.num_vms_per_host, self.machine_type)
+          )
         else:
           logging.warning(
               'Creation failed due to insufficient host capacity. A new host '
-              'will be created and instance creation will be retried.')
+              'will be created and instance creation will be retried.'
+          )
           with self._lock:
             if num_hosts == len(self.host_list):
-              new_host = AzureDedicatedHost(self.name, self.region,
-                                            self.resource_group,
-                                            self.host_series_sku,
-                                            self.availability_zone)
+              new_host = AzureDedicatedHost(
+                  self.name,
+                  self.region,
+                  self.resource_group,
+                  self.host_series_sku,
+                  self.availability_zone,
+              )
               self.host_list.append(new_host)
               new_host.Create()
             self.host = self.host_list[-1]
           raise errors.Resource.RetryableCreationError()
-      elif (not self.use_dedicated_host and 'AllocationFailed' in stderr):
+      elif not self.use_dedicated_host and 'AllocationFailed' in stderr:
         raise errors.Benchmarks.InsufficientCapacityCloudFailure(stderr)
-      elif (not self.use_dedicated_host and
-            'OverconstrainedZonalAllocationRequest' in stderr):
+      elif (
+          not self.use_dedicated_host
+          and 'OverconstrainedZonalAllocationRequest' in stderr
+      ):
         raise errors.Benchmarks.UnsupportedConfigError(stderr)
-      elif 'SkuNotAvailable' in  stderr:
+      elif 'SkuNotAvailable' in stderr:
         raise errors.Benchmarks.UnsupportedConfigError(stderr)
       else:
         raise errors.Resource.CreationError(
-            'Failed to create VM: %s return code: %s' % (stderr, retcode))
+            'Failed to create VM: %s return code: %s' % (stderr, retcode)
+        )
 
   def _Exists(self):
     """Returns True if the VM exists."""
     if self._deleted:
       return False
     show_cmd = [
-        azure.AZURE_PATH, 'vm', 'show', '--output', 'json', '--name', self.name
+        azure.AZURE_PATH,
+        'vm',
+        'show',
+        '--output',
+        'json',
+        '--name',
+        self.name,
     ] + self.resource_group.args
     stdout, _, _ = vm_util.IssueCommand(show_cmd, raise_on_failure=False)
     try:
@@ -806,21 +985,35 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
 
   def _Start(self):
     """Starts the VM."""
-    start_cmd = ([azure.AZURE_PATH, 'vm', 'start', '--name', self.name] +
-                 self.resource_group.args)
+    start_cmd = [
+        azure.AZURE_PATH,
+        'vm',
+        'start',
+        '--name',
+        self.name,
+    ] + self.resource_group.args
     vm_util.IssueCommand(start_cmd)
     if self.public_ip:
       self.ip_address = self.public_ip.GetIPAddress()
 
   def _Stop(self):
     """Stops the VM."""
-    stop_cmd = ([azure.AZURE_PATH, 'vm', 'stop', '--name', self.name] +
-                self.resource_group.args)
+    stop_cmd = [
+        azure.AZURE_PATH,
+        'vm',
+        'stop',
+        '--name',
+        self.name,
+    ] + self.resource_group.args
     vm_util.IssueCommand(stop_cmd)
     # remove resources, similar to GCE stop
-    deallocate_cmd = (
-        [azure.AZURE_PATH, 'vm', 'deallocate', '--name', self.name] +
-        self.resource_group.args)
+    deallocate_cmd = [
+        azure.AZURE_PATH,
+        'vm',
+        'deallocate',
+        '--name',
+        self.name,
+    ] + self.resource_group.args
     vm_util.IssueCommand(deallocate_cmd)
 
   def _Suspend(self):
@@ -834,70 +1027,64 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
   @vm_util.Retry()
   def _PostCreate(self):
     """Get VM data."""
-    stdout, _ = vm_util.IssueRetryableCommand([
-        azure.AZURE_PATH, 'vm', 'show', '--output', 'json', '--name', self.name
-    ] + self.resource_group.args)
+    stdout, _ = vm_util.IssueRetryableCommand(
+        [
+            azure.AZURE_PATH,
+            'vm',
+            'show',
+            '--output',
+            'json',
+            '--name',
+            self.name,
+        ]
+        + self.resource_group.args
+    )
     response = json.loads(stdout)
-    self.os_disk.name = response['storageProfile']['osDisk']['name']
-    self.os_disk.created = True
-    vm_util.IssueCommand([
-        azure.AZURE_PATH, 'disk', 'update', '--name', self.os_disk.name,
-        '--set',
-        util.GetTagsJson(self.resource_group.timeout_minutes)
-    ] + self.resource_group.args)
+    self.create_os_disk_strategy.disk.name = response['storageProfile'][
+        'osDisk'
+    ]['name']
+    self.create_os_disk_strategy.disk.created = True
+    vm_util.IssueCommand(
+        [
+            azure.AZURE_PATH,
+            'disk',
+            'update',
+            '--name',
+            self.create_os_disk_strategy.disk.name,
+            '--set',
+            util.GetTagsJson(self.resource_group.timeout_minutes),
+        ]
+        + self.resource_group.args
+    )
     self.internal_ip = self.nic.GetInternalIP()
     if self.public_ip:
       self.ip_address = self.public_ip.GetIPAddress()
 
-  def CreateScratchDisk(self, _, disk_spec):
-    """Create a VM's scratch disk.
+  def SetupAllScratchDisks(self):
+    """Set up all scratch disks of the current VM."""
+    self.create_disk_strategy.GetSetupDiskStrategy().SetUpDisk()
 
-    Args:
-      disk_spec: virtual_machine.BaseDiskSpec object of the disk.
-
-    Raises:
-      CreationError: If an SMB disk is listed but the SMB service not created.
-    """
-    disks = []
-
-    for _ in range(disk_spec.num_striped_disks):
-      if disk_spec.disk_type == disk.NFS:
-        data_disk = self._GetNfsService().CreateNfsDisk()
-        disks.append(data_disk)
-        continue
-      elif disk_spec.disk_type == disk.SMB:
-        data_disk = self._GetSmbService().CreateSmbDisk()
-        disks.append(data_disk)
-        continue
-      elif disk_spec.disk_type == disk.LOCAL:
-        # Local disk numbers start at 1 (0 is the system disk).
-        disk_number = self.local_disk_counter + 1
-        self.local_disk_counter += 1
-        if self.local_disk_counter > self.max_local_disks:
-          raise errors.Error('Not enough local disks.')
-      else:
-        # Remote disk numbers start at 1 + max_local disks (0 is the system disk
-        # and local disks occupy [1, max_local_disks]).
-        disk_number = self.remote_disk_counter + 1 + self.max_local_disks
-        self.remote_disk_counter += 1
-      lun = next(self._lun_counter)
-      data_disk = azure_disk.AzureDisk(disk_spec, self, lun)
-      data_disk.disk_number = disk_number
-      disks.append(data_disk)
-
-    scratch_disk = self._CreateScratchDiskFromDisks(disk_spec, disks)
-    self._PrepareScratchDisk(scratch_disk, disk_spec)
+  def SetDiskSpec(self, disk_spec, disk_count):
+    """Sets Disk Specs of the current VM. Calls before the VM is created."""
+    self.create_disk_strategy = azure_disk_strategies.GetCreateDiskStrategy(
+        self, disk_spec, disk_count
+    )
 
   def InstallCli(self):
     """Installs the Azure cli and credentials on this Azure vm."""
     self.Install('azure_cli')
     self.Install('azure_credentials')
 
-  def DownloadPreprovisionedData(self, install_path, module_name, filename,
-                                 timeout=FIVE_MINUTE_TIMEOUT):
+  def DownloadPreprovisionedData(
+      self,
+      install_path,
+      module_name,
+      filename,
+      timeout=virtual_machine.PREPROVISIONED_DATA_TIMEOUT,
+  ):
     """Downloads a data file from Azure blob storage with pre-provisioned data.
 
-    Use --azure_preprovisioned_data_bucket to specify the name of the account.
+    Use --azure_preprovisioned_data_account to specify the name of the account.
 
     Note: Azure blob storage does not allow underscores in the container name,
     so this method replaces any underscores in module_name with dashes.
@@ -909,28 +1096,33 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
       install_path: The install path on this VM.
       module_name: Name of the module associated with this data file.
       filename: The name of the file that was downloaded.
-      timeout: Timeout value for downloading preprovisionedData, Five minutes
-      by default.
+      timeout: Timeout value for downloading preprovisionedData, Five minutes by
+        default.
     """
     # N.B. Should already be installed by ShouldDownloadPreprovisionedData
     self.Install('azure_cli')
     self.RobustRemoteCommand(
-        GenerateDownloadPreprovisionedDataCommand(install_path, module_name,
-                                                  filename), timeout=timeout)
+        GenerateDownloadPreprovisionedDataCommand(
+            install_path, module_name, filename
+        ),
+        timeout=timeout,
+    )
 
   def ShouldDownloadPreprovisionedData(self, module_name, filename):
     """Returns whether or not preprovisioned data is available."""
     # Do not install credentials. Data are fetched using locally generated
     # connection strings and do not use credentials on the VM.
     self.Install('azure_cli')
-    return FLAGS.azure_preprovisioned_data_bucket and self.TryRemoteCommand(
-        GenerateStatPreprovisionedDataCommand(module_name, filename))
+    return FLAGS.azure_preprovisioned_data_account and self.TryRemoteCommand(
+        GenerateStatPreprovisionedDataCommand(module_name, filename)
+    )
 
   def GetResourceMetadata(self):
+    assert self.network is not None
     result = super(AzureVirtualMachine, self).GetResourceMetadata()
     result['accelerated_networking'] = self.nic.accelerated_networking
-    result['boot_disk_type'] = self.os_disk.disk_type
-    result['boot_disk_size'] = self.os_disk.disk_size
+    result['boot_disk_type'] = self.create_os_disk_strategy.disk.disk_type
+    result['boot_disk_size'] = self.create_os_disk_strategy.disk.disk_size
     if self.network.placement_group:
       result['placement_group_strategy'] = self.network.placement_group.strategy
     else:
@@ -942,13 +1134,15 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
 
   def _UpdateInterruptibleVmStatusThroughMetadataService(self):
     stdout, stderr, return_code = self.RemoteCommandWithReturnCode(
-        _SCHEDULED_EVENTS_CMD)
+        _SCHEDULED_EVENTS_CMD
+    )
     if return_code:
       logging.error('Checking Interrupt Error: %s', stderr)
     else:
       events = json.loads(stdout).get('Events', [])
       self.spot_early_termination = any(
-          event.get('EventType') == 'Preempt' for event in events)
+          event.get('EventType') == 'Preempt' for event in events
+      )
       if self.spot_early_termination:
         logging.info('Spotted early termination on %s', self)
 
@@ -974,30 +1168,51 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     """
     return self.low_priority_status_code
 
+  def SupportsNVMe(self):
+    """Returns whether this vm supports NVMe.
 
-class Debian9BasedAzureVirtualMachine(AzureVirtualMachine,
-                                      linux_virtual_machine.Debian9Mixin):
+    Returns:
+      True if this vm supports NVMe.
+    """
+    return util.GetMachineFamily(self.machine_type) in NVME_MACHINE_FAMILIES
+
+
+class Debian9BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Debian9Mixin
+):
   # From https://wiki.debian.org/Cloud/MicrosoftAzure
   IMAGE_URN = 'credativ:Debian:9:latest'
 
 
-class Debian10BasedAzureVirtualMachine(AzureVirtualMachine,
-                                       linux_virtual_machine.Debian10Mixin):
+class Debian10BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Debian10Mixin
+):
   # From https://wiki.debian.org/Cloud/MicrosoftAzure
   GEN2_IMAGE_URN = 'Debian:debian-10:10-gen2:latest'
   IMAGE_URN = 'Debian:debian-10:10:latest'
 
 
-class Debian11BasedAzureVirtualMachine(AzureVirtualMachine,
-                                       linux_virtual_machine.Debian11Mixin):
+class Debian11BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Debian11Mixin
+):
   # From https://wiki.debian.org/Cloud/MicrosoftAzure
   GEN2_IMAGE_URN = 'Debian:debian-11:11-gen2:latest'
   IMAGE_URN = 'Debian:debian-11:11:latest'
   ARM_IMAGE_URN = 'Debian:debian-11:11-backports-arm64:latest'
 
 
-class Ubuntu1604BasedAzureVirtualMachine(AzureVirtualMachine,
-                                         linux_virtual_machine.Ubuntu1604Mixin):
+class Debian12BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Debian12Mixin
+):
+  # From https://wiki.debian.org/Cloud/MicrosoftAzure
+  GEN2_IMAGE_URN = 'Debian:debian-12:12-gen2:latest'
+  IMAGE_URN = 'Debian:debian-12:12:latest'
+  ARM_IMAGE_URN = 'Debian:debian-12:12-arm64:latest'
+
+
+class Ubuntu1604BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Ubuntu1604Mixin
+):
   GEN2_IMAGE_URN = 'Canonical:UbuntuServer:16_04-lts-gen2:latest'
   IMAGE_URN = 'Canonical:UbuntuServer:16.04-LTS:latest'
   # No ARM image when running
@@ -1005,81 +1220,118 @@ class Ubuntu1604BasedAzureVirtualMachine(AzureVirtualMachine,
   # | grep 16_04
 
 
-class Ubuntu1804BasedAzureVirtualMachine(AzureVirtualMachine,
-                                         linux_virtual_machine.Ubuntu1804Mixin):
+class Ubuntu1804BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Ubuntu1804Mixin
+):
   GEN2_IMAGE_URN = 'Canonical:UbuntuServer:18_04-lts-gen2:latest'
   IMAGE_URN = 'Canonical:UbuntuServer:18.04-LTS:latest'
   ARM_IMAGE_URN = 'Canonical:UbuntuServer:18_04-lts-arm64:latest'
 
 
-class Ubuntu2004BasedAzureVirtualMachine(AzureVirtualMachine,
-                                         linux_virtual_machine.Ubuntu2004Mixin):
-  GEN2_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-focal:20_04-lts-gen2:latest'
+class Ubuntu2004BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Ubuntu2004Mixin
+):
+  GEN2_IMAGE_URN = (
+      'Canonical:0001-com-ubuntu-server-focal:20_04-lts-gen2:latest'
+  )
   IMAGE_URN = 'Canonical:0001-com-ubuntu-server-focal:20_04-lts:latest'
-  CONFIDENTIAL_IMAGE_URN = 'Canonical:0001-com-ubuntu-confidential-vm-focal:20_04-lts-cvm:latest'
-  ARM_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-focal:20_04-lts-arm64:latest'
+  CONFIDENTIAL_IMAGE_URN = (
+      'Canonical:0001-com-ubuntu-confidential-vm-focal:20_04-lts-cvm:latest'
+  )
+  ARM_IMAGE_URN = (
+      'Canonical:0001-com-ubuntu-server-focal:20_04-lts-arm64:latest'
+  )
 
 
-class Ubuntu2204BasedAzureVirtualMachine(AzureVirtualMachine,
-                                         linux_virtual_machine.Ubuntu2204Mixin):
-  GEN2_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest'
+class Ubuntu2204BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Ubuntu2204Mixin
+):
+  GEN2_IMAGE_URN = (
+      'Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest'
+  )
   IMAGE_URN = 'Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest'
-  CONFIDENTIAL_IMAGE_URN = 'Canonical:0001-com-ubuntu-confidential-vm-jammy:22_04-lts-cvm:latest'
-  ARM_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-jammy:22_04-lts-arm64:latest'
+  CONFIDENTIAL_IMAGE_URN = (
+      'Canonical:0001-com-ubuntu-confidential-vm-jammy:22_04-lts-cvm:latest'
+  )
+  ARM_IMAGE_URN = (
+      'Canonical:0001-com-ubuntu-server-jammy:22_04-lts-arm64:latest'
+  )
 
 
-class Rhel7BasedAzureVirtualMachine(AzureVirtualMachine,
-                                    linux_virtual_machine.Rhel7Mixin):
+class Ubuntu2310BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Ubuntu2310Mixin
+):
+  GEN2_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-mantic:23_10-gen2:latest'
+  IMAGE_URN = 'Canonical:0001-com-ubuntu-server-mantic:23_10:latest'
+  CONFIDENTIAL_IMAGE_URN = (
+      'Canonical:0001-com-ubuntu-confidential-vm-mantic:23_10-cvm:latest'
+  )
+  ARM_IMAGE_URN = 'Canonical:0001-com-ubuntu-server-mantic:23_10-arm64:latest'
+
+
+class Ubuntu2404BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Ubuntu2404Mixin
+):
+  GEN2_IMAGE_URN = 'Canonical:ubuntu-24_04-lts:server:latest'
+  IMAGE_URN = 'Canonical:ubuntu-24_04-lts:server-gen1:latest'
+  CONFIDENTIAL_IMAGE_URN = 'Canonical:ubuntu-24_04-lts:cvm:latest'
+  ARM_IMAGE_URN = 'Canonical:ubuntu-24_04-lts:server-arm64:latest'
+
+
+class Rhel7BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Rhel7Mixin
+):
   GEN2_IMAGE_URN = 'RedHat:RHEL:7lvm-gen2:latest'
   IMAGE_URN = 'RedHat:RHEL:7-LVM:latest'
 
 
-class Rhel8BasedAzureVirtualMachine(AzureVirtualMachine,
-                                    linux_virtual_machine.Rhel8Mixin):
+class Rhel8BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Rhel8Mixin
+):
   GEN2_IMAGE_URN = 'RedHat:RHEL:8-lvm-gen2:latest'
   IMAGE_URN = 'RedHat:RHEL:8-LVM:latest'
 
 
-class Rhel9BasedAzureVirtualMachine(AzureVirtualMachine,
-                                    linux_virtual_machine.Rhel9Mixin):
+class Rhel9BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.Rhel9Mixin
+):
   GEN2_IMAGE_URN = 'RedHat:RHEL:9-lvm-gen2:latest'
   IMAGE_URN = 'RedHat:RHEL:9-lvm:latest'
 
 
-class CentOs7BasedAzureVirtualMachine(AzureVirtualMachine,
-                                      linux_virtual_machine.CentOs7Mixin):
+class CentOs7BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.CentOs7Mixin
+):
   GEN2_IMAGE_URN = 'OpenLogic:CentOS-LVM:7-lvm-gen2:latest'
   IMAGE_URN = 'OpenLogic:CentOS-LVM:7-lvm:latest'
 
 
-class CentOs8BasedAzureVirtualMachine(AzureVirtualMachine,
-                                      linux_virtual_machine.CentOs8Mixin):
+class CentOs8BasedAzureVirtualMachine(
+    AzureVirtualMachine, linux_virtual_machine.CentOs8Mixin
+):
   GEN2_IMAGE_URN = 'OpenLogic:CentOS-LVM:8-lvm-gen2:latest'
   IMAGE_URN = 'OpenLogic:CentOS-LVM:8-lvm:latest'
 
 
-# Requires enabling for your subscription:
-# https://portal.azure.com/#view/Microsoft_Azure_Marketplace/LegalTermsSkuProgrammaticAccessBlade/legalTermsSkuProgrammaticAccessData~/%7B%22product%22%3A%7B%22publisherId%22%3A%22erockyenterprisesoftwarefoundationinc1653071250513%22%2C%22offerId%22%3A%22rockylinux%22%2C%22planId%22%3A%22free%22%2C%22standardContractAmendmentsRevisionId%22%3Anull%2C%22isCspEnabled%22%3Atrue%7D%7D
-class RockyLinux8BasedAzureVirtualMachine(AzureVirtualMachine,
-                                          linux_virtual_machine.RockyLinux8Mixin
-                                         ):
-  # TODO(pclay): Update to rockylinux-8:latest if that is ever so-named.
-  IMAGE_URN = 'erockyenterprisesoftwarefoundationinc1653071250513:rockylinux:free:8.6.0'
+# Rocky Linux is now distributed via a community gallery:
+# https://rockylinux.org/news/rocky-on-azure-community-gallery
+# TODO(user): Support Select images from community galleries and
+# re-enable.
+# class RockyLinux8BasedAzureVirtualMachine(
+#     AzureVirtualMachine, linux_virtual_machine.RockyLinux8Mixin
+# )
+# class RockyLinux9BasedAzureVirtualMachine(
+#     AzureVirtualMachine, linux_virtual_machine.RockyLinux9Mixin
+# )
 
-
-# Requires enabling for your subscription:
-# https://portal.azure.com/#view/Microsoft_Azure_Marketplace/LegalTermsSkuProgrammaticAccessBlade/legalTermsSkuProgrammaticAccessData~/%7B%22product%22%3A%7B%22publisherId%22%3A%22erockyenterprisesoftwarefoundationinc1653071250513%22%2C%22offerId%22%3A%22rockylinux%22%2C%22planId%22%3A%22free%22%2C%22standardContractAmendmentsRevisionId%22%3Anull%2C%22isCspEnabled%22%3Atrue%7D%7D
-class RockyLinux9BasedAzureVirtualMachine(AzureVirtualMachine,
-                                          linux_virtual_machine.RockyLinux9Mixin
-                                         ):
-  IMAGE_URN = 'erockyenterprisesoftwarefoundationinc1653071250513:rockylinux-9:rockylinux-9:latest'
 
 # TODO(user): Add Fedora CoreOS when available:
 #   https://docs.fedoraproject.org/en-US/fedora-coreos/provisioning-azure/
 
 
-class BaseWindowsAzureVirtualMachine(AzureVirtualMachine,
-                                     windows_virtual_machine.BaseWindowsMixin):
+class BaseWindowsAzureVirtualMachine(
+    AzureVirtualMachine, windows_virtual_machine.BaseWindowsMixin
+):
   """Class supporting Windows Azure virtual machines."""
 
   # This ia a required attribute, but this is a base class.
@@ -1098,28 +1350,44 @@ class BaseWindowsAzureVirtualMachine(AzureVirtualMachine,
     super(BaseWindowsAzureVirtualMachine, self)._PostCreate()
     config_dict = {'commandToExecute': windows_virtual_machine.STARTUP_SCRIPT}
     config = json.dumps(config_dict)
-    vm_util.IssueRetryableCommand([
-        azure.AZURE_PATH, 'vm', 'extension', 'set', '--vm-name', self.name,
-        '--name', 'CustomScriptExtension', '--publisher', 'Microsoft.Compute',
-        '--version', '1.4',
-        '--protected-settings=%s' % config
-    ] + self.resource_group.args)
+    vm_util.IssueRetryableCommand(
+        [
+            azure.AZURE_PATH,
+            'vm',
+            'extension',
+            'set',
+            '--vm-name',
+            self.name,
+            '--name',
+            'CustomScriptExtension',
+            '--publisher',
+            'Microsoft.Compute',
+            '--version',
+            '1.4',
+            '--protected-settings=%s' % config,
+        ]
+        + self.resource_group.args
+    )
 
   def _UpdateInterruptibleVmStatusThroughMetadataService(self):
     stdout, _ = self.RemoteCommand(_SCHEDULED_EVENTS_CMD_WIN)
     events = json.loads(stdout).get('Events', [])
     self.spot_early_termination = any(
-        event.get('EventType') == 'Preempt' for event in events)
+        event.get('EventType') == 'Preempt' for event in events
+    )
     if self.spot_early_termination:
       logging.info('Spotted early termination on %s', self)
 
   def DownloadPreprovisionedData(
-      self, install_path, module_name, filename,
-      timeout=FIVE_MINUTE_TIMEOUT
+      self,
+      install_path,
+      module_name,
+      filename,
+      timeout=virtual_machine.PREPROVISIONED_DATA_TIMEOUT,
   ):
     """Downloads a data file from Azure blob storage with pre-provisioned data.
 
-    Use --azure_preprovisioned_data_bucket to specify the name of the account.
+    Use --azure_preprovisioned_data_account to specify the name of the account.
 
     Note: Azure blob storage does not allow underscores in the container name,
     so this method replaces any underscores in module_name with dashes.
@@ -1131,116 +1399,138 @@ class BaseWindowsAzureVirtualMachine(AzureVirtualMachine,
       install_path: The install path on this VM.
       module_name: Name of the module associated with this data file.
       filename: The name of the file that was downloaded.
-      timeout: Timeout value for downloading preprovisionedData, Five minutes
-      by default.
+      timeout: Timeout value for downloading preprovisionedData, Five minutes by
+        default.
     """
     # TODO(deitz): Add retry logic.
     temp_local_path = vm_util.GetTempDir()
     vm_util.IssueCommand(
         GenerateDownloadPreprovisionedDataCommand(
             temp_local_path, module_name, filename
-        ).split('&')[-1].split(),
+        )
+        .split('&')[-1]
+        .split(),
         timeout=timeout,
     )
     self.PushFile(
-        vm_util.PrependTempDir(filename),
-        ntpath.join(install_path, filename)
+        vm_util.PrependTempDir(filename), ntpath.join(install_path, filename)
     )
     vm_util.IssueCommand(['rm', vm_util.PrependTempDir(filename)])
 
   def ShouldDownloadPreprovisionedData(self, module_name, filename):
     """Returns whether or not preprovisioned data is available."""
-    return FLAGS.azure_preprovisioned_data_bucket and vm_util.IssueCommand(
-        GenerateStatPreprovisionedDataCommand(
-            module_name, filename).split(' '), raise_on_failure=False)[-1] == 0
+    return (
+        FLAGS.azure_preprovisioned_data_account
+        and vm_util.IssueCommand(
+            GenerateStatPreprovisionedDataCommand(module_name, filename).split(
+                ' '
+            ),
+            raise_on_failure=False,
+        )[-1]
+        == 0
+    )
 
-
-# Azure seems to have dropped support for 2012 Server Core. It is neither here:
-# https://docs.microsoft.com/en-us/azure/virtual-machines/windows/cli-ps-findimage#table-of-commonly-used-windows-images
-# nor in `az vm image list -p MicrosoftWindowsServer -f WindowsServer -s 2012`
-# Rather than exclude this just allow 2012 to refer to the 2012 Base image.
-class Windows2012CoreAzureVirtualMachine(
-    BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2012CoreMixin):
-  GEN2_IMAGE_URN = 'MicrosoftWindowsServer:windowsserver-gen2preview:2012-r2-datacenter-gen2:latest'
-  IMAGE_URN = 'MicrosoftWindowsServer:WindowsServer:2012-R2-Datacenter:latest'
+  def DiskDriveIsLocal(self, device, model):
+    """Helper method to determine if a disk drive is a local ssd to stripe."""
+    # NVME Striped disks applies to Azure's L series
+    # https://learn.microsoft.com/en-us/azure/virtual-machines/lsv3-series
+    if 'Microsoft NVMe Direct Disk' in model:
+      return True
+    return False
 
 
 class Windows2016CoreAzureVirtualMachine(
-    BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2016CoreMixin):
+    BaseWindowsAzureVirtualMachine, windows_virtual_machine.Windows2016CoreMixin
+):
   GEN2_IMAGE_URN = 'MicrosoftWindowsServer:windowsserver-gen2preview:2016-datacenter-gen2:latest'
-  IMAGE_URN = 'MicrosoftWindowsServer:WindowsServer:2016-Datacenter-Server-Core:latest'
+  IMAGE_URN = (
+      'MicrosoftWindowsServer:WindowsServer:2016-Datacenter-Server-Core:latest'
+  )
 
 
 class Windows2019CoreAzureVirtualMachine(
-    BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2019CoreMixin):
+    BaseWindowsAzureVirtualMachine, windows_virtual_machine.Windows2019CoreMixin
+):
   GEN2_IMAGE_URN = 'MicrosoftWindowsServer:windowsserver-gen2preview:2019-datacenter-gen2:latest'
   IMAGE_URN = 'MicrosoftWindowsServer:WindowsServer:2019-Datacenter-Core:latest'
 
 
 class Windows2022CoreAzureVirtualMachine(
-    BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2022CoreMixin):
+    BaseWindowsAzureVirtualMachine, windows_virtual_machine.Windows2022CoreMixin
+):
   IMAGE_URN = 'MicrosoftWindowsServer:WindowsServer:2022-Datacenter-Core:latest'
-
-
-class Windows2012DesktopAzureVirtualMachine(
-    BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2012DesktopMixin):
-  GEN2_IMAGE_URN = 'MicrosoftWindowsServer:windowsserver-gen2preview:2012-r2-datacenter-gen2:latest'
-  IMAGE_URN = 'MicrosoftWindowsServer:WindowsServer:2012-R2-Datacenter:latest'
 
 
 class Windows2016DesktopAzureVirtualMachine(
     BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2016DesktopMixin):
+    windows_virtual_machine.Windows2016DesktopMixin,
+):
   GEN2_IMAGE_URN = 'MicrosoftWindowsServer:windowsserver-gen2preview:2016-datacenter-gen2:latest'
   IMAGE_URN = 'MicrosoftWindowsServer:WindowsServer:2016-Datacenter:latest'
 
 
 class Windows2019DesktopAzureVirtualMachine(
     BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2019DesktopMixin):
+    windows_virtual_machine.Windows2019DesktopMixin,
+):
   GEN2_IMAGE_URN = 'MicrosoftWindowsServer:windowsserver-gen2preview:2019-datacenter-gen2:latest'
   IMAGE_URN = 'MicrosoftWindowsServer:WindowsServer:2019-Datacenter:latest'
 
 
 class Windows2022DesktopAzureVirtualMachine(
     BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2022DesktopMixin):
+    windows_virtual_machine.Windows2022DesktopMixin,
+):
   IMAGE_URN = 'MicrosoftWindowsServer:WindowsServer:2022-Datacenter:latest'
 
 
 class Windows2019DesktopSQLServer2019StandardAzureVirtualMachine(
     BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2019SQLServer2019Standard):
+    windows_virtual_machine.Windows2019SQLServer2019Standard,
+):
   GEN2_IMAGE_URN = 'MicrosoftSQLServer:sql2019-ws2019:standard-gen2:latest'
   IMAGE_URN = 'MicrosoftSQLServer:sql2019-ws2019:standard:latest'
 
 
 class Windows2019DesktopSQLServer2019EnterpriseAzureVirtualMachine(
     BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2019SQLServer2019Enterprise):
+    windows_virtual_machine.Windows2019SQLServer2019Enterprise,
+):
   GEN2_IMAGE_URN = 'MicrosoftSQLServer:sql2019-ws2019:enterprise-gen2:latest'
   IMAGE_URN = 'MicrosoftSQLServer:sql2019-ws2019:enterprise:latest'
 
 
 class Windows2022DesktopSQLServer2019StandardAzureVirtualMachine(
     BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2022SQLServer2019Standard):
+    windows_virtual_machine.Windows2022SQLServer2019Standard,
+):
   IMAGE_URN = 'MicrosoftSQLServer:sql2019-ws2022:standard:latest'
 
 
 class Windows2022DesktopSQLServer2019EnterpriseAzureVirtualMachine(
     BaseWindowsAzureVirtualMachine,
-    windows_virtual_machine.Windows2022SQLServer2019Enterprise):
+    windows_virtual_machine.Windows2022SQLServer2019Enterprise,
+):
   IMAGE_URN = 'MicrosoftSQLServer:sql2019-ws2022:enterprise:latest'
 
 
-def GenerateDownloadPreprovisionedDataCommand(install_path, module_name,
-                                              filename):
+class Windows2022DesktopSQLServer2022StandardAzureVirtualMachine(
+    BaseWindowsAzureVirtualMachine,
+    windows_virtual_machine.Windows2022SQLServer2022Standard,
+):
+  IMAGE_URN = 'MicrosoftSQLServer:sql2022-ws2022:standard-gen2:latest'
+
+
+class Windows2022DesktopSQLServer2022EnterpriseAzureVirtualMachine(
+    BaseWindowsAzureVirtualMachine,
+    windows_virtual_machine.Windows2022SQLServer2022Enterprise,
+):
+  IMAGE_URN = 'MicrosoftSQLServer:sql2022-ws2022:enterprise-gen2:latest'
+
+
+def GenerateDownloadPreprovisionedDataCommand(
+    install_path, module_name, filename
+):
   """Returns a string used to download preprovisioned data."""
   module_name_with_underscores_removed = module_name.replace('_', '-')
   destpath = posixpath.join(install_path, filename)
@@ -1249,8 +1539,10 @@ def GenerateDownloadPreprovisionedDataCommand(install_path, module_name,
     # is run on all clouds, and is os-agnostic (this is linux specific).
     mkdir_command = 'mkdir -p %s' % posixpath.dirname(destpath)
 
-  account_name = FLAGS.azure_preprovisioned_data_bucket
-  connection_string = util.GetAzureStorageConnectionString(account_name, [])
+  account_name = FLAGS.azure_preprovisioned_data_account
+  connection_string = util.GetAzureStorageConnectionString(
+      account_name, subscription=FLAGS.azure_preprovisioned_data_subscription
+  )
   download_command = (
       'az storage blob download '
       '--no-progress '
@@ -1263,7 +1555,9 @@ def GenerateDownloadPreprovisionedDataCommand(install_path, module_name,
           container_name=module_name_with_underscores_removed,
           name=filename,
           file=destpath,
-          connection_string=connection_string))
+          connection_string=connection_string,
+      )
+  )
   if install_path:
     return '{0} && {1}'.format(mkdir_command, download_command)
   return download_command
@@ -1272,14 +1566,19 @@ def GenerateDownloadPreprovisionedDataCommand(install_path, module_name,
 def GenerateStatPreprovisionedDataCommand(module_name, filename):
   """Returns a string used to download preprovisioned data."""
   module_name_with_underscores_removed = module_name.replace('_', '-')
-  account_name = FLAGS.azure_preprovisioned_data_bucket
-  connection_string = util.GetAzureStorageConnectionString(account_name, [])
-  return ('az storage blob show '
-          '--account-name {account_name} '
-          '--container-name {container_name} '
-          '--name {name} '
-          '--connection-string "{connection_string}"'.format(
-              account_name=account_name,
-              container_name=module_name_with_underscores_removed,
-              name=filename,
-              connection_string=connection_string))
+  account_name = FLAGS.azure_preprovisioned_data_account
+  connection_string = util.GetAzureStorageConnectionString(
+      account_name, subscription=FLAGS.azure_preprovisioned_data_subscription
+  )
+  return (
+      'az storage blob show '
+      '--account-name {account_name} '
+      '--container-name {container_name} '
+      '--name {name} '
+      '--connection-string "{connection_string}"'.format(
+          account_name=account_name,
+          container_name=module_name_with_underscores_removed,
+          name=filename,
+          connection_string=connection_string,
+      )
+  )

@@ -28,6 +28,8 @@ from perfkitbenchmarker import regex_util
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import vm_util
 
+FLAGS = flags.FLAGS
+
 FIO_DIR = '%s/fio' % linux_packages.INSTALL_DIR
 GIT_REPO = 'https://github.com/axboe/fio.git'
 GIT_TAG = 'fio-3.27'
@@ -74,11 +76,14 @@ def _Install(vm):
   if flags.FLAGS.fio_hist_log:
     vm.PushDataFile(FIO_HIST_LOG_PARSER_PATCH)
     vm.RemoteCommand(
-        ('cp {log_parser_path}/{log_parser} ./; '
-         'patch {log_parser} {patch}').format(
-             log_parser_path=FIO_HIST_LOG_PARSER_PATH,
-             log_parser=FIO_HIST_LOG_PARSER,
-             patch=FIO_HIST_LOG_PARSER_PATCH))
+        (
+            'cp {log_parser_path}/{log_parser} ./; patch {log_parser} {patch}'
+        ).format(
+            log_parser_path=FIO_HIST_LOG_PARSER_PATH,
+            log_parser=FIO_HIST_LOG_PARSER,
+            patch=FIO_HIST_LOG_PARSER_PATCH,
+        )
+    )
 
 
 def YumInstall(vm):
@@ -90,6 +95,7 @@ def YumInstall(vm):
 def AptInstall(vm):
   """Installs the fio package on the VM."""
   vm.InstallPackages('libaio-dev libnuma-dev libaio1 bc zlib1g-dev')
+  vm.InstallPackages('numactl')
   _Install(vm)
 
 
@@ -109,13 +115,22 @@ def ParseJobFile(job_file):
   if GLOBAL in config.sections():
     global_metadata = dict(config.items(GLOBAL))
   section_metadata = {}
+  require_merge = FLAGS.fio_pinning
   for section in config.sections():
-    if section != GLOBAL:
-      metadata = {}
-      metadata.update(global_metadata)
-      metadata.update(dict(config.items(section)))
-      if JOB_STONEWALL_PARAMETER in metadata:
-        del metadata[JOB_STONEWALL_PARAMETER]
+    if section == GLOBAL:
+      continue
+    metadata = dict(config.items(section))
+    if JOB_STONEWALL_PARAMETER in metadata:
+      del metadata[JOB_STONEWALL_PARAMETER]
+    if require_merge:
+      section, index = section.rsplit('.', 1)[0], section.rsplit('.', 1)[1]
+      updated_metadata = {
+          f'{key}.{index}': value for key, value in metadata.items()}
+      metadata = updated_metadata
+    metadata.update(global_metadata)
+    if section in section_metadata:
+      section_metadata[section].update(metadata)
+    else:
       section_metadata[section] = metadata
   return section_metadata
 
@@ -143,17 +158,25 @@ def FioParametersToJob(fio_parameters):
   """
   fio_parameters = fio_parameters.replace(' ', '\n')
   fio_parameters = regex_util.Substitute(
-      CMD_SECTION_REGEX, JOB_SECTION_REPL_REGEX, fio_parameters)
+      CMD_SECTION_REGEX, JOB_SECTION_REPL_REGEX, fio_parameters
+  )
   fio_parameters = '[%s]\n%s' % (GLOBAL, fio_parameters)
   fio_parameters = regex_util.Substitute(
-      CMD_PARAMETER_REGEX, CMD_PARAMETER_REPL_REGEX, fio_parameters)
-  return fio_parameters.replace(CMD_STONEWALL_PARAMETER,
-                                JOB_STONEWALL_PARAMETER)
+      CMD_PARAMETER_REGEX, CMD_PARAMETER_REPL_REGEX, fio_parameters
+  )
+  return fio_parameters.replace(
+      CMD_STONEWALL_PARAMETER, JOB_STONEWALL_PARAMETER
+  )
 
 
-def ParseResults(job_file, fio_json_result, base_metadata=None,
-                 log_file_base='', bin_vals=None,
-                 skip_latency_individual_stats=False):
+def ParseResults(
+    job_file,
+    fio_json_result,
+    base_metadata=None,
+    log_file_base='',
+    bin_vals=None,
+    skip_latency_individual_stats=False,
+):
   """Parse fio json output into samples.
 
   Args:
@@ -161,8 +184,8 @@ def ParseResults(job_file, fio_json_result, base_metadata=None,
     fio_json_result: Fio results in json format.
     base_metadata: Extra metadata to annotate the samples with.
     log_file_base: String. Base name for fio log files.
-    bin_vals: A 2-D list of int. Each list represents a list of
-      bin values in histgram log. Calculated from remote VM using
+    bin_vals: A 2-D list of int. Each list represents a list of bin values in
+      histgram log. Calculated from remote VM using
       fio/tools/hist/fiologparser_hist.py
     skip_latency_individual_stats: Bool. If true, skips pulling latency stats
       that are not aggregate.
@@ -182,8 +205,9 @@ def ParseResults(job_file, fio_json_result, base_metadata=None,
   clat_hist_idx = 0
 
   for job in fio_json_result['jobs']:
-    job_name = job['jobname']
-    parameters = {'fio_job': job_name}
+    job_name = job['jobname'].split('.')[0]
+    parameters = {'fio_job': job_name,
+                  'fio_pinning': FLAGS.fio_pinning}
     if parameter_metadata:
       parameters.update(parameter_metadata[job_name])
     if base_metadata:
@@ -196,12 +220,17 @@ def ParseResults(job_file, fio_json_result, base_metadata=None,
             'bw_max': job[mode]['bw_max'],
             'bw_dev': job[mode]['bw_dev'],
             'bw_agg': job[mode]['bw_agg'],
-            'bw_mean': job[mode]['bw_mean']}
+            'bw_mean': job[mode]['bw_mean'],
+        }
         bw_metadata.update(parameters)
         samples.append(
-            sample.Sample('%s:bandwidth' % metric_name,
-                          job[mode]['bw'],
-                          'KB/s', bw_metadata))
+            sample.Sample(
+                '%s:bandwidth' % metric_name,
+                job[mode]['bw'],
+                'KB/s',
+                bw_metadata,
+            )
+        )
 
         # There is one sample whose metric is '<metric_name>:latency'
         # with all of the latency statistics in its metadata, and then
@@ -219,53 +248,75 @@ def ParseResults(job_file, fio_json_result, base_metadata=None,
           else:
             return value
 
-        lat_statistics = [('min', _ConvertClat(clat_section['min'])),
-                          ('max', _ConvertClat(clat_section['max'])),
-                          ('mean', _ConvertClat(clat_section['mean'])),
-                          ('stddev', _ConvertClat(clat_section['stddev']))]
+        lat_statistics = [
+            ('min', _ConvertClat(clat_section['min'])),
+            ('max', _ConvertClat(clat_section['max'])),
+            ('mean', _ConvertClat(clat_section['mean'])),
+            ('stddev', _ConvertClat(clat_section['stddev'])),
+        ]
         if not skip_latency_individual_stats:
           percentiles = clat_section['percentile']
-          lat_statistics += [('p1', _ConvertClat(percentiles['1.000000'])),
-                             ('p5', _ConvertClat(percentiles['5.000000'])),
-                             ('p10', _ConvertClat(percentiles['10.000000'])),
-                             ('p20', _ConvertClat(percentiles['20.000000'])),
-                             ('p30', _ConvertClat(percentiles['30.000000'])),
-                             ('p40', _ConvertClat(percentiles['40.000000'])),
-                             ('p50', _ConvertClat(percentiles['50.000000'])),
-                             ('p60', _ConvertClat(percentiles['60.000000'])),
-                             ('p70', _ConvertClat(percentiles['70.000000'])),
-                             ('p80', _ConvertClat(percentiles['80.000000'])),
-                             ('p90', _ConvertClat(percentiles['90.000000'])),
-                             ('p95', _ConvertClat(percentiles['95.000000'])),
-                             ('p99', _ConvertClat(percentiles['99.000000'])),
-                             ('p99.5', _ConvertClat(percentiles['99.500000'])),
-                             ('p99.9', _ConvertClat(percentiles['99.900000'])),
-                             ('p99.95', _ConvertClat(percentiles['99.950000'])),
-                             ('p99.99', _ConvertClat(percentiles['99.990000']))]
+          lat_statistics += [
+              ('p1', _ConvertClat(percentiles['1.000000'])),
+              ('p5', _ConvertClat(percentiles['5.000000'])),
+              ('p10', _ConvertClat(percentiles['10.000000'])),
+              ('p20', _ConvertClat(percentiles['20.000000'])),
+              ('p30', _ConvertClat(percentiles['30.000000'])),
+              ('p40', _ConvertClat(percentiles['40.000000'])),
+              ('p50', _ConvertClat(percentiles['50.000000'])),
+              ('p60', _ConvertClat(percentiles['60.000000'])),
+              ('p70', _ConvertClat(percentiles['70.000000'])),
+              ('p80', _ConvertClat(percentiles['80.000000'])),
+              ('p90', _ConvertClat(percentiles['90.000000'])),
+              ('p95', _ConvertClat(percentiles['95.000000'])),
+              ('p99', _ConvertClat(percentiles['99.000000'])),
+              ('p99.5', _ConvertClat(percentiles['99.500000'])),
+              ('p99.9', _ConvertClat(percentiles['99.900000'])),
+              ('p99.95', _ConvertClat(percentiles['99.950000'])),
+              ('p99.99', _ConvertClat(percentiles['99.990000'])),
+          ]
 
         lat_metadata = parameters.copy()
         for name, val in lat_statistics:
           lat_metadata[name] = val
         samples.append(
-            sample.Sample('%s:latency' % metric_name,
-                          _ConvertClat(job[mode][clat_key]['mean']),
-                          'usec', lat_metadata, timestamp))
+            sample.Sample(
+                '%s:latency' % metric_name,
+                _ConvertClat(job[mode][clat_key]['mean']),
+                'usec',
+                lat_metadata,
+                timestamp,
+            )
+        )
 
         for stat_name, stat_val in lat_statistics:
           samples.append(
-              sample.Sample('%s:latency:%s' % (metric_name, stat_name),
-                            stat_val, 'usec', parameters, timestamp))
+              sample.Sample(
+                  '%s:latency:%s' % (metric_name, stat_name),
+                  stat_val,
+                  'usec',
+                  parameters,
+                  timestamp,
+              )
+          )
 
         samples.append(
-            sample.Sample('%s:iops' % metric_name,
-                          job[mode]['iops'], '', parameters, timestamp))
+            sample.Sample(
+                '%s:iops' % metric_name,
+                job[mode]['iops'],
+                '',
+                parameters,
+                timestamp,
+            )
+        )
     if log_file_base and bin_vals:
       # Parse histograms
       aggregates = collections.defaultdict(collections.Counter)
       for _ in range(int(parameters.get('numjobs', 1))):
         clat_hist_idx += 1
         hist_file_path = vm_util.PrependTempDir(
-            '%s_clat_hist.%s.log' % (log_file_base, str(clat_hist_idx)))
+            '%s_clat_hist.%s.log' % (log_file_base, str(clat_hist_idx))
+        )
         hists = _ParseHistogram(hist_file_path, bin_vals[clat_hist_idx - 1])
 
         for key in hists:
@@ -287,8 +338,12 @@ def ComputeHistogramBinVals(vm, log_file):
     A list of float. Representing the mean value of the bin.
   """
   try:
-    return [float(v) for v in vm.RemoteCommand(
-        './%s %s' % (FIO_HIST_LOG_PARSER, log_file))[0].split()]
+    return [
+        float(v)
+        for v in vm.RemoteCommand('./%s %s' % (FIO_HIST_LOG_PARSER, log_file))[
+            0
+        ].split()
+    ]
   except errors.VirtualMachine.RemoteCommandError:
     logging.exception('Calculate bin values for %s failed.', log_file)
     return []
@@ -314,9 +369,8 @@ def _ParseHistogram(hist_log_file, mean_bin_vals):
   """Parses histogram log file reported by fio.
 
   Args:
-    hist_log_file: String. File name of fio histogram log. Format:
-      time (msec), data direction (0: read, 1: write, 2: trim), block size,
-      bin 0, .., etc
+    hist_log_file: String. File name of fio histogram log. Format: time (msec),
+      data direction (0: read, 1: write, 2: trim), block size, bin 0, .., etc
     mean_bin_vals: List of float. Representing the mean value of each bucket.
 
   Returns:
@@ -344,24 +398,29 @@ def _ParseHistogram(hist_log_file, mean_bin_vals):
   return aggregates
 
 
-def _BuildHistogramSamples(aggregates, metric_prefix='',
-                           additional_metadata=None):
+def _BuildHistogramSamples(
+    aggregates, metric_prefix='', additional_metadata=None
+):
   """Builds a sample for a histogram aggregated from several files.
 
-    Args:
-      metric_prefix: String. Prefix of the metric name to use.
-      additional_metadata: dict. Additional metadata attaching to Sample.
+  Args:
+    metric_prefix: String. Prefix of the metric name to use.
+    additional_metadata: dict. Additional metadata attaching to Sample.
 
-    Returns:
-      samples.Sample object that reports the fio histogram.
+  Returns:
+    samples.Sample object that reports the fio histogram.
   """
   samples = []
-  for (rw, bs) in aggregates.keys():
+  for rw, bs in aggregates.keys():
     metadata = {'histogram': json.dumps(aggregates[(rw, bs)])}
     if additional_metadata:
       metadata.update(additional_metadata)
     samples.append(
         sample.Sample(
             ':'.join([metric_prefix, str(bs), rw, 'histogram']),
-            0, 'us', metadata))
+            0,
+            'us',
+            metadata,
+        )
+    )
   return samples

@@ -28,32 +28,249 @@ from tests import pkb_common_test_case
 FLAGS = flags.FLAGS
 
 
-class MySQLServiceBenchmarkTestCase(unittest.TestCase,
-                                    test_util.SamplesTestMixin):
+class ScaleUpClientTestCase(
+    pkb_common_test_case.PkbCommonTestCase, test_util.SamplesTestMixin
+):
 
   def setUp(self):
     super().setUp()
-    path = os.path.join(os.path.dirname(__file__), '..', 'data',
-                        'sysbench-output-sample.txt')
+    path = os.path.join(
+        os.path.dirname(__file__), '..', 'data', 'sysbench-output-sample.txt'
+    )
+    with open(path) as fp:
+      self.contents = fp.read()
+    self.enter_context(
+        mock.patch.object(
+            sysbench_benchmark, '_GetCommonSysbenchOptions', return_value=[]
+        )
+    )
+    FLAGS.sysbench_testname = sysbench_benchmark.SPANNER_TPCC
+
+  @mock.patch('time.time', mock.MagicMock(return_value=0))
+  @flagsaver.flagsaver(
+      sysbench_scaleup_clients_test_num_clients=2,
+      sysbench_scale_up_max_cpu_utilization=0.5,
+  )
+  def testScaleUpClient(self):
+    benchmark_spec = mock.Mock()
+    benchmark_spec.relational_db = mock.Mock()
+    benchmark_spec.relational_db.GetAverageCpuUsage = mock.Mock(
+        return_value=0.5
+    )
+    clients = [mock.Mock(), mock.Mock()]
+    for client in clients:
+      client.RobustRemoteCommand = mock.Mock(return_value=[self.contents, ''])
+    result = sysbench_benchmark._RunScaleUpClientsBenchmark(
+        clients, 100, benchmark_spec, 10, {}
+    )
+    self.assertEqual(clients[0].RobustRemoteCommand.call_count, 2)
+    self.assertEqual(clients[1].RobustRemoteCommand.call_count, 1)
+    self.assertEqual(
+        result,
+        [
+            sample.Sample(
+                metric='total_tps',
+                value=986.49,
+                unit='tps',
+                metadata={
+                    'sysbench_scale_up_client_count': 1,
+                    'cpu_utilization': 0.5,
+                    'tps': [986.49],
+                },
+                timestamp=0,
+            ),
+            sample.Sample(
+                metric='total_qps',
+                value=19730.45,
+                unit='qps',
+                metadata={
+                    'sysbench_scale_up_client_count': 1,
+                    'cpu_utilization': 0.5,
+                    'qps': [19730.45],
+                },
+                timestamp=0,
+            ),
+            sample.Sample(
+                metric='min_latency',
+                value=12.38,
+                unit='ms',
+                metadata={
+                    'sysbench_scale_up_client_count': 1,
+                    'cpu_utilization': 0.5,
+                },
+                timestamp=0,
+            ),
+            sample.Sample(
+                metric='average_latency',
+                value=16.21,
+                unit='ms',
+                metadata={
+                    'sysbench_scale_up_client_count': 1,
+                    'cpu_utilization': 0.5,
+                },
+                timestamp=0,
+            ),
+            sample.Sample(
+                metric='max_latency',
+                value=115.78,
+                unit='ms',
+                metadata={
+                    'sysbench_scale_up_client_count': 1,
+                    'cpu_utilization': 0.5,
+                },
+                timestamp=0,
+            ),
+            sample.Sample(
+                metric='total_tps',
+                value=1972.98,
+                unit='tps',
+                metadata={
+                    'sysbench_scale_up_client_count': 2,
+                    'cpu_utilization': 0.5,
+                    'tps': [986.49, 986.49],
+                },
+                timestamp=0,
+            ),
+            sample.Sample(
+                metric='total_qps',
+                value=39460.9,
+                unit='qps',
+                metadata={
+                    'sysbench_scale_up_client_count': 2,
+                    'cpu_utilization': 0.5,
+                    'qps': [19730.45, 19730.45],
+                },
+                timestamp=0,
+            ),
+            sample.Sample(
+                metric='min_latency',
+                value=12.38,
+                unit='ms',
+                metadata={
+                    'sysbench_scale_up_client_count': 2,
+                    'cpu_utilization': 0.5,
+                    'latency_array': [12.38, 12.38],
+                },
+                timestamp=0,
+            ),
+            sample.Sample(
+                metric='average_latency',
+                value=16.21,
+                unit='ms',
+                metadata={
+                    'sysbench_scale_up_client_count': 2,
+                    'cpu_utilization': 0.5,
+                    'latency_array': [16.21, 16.21],
+                },
+                timestamp=0,
+            ),
+            sample.Sample(
+                metric='max_latency',
+                value=115.78,
+                unit='ms',
+                metadata={
+                    'sysbench_scale_up_client_count': 2,
+                    'cpu_utilization': 0.5,
+                    'latency_array': [115.78, 115.78],
+                },
+                timestamp=0,
+            ),
+        ],
+    )
+
+
+class MySQLServiceBenchmarkTestCase(
+    unittest.TestCase, test_util.SamplesTestMixin
+):
+
+  def setUp(self):
+    super().setUp()
+    path = os.path.join(
+        os.path.dirname(__file__), '..', 'data', 'sysbench-output-sample.txt'
+    )
     with open(path) as fp:
       self.contents = fp.read()
 
   def testParseSysbenchResult(self):
     metadata = {}
     results = sysbench_benchmark._ParseSysbenchTimeSeries(
-        self.contents, metadata)
+        self.contents, metadata
+    )
     logging.info('results are, %s', results)
     expected_results = [
-        sample.Sample('tps_array', -1, 'tps', {'tps': [
-            1012.86, 1006.64, 1022.3, 1016.16, 1009.03, 1016.99, 1010.0, 1018.0,
-            1002.01, 998.49, 959.52, 913.49, 936.98, 916.01, 957.96]}),
-        sample.Sample('latency_array', -1, 'ms', {'latency': [
-            28.67, 64.47, 38.94, 44.98, 89.16, 29.72, 106.75, 46.63, 116.8,
-            41.85, 27.17, 104.84, 58.92, 75.82, 73.13]}),
-        sample.Sample('qps_array', -1, 'qps', {'qps': [
-            20333.18, 20156.38, 20448.49, 20334.15, 20194.07, 20331.31,
-            20207.00, 20348.96, 20047.11, 19972.86, 19203.97, 18221.83,
-            18689.14, 18409.68, 19155.63]})]
+        sample.Sample(
+            'tps_array',
+            -1,
+            'tps',
+            {
+                'tps': [
+                    1012.86,
+                    1006.64,
+                    1022.3,
+                    1016.16,
+                    1009.03,
+                    1016.99,
+                    1010.0,
+                    1018.0,
+                    1002.01,
+                    998.49,
+                    959.52,
+                    913.49,
+                    936.98,
+                    916.01,
+                    957.96,
+                ]
+            },
+        ),
+        sample.Sample(
+            'latency_array',
+            -1,
+            'ms',
+            {
+                'latency': [
+                    28.67,
+                    64.47,
+                    38.94,
+                    44.98,
+                    89.16,
+                    29.72,
+                    106.75,
+                    46.63,
+                    116.8,
+                    41.85,
+                    27.17,
+                    104.84,
+                    58.92,
+                    75.82,
+                    73.13,
+                ]
+            },
+        ),
+        sample.Sample(
+            'qps_array',
+            -1,
+            'qps',
+            {
+                'qps': [
+                    20333.18,
+                    20156.38,
+                    20448.49,
+                    20334.15,
+                    20194.07,
+                    20331.31,
+                    20207.00,
+                    20348.96,
+                    20047.11,
+                    19972.86,
+                    19203.97,
+                    18221.83,
+                    18689.14,
+                    18409.68,
+                    19155.63,
+                ]
+            },
+        ),
+    ]
     self.assertSampleListsEqualUpToTimestamp(results, expected_results)
 
 
@@ -123,21 +340,6 @@ class SpannerBenchmarkTestCase(
     self.assertIn('sysbench_use_fk', metadata)
 
   class SysbenchBenchmarkTest(pkb_common_test_case.PkbCommonTestCase):
-
-    @parameterized.parameters(
-        ('spanner-tpcc', 16, 400, 1),
-        ('tpcc', 10, 10, 1),
-        ('oltp_read_only', 10, 400, 10),
-    )
-    def testGetLoadThreads(self, test_name, expected_threads, scale, tables):
-      with flagsaver.flagsaver(
-          sysbench_load_threads=16,
-          sysbench_testname=test_name,
-          sysbench_scale=scale,
-          sysbench_tables=tables,
-      ):
-        actual_threads = sysbench_benchmark._GetLoadThreads()
-      self.assertEqual(expected_threads, actual_threads)
 
     def testLoadPhaseIncreasedCapacityAurora(self):
       mock_spec = textwrap.dedent("""

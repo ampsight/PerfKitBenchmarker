@@ -58,8 +58,7 @@ class ElastiCacheRedis(managed_memory_store.BaseManagedMemoryStore):
 
     self.subnets = []
 
-  @staticmethod
-  def CheckPrerequisites(benchmark_config):
+  def CheckPrerequisites(self):
     if (
         FLAGS.managed_memory_store_version
         and FLAGS.managed_memory_store_version
@@ -79,8 +78,7 @@ class ElastiCacheRedis(managed_memory_store.BaseManagedMemoryStore):
     else:
       if (
           not FLAGS.elasticache_failover_zone
-          or FLAGS.elasticache_failover_zone[:-1]
-          != FLAGS.cloud_redis_region
+          or FLAGS.elasticache_failover_zone[:-1] != FLAGS.cloud_redis_region
       ):
         raise errors.Config.InvalidValue(
             'Invalid failover zone. A failover zone in %s must be specified. '

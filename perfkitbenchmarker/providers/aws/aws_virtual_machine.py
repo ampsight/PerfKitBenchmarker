@@ -29,7 +29,6 @@ import re
 import threading
 import time
 import uuid
-
 from absl import flags
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
@@ -43,7 +42,9 @@ from perfkitbenchmarker import vm_util
 from perfkitbenchmarker import windows_virtual_machine
 from perfkitbenchmarker.configs import option_decoders
 from perfkitbenchmarker.providers.aws import aws_disk
+from perfkitbenchmarker.providers.aws import aws_disk_strategies
 from perfkitbenchmarker.providers.aws import aws_network
+from perfkitbenchmarker.providers.aws import flags as aws_flags
 from perfkitbenchmarker.providers.aws import util
 from six.moves import range
 
@@ -53,7 +54,6 @@ FLAGS = flags.FLAGS
 HVM = 'hvm'
 PV = 'paravirtual'
 NON_HVM_PREFIXES = ['m1', 'c1', 't1', 'm2']
-DRIVE_START_LETTER = 'b'
 
 # AWS EC2 Instance life cycle:
 # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html
@@ -61,27 +61,33 @@ RUNNING = 'running'
 TERMINATED = 'terminated'
 SHUTTING_DOWN = 'shutting-down'
 INSTANCE_TRANSITIONAL_STATUSES = frozenset(['pending'])
-INSTANCE_EXISTS_STATUSES = (INSTANCE_TRANSITIONAL_STATUSES |
-                            frozenset([RUNNING, 'stopping', 'stopped']))
+INSTANCE_EXISTS_STATUSES = INSTANCE_TRANSITIONAL_STATUSES | frozenset(
+    [RUNNING, 'stopping', 'stopped']
+)
 INSTANCE_DELETED_STATUSES = frozenset([SHUTTING_DOWN, TERMINATED])
-INSTANCE_KNOWN_STATUSES = (INSTANCE_EXISTS_STATUSES | INSTANCE_DELETED_STATUSES)
+INSTANCE_KNOWN_STATUSES = INSTANCE_EXISTS_STATUSES | INSTANCE_DELETED_STATUSES
 
 HOST_EXISTS_STATES = frozenset(
-    ['available', 'under-assessment', 'permanent-failure'])
+    ['available', 'under-assessment', 'permanent-failure']
+)
 HOST_RELEASED_STATES = frozenset(['released', 'released-permanent-failure'])
 KNOWN_HOST_STATES = HOST_EXISTS_STATES | HOST_RELEASED_STATES
 
 AWS_INITIATED_SPOT_TERMINATING_TRANSITION_STATUSES = frozenset(
-    ['marked-for-termination', 'marked-for-stop'])
+    ['marked-for-termination', 'marked-for-stop']
+)
 
-AWS_INITIATED_SPOT_TERMINAL_STATUSES = frozenset(
-    ['instance-terminated-by-price', 'instance-terminated-by-service',
-     'instance-terminated-no-capacity',
-     'instance-terminated-capacity-oversubscribed',
-     'instance-terminated-launch-group-constraint'])
+AWS_INITIATED_SPOT_TERMINAL_STATUSES = frozenset([
+    'instance-terminated-by-price',
+    'instance-terminated-by-service',
+    'instance-terminated-no-capacity',
+    'instance-terminated-capacity-oversubscribed',
+    'instance-terminated-launch-group-constraint',
+])
 
 USER_INITIATED_SPOT_TERMINAL_STATUSES = frozenset(
-    ['request-canceled-and-instance-running', 'instance-terminated-by-user'])
+    ['request-canceled-and-instance-running', 'instance-terminated-by-user']
+)
 
 # From https://wiki.debian.org/Cloud/AmazonEC2Image/Stretch
 # Marketplace AMI exists, but not in all regions
@@ -132,7 +138,7 @@ _ENI_PARAMS = {
     'DeviceIndex': 0,
     'NetworkCardIndex': 0,
     'Groups': '',
-    'SubnetId': ''
+    'SubnetId': '',
 }
 
 # Parameters for use with Elastic Fiber Adapter
@@ -140,10 +146,19 @@ _EFA_PARAMS = _ENI_PARAMS.copy()
 _EFA_PARAMS['InterfaceType'] = 'efa'
 
 # Location of EFA installer
-_EFA_URL = ('https://s3-us-west-2.amazonaws.com/aws-efa-installer/'
-            'aws-efa-installer-{version}.tar.gz')
+_EFA_URL = (
+    'https://s3-us-west-2.amazonaws.com/aws-efa-installer/'
+    'aws-efa-installer-{version}.tar.gz'
+)
 
-FIVE_MINUTE_TIMEOUT = 300
+# https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/p5-efa.html
+# Based on testing, dl1 and trn1 require similar commandline arguments.
+_EFA_V2_MACHINE_TYPES = (
+    'p5.48xlarge',
+    'dl1.24xlarge',
+    'trn1.32xlarge',
+    'trn1n.32xlarge',
+)
 
 
 class AwsTransitionalVmRetryableError(Exception):
@@ -187,17 +202,21 @@ def GetRootBlockDeviceSpecForImage(image_id, region):
       'describe-images',
       '--region=%s' % region,
       '--image-ids=%s' % image_id,
-      '--query', 'Images[]']
+      '--query',
+      'Images[]',
+  ]
   stdout, _ = util.IssueRetryableCommand(command)
   images = json.loads(stdout)
   assert images
   assert len(images) == 1, (
-      'Expected to receive only one image description for %s' % image_id)
+      'Expected to receive only one image description for %s' % image_id
+  )
   image_spec = images[0]
   root_device_name = image_spec['RootDeviceName']
   block_device_mappings = image_spec['BlockDeviceMappings']
-  root_block_device_dict = next((x for x in block_device_mappings if
-                                 x['DeviceName'] == root_device_name))
+  root_block_device_dict = next(
+      (x for x in block_device_mappings if x['DeviceName'] == root_device_name)
+  )
   return root_block_device_dict
 
 
@@ -206,6 +225,7 @@ def GetBlockDeviceMap(vm):
 
   Args:
     vm: vm to build the block device map for.
+
   Returns:
     The json representation of the block device map.
     If self.boot_disk_size and self.image are provided, the block device map
@@ -222,11 +242,9 @@ def GetBlockDeviceMap(vm):
   mappings = []
   if vm.boot_disk_size is not None:
     if vm.image is None:
-      raise ValueError(
-          'Image must be provided if boot_disk_size is specified')
+      raise ValueError('Image must be provided if boot_disk_size is specified')
     if vm.region is None:
-      raise ValueError(
-          'Region must be provided if image is specified')
+      raise ValueError('Region must be provided if image is specified')
     root_block_device = GetRootBlockDeviceSpecForImage(vm.image, vm.region)
     root_block_device['Ebs']['VolumeSize'] = vm.boot_disk_size
     # The 'Encrypted' key must be removed or the CLI will complain
@@ -235,52 +253,14 @@ def GetBlockDeviceMap(vm):
     else:
       root_block_device['Ebs']['Encrypted'] = True
     mappings.append(root_block_device)
-
-  for spec_index, disk_spec in enumerate(vm.disk_specs):
-    if not vm.DiskTypeCreatedOnVMCreation(disk_spec.disk_type):
-      continue
-
-    for i in range(disk_spec.num_striped_disks):
-      mapping = collections.OrderedDict()
-      device_letter = aws_disk.AwsDisk.GenerateDeviceLetter(vm.name)
-      device_name_prefix = aws_disk.AwsDisk.GenerateDeviceNamePrefix(
-          disk_spec.disk_type)
-      device_name = device_name_prefix + device_letter
-      mapping['DeviceName'] = device_name
-      if disk_spec.disk_type == disk.LOCAL:
-        mapping['VirtualName'] = 'ephemeral%s' % i
-        if not aws_disk.LocalDriveIsNvme(vm.machine_type):
-          # non-nvme local disks just gets its name as device path,
-          # logging it now since it does not show up in block-device-mapping
-          # of DescribeInstances call.
-          vm.LogDeviceByName(device_name, None, device_name)
-      else:
-        ebs_block = collections.OrderedDict()
-        ebs_block['VolumeType'] = disk_spec.disk_type
-        ebs_block['VolumeSize'] = disk_spec.disk_size
-        ebs_block['DeleteOnTermination'] = True
-        if disk_spec.iops and disk_spec.disk_type in [
-            aws_disk.IO1, aws_disk.IO2, aws_disk.GP3
-        ]:
-          ebs_block['Iops'] = disk_spec.iops
-        if disk_spec.throughput and disk_spec.disk_type in [aws_disk.GP3]:
-          ebs_block['Throughput'] = disk_spec.throughput
-        mapping['Ebs'] = ebs_block
-      mappings.append(mapping)
-      disk_spec_id = BuildDiskSpecId(spec_index, i)
-      vm.LogDeviceByDiskSpecId(disk_spec_id, device_name)
+  mappings.extend(vm.create_disk_strategy.GetBlockDeviceMap())
 
   if mappings:
     return json.dumps(mappings)
   return None
 
 
-def BuildDiskSpecId(spec_index, strip_index):
-  """Generates an unique string to represent a disk_spec position."""
-  return f'{spec_index}_{strip_index}'
-
-
-def GetArmArchitecture(machine_type):
+def GetArmArchitecture(machine_type: str):
   """Returns the specific ARM processor architecture of the VM."""
   # c6g.medium -> c6g, m6gd.large -> m6g, c5n.18xlarge -> c5
   prefix = re.split(r'[dn]?\.', machine_type)[0]
@@ -314,7 +294,7 @@ class AwsDedicatedHost(resource.BaseResource):
     id: The host_id of the host.
   """
 
-  def __init__(self, machine_type, zone):
+  def __init__(self, machine_type: str, zone: str):
     super(AwsDedicatedHost, self).__init__()
     self.machine_type = machine_type
     self.zone = zone
@@ -332,7 +312,8 @@ class AwsDedicatedHost(resource.BaseResource):
         '--instance-type=%s' % self.machine_type,
         '--availability-zone=%s' % self.zone,
         '--auto-placement=off',
-        '--quantity=1']
+        '--quantity=1',
+    ]
     vm_util.IssueCommand(create_cmd)
 
   def _Delete(self):
@@ -341,7 +322,8 @@ class AwsDedicatedHost(resource.BaseResource):
           'ec2',
           'release-hosts',
           '--region=%s' % self.region,
-          '--host-ids=%s' % self.id]
+          '--host-ids=%s' % self.id,
+      ]
       vm_util.IssueCommand(delete_cmd, raise_on_failure=False)
 
   @vm_util.Retry()
@@ -350,7 +332,8 @@ class AwsDedicatedHost(resource.BaseResource):
         'ec2',
         'describe-hosts',
         '--region=%s' % self.region,
-        '--filter=Name=client-token,Values=%s' % self.client_token]
+        '--filter=Name=client-token,Values=%s' % self.client_token,
+    ]
     stdout, _, _ = vm_util.IssueCommand(describe_cmd)
     response = json.loads(stdout)
     hosts = response['Hosts']
@@ -380,10 +363,10 @@ class AwsVmSpec(virtual_machine.BaseVmSpec):
     Can be overridden by derived classes to add support for specific flags.
 
     Args:
-      config_values: dict mapping config option names to provided values. May
-          be modified by this function.
+      config_values: dict mapping config option names to provided values. May be
+        modified by this function.
       flag_values: flags.FlagValues. Runtime flags that may override the
-          provided config values.
+        provided config values.
     """
     super(AwsVmSpec, cls)._ApplyFlags(config_values, flag_values)
     if flag_values['aws_boot_disk_size'].present:
@@ -394,7 +377,8 @@ class AwsVmSpec(virtual_machine.BaseVmSpec):
       config_values['spot_price'] = flag_values.aws_spot_price
     if flag_values['aws_spot_block_duration_minutes'].present:
       config_values['spot_block_duration_minutes'] = int(
-          flag_values.aws_spot_block_duration_minutes)
+          flag_values.aws_spot_block_duration_minutes
+      )
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -407,18 +391,16 @@ class AwsVmSpec(virtual_machine.BaseVmSpec):
     """
     result = super(AwsVmSpec, cls)._GetOptionDecoderConstructions()
     result.update({
-        'use_spot_instance': (option_decoders.BooleanDecoder, {
-            'default': False
-        }),
-        'spot_price': (option_decoders.FloatDecoder, {
-            'default': None
-        }),
-        'spot_block_duration_minutes': (option_decoders.IntDecoder, {
-            'default': None
-        }),
-        'boot_disk_size': (option_decoders.IntDecoder, {
-            'default': None
-        })
+        'use_spot_instance': (
+            option_decoders.BooleanDecoder,
+            {'default': False},
+        ),
+        'spot_price': (option_decoders.FloatDecoder, {'default': None}),
+        'spot_block_duration_minutes': (
+            option_decoders.IntDecoder,
+            {'default': None},
+        ),
+        'boot_disk_size': (option_decoders.IntDecoder, {'default': None}),
     })
 
     return result
@@ -437,6 +419,7 @@ def _GetKeyfileSetKey(region):
 
 class AwsKeyFileManager(object):
   """Object for managing AWS Keyfiles."""
+
   _lock = threading.Lock()
   imported_keyfile_set = set()
   deleted_keyfile_set = set()
@@ -447,24 +430,27 @@ class AwsKeyFileManager(object):
     with cls._lock:
       if _GetKeyfileSetKey(region) in cls.imported_keyfile_set:
         return
-      cat_cmd = ['cat',
-                 vm_util.GetPublicKeyPath()]
+      cat_cmd = ['cat', vm_util.GetPublicKeyPath()]
       keyfile, _ = vm_util.IssueRetryableCommand(cat_cmd)
-      formatted_tags = util.FormatTagSpecifications('key-pair',
-                                                    util.MakeDefaultTags())
+      formatted_tags = util.FormatTagSpecifications(
+          'key-pair', util.MakeDefaultTags()
+      )
       import_cmd = util.AWS_PREFIX + [
-          'ec2', '--region=%s' % region,
+          'ec2',
+          '--region=%s' % region,
           'import-key-pair',
           '--key-name=%s' % cls.GetKeyNameForRun(),
           '--public-key-material=%s' % keyfile,
           '--tag-specifications=%s' % formatted_tags,
       ]
       _, stderr, retcode = vm_util.IssueCommand(
-          import_cmd, raise_on_failure=False)
+          import_cmd, raise_on_failure=False
+      )
       if retcode:
         if 'KeyPairLimitExceeded' in stderr:
           raise errors.Benchmarks.QuotaFailure(
-              'KeyPairLimitExceeded in %s: %s' % (region, stderr))
+              'KeyPairLimitExceeded in %s: %s' % (region, stderr)
+          )
         else:
           raise errors.Benchmarks.PrepareException(stderr)
 
@@ -479,9 +465,11 @@ class AwsKeyFileManager(object):
       if _GetKeyfileSetKey(region) in cls.deleted_keyfile_set:
         return
       delete_cmd = util.AWS_PREFIX + [
-          'ec2', '--region=%s' % region,
+          'ec2',
+          '--region=%s' % region,
           'delete-key-pair',
-          '--key-name=%s' % cls.GetKeyNameForRun()]
+          '--key-name=%s' % cls.GetKeyNameForRun(),
+      ]
       util.IssueRetryableCommand(delete_cmd)
       cls.deleted_keyfile_set.add(_GetKeyfileSetKey(region))
       if _GetKeyfileSetKey(region) in cls.imported_keyfile_set:
@@ -542,6 +530,7 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
   _lock = threading.Lock()
   deleted_hosts = set()
   host_map = collections.defaultdict(list)
+  machine_type: str
 
   def __init__(self, vm_spec):
     """Initialize a AWS virtual machine.
@@ -553,6 +542,7 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
       ValueError: If an incompatible vm_spec is passed.
     """
     super(AwsVirtualMachine, self).__init__(vm_spec)
+    assert isinstance(self.zone, str)
     self.region = util.GetRegionFromZone(self.zone)
     self.user_name = FLAGS.aws_user_name or self.DEFAULT_USER_NAME
     if self.machine_type in aws_disk.NUM_LOCAL_VOLUMES:
@@ -562,6 +552,20 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     else:
       self.user_data = None
     self.network = aws_network.AwsNetwork.GetNetwork(self)
+    self.network_eni_count = aws_network.AWS_ENI_COUNT.value
+    self.network_card_count = aws_network.AWS_NETWORK_CARD_COUNT.value
+    if (
+        (self.network_eni_count > 1)
+        and (self.network_card_count > 1)
+        and (self.machine_type not in aws_network.DUAL_NETWORK_CARD_MACHINES)
+    ):
+      logging.warning(
+          '%s does not support %s network cards. Using 1 instead.',
+          self.machine_type,
+          self.network_card_count,
+      )
+      self.network_eni_count = 1
+      self.network_card_count = 1
     self.placement_group = self.network.placement_group
     self.firewall = aws_network.AwsFirewall.GetFirewall()
     self.use_dedicated_host = vm_spec.use_dedicated_host
@@ -571,30 +575,33 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.spot_block_duration_minutes = vm_spec.spot_block_duration_minutes
     self.boot_disk_size = vm_spec.boot_disk_size
     self.client_token = str(uuid.uuid4())
+    self.num_hosts = None
     self.host = None
     self.id = None
     self.metadata.update({
-        'spot_instance':
-            self.use_spot_instance,
-        'spot_price':
-            self.spot_price,
-        'spot_block_duration_minutes':
-            self.spot_block_duration_minutes,
-        'placement_group_strategy':
+        'spot_instance': self.use_spot_instance,
+        'spot_price': self.spot_price,
+        'spot_block_duration_minutes': self.spot_block_duration_minutes,
+        'placement_group_strategy': (
             self.placement_group.strategy
-            if self.placement_group else placement_group.PLACEMENT_GROUP_NONE,
-        'partition_count':
-            self.placement_group.partition_count
-            if self.placement_group else 0,
-        'aws_credit_specification':
+            if self.placement_group
+            else placement_group.PLACEMENT_GROUP_NONE
+        ),
+        'partition_count': (
+            self.placement_group.partition_count if self.placement_group else 0
+        ),
+        'aws_credit_specification': (
             FLAGS.aws_credit_specification
-            if FLAGS.aws_credit_specification else 'none'
+            if FLAGS.aws_credit_specification
+            else 'none'
+        ),
     })
     self.spot_early_termination = False
     self.spot_status_code = None
     # See:
     # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/enhanced-networking-os.html
     self._smp_affinity_script = 'smp_affinity.sh'
+    self.create_cmd = None
 
     arm_arch = GetArmArchitecture(self.machine_type)
     if arm_arch:
@@ -604,11 +611,12 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     if self.use_dedicated_host and util.IsRegion(self.zone):
       raise ValueError(
           'In order to use dedicated hosts, you must specify an availability '
-          'zone, not a region ("zone" was %s).' % self.zone)
+          'zone, not a region ("zone" was %s).'
+          % self.zone
+      )
 
     if self.use_dedicated_host and self.use_spot_instance:
-      raise ValueError(
-          'Tenancy=host is not supported for Spot Instances')
+      raise ValueError('Tenancy=host is not supported for Spot Instances')
     self.allocation_id = None
     self.association_id = None
     self.aws_tags = {}
@@ -619,6 +627,10 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     # this is a mapping of known device name to AWS-side identifiers.
     # AWS-side identifiers are assigned by AWS at creation time.
     self.disk_identifiers_by_device = {}
+    self.create_disk_strategy = aws_disk_strategies.GetCreateDiskStrategy(
+        self, None, 0
+    )
+    self.instance_profile = aws_flags.AWS_EC2_INSTANCE_PROFILE.value
 
   @property
   def host_list(self):
@@ -628,6 +640,7 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
   @property
   def group_id(self):
     """Returns the security group ID of this VM."""
+    assert self.network is not None
     return self.network.regional_network.vpc.default_security_group_id
 
   @classmethod
@@ -663,11 +676,19 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
       if FLAGS.aws_image_name_filter:
         raise ValueError(
             '--aws_image_name_filter is not supported for AWS OS Mixins that '
-            'use SSM to select AMIs. You can still pass --image.')
-      stdout, _, _ = vm_util.IssueCommand(util.AWS_PREFIX + [
-          'ssm', 'get-parameters',
-          '--region', region,
-          '--names', cls.IMAGE_SSM_PATTERN.format(**format_dict)])
+            'use SSM to select AMIs. You can still pass --image.'
+        )
+      stdout, _, _ = vm_util.IssueCommand(
+          util.AWS_PREFIX
+          + [
+              'ssm',
+              'get-parameters',
+              '--region',
+              region,
+              '--names',
+              cls.IMAGE_SSM_PATTERN.format(**format_dict),
+          ]
+      )
       response = json.loads(stdout)
       if response['InvalidParameters']:
         raise AwsImageNotFoundError('Invalid SSM parameters:\n' + stdout)
@@ -680,7 +701,8 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
       raise NotImplementedError('AWS OSMixins require IMAGE_OWNER')
     if not cls.IMAGE_NAME_FILTER_PATTERN:
       raise NotImplementedError(
-          'AWS OSMixins require IMAGE_NAME_FILTER_PATTERN')
+          'AWS OSMixins require IMAGE_NAME_FILTER_PATTERN'
+      )
 
     if FLAGS.aws_image_name_filter:
       cls.IMAGE_NAME_FILTER_PATTERN = FLAGS.aws_image_name_filter
@@ -694,20 +716,23 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
         '--region=%s' % region,
         'ec2',
         'describe-images',
-        '--query', ('Images[*].{Name:Name,ImageId:ImageId,'
-                    'CreationDate:CreationDate}'),
+        '--query',
+        'Images[*].{Name:Name,ImageId:ImageId,CreationDate:CreationDate}',
         '--filters',
         'Name=name,Values=' + image_name_filter,
-        'Name=block-device-mapping.volume-type,Values=%s' %
-        cls.DEFAULT_ROOT_DISK_TYPE,
+        'Name=block-device-mapping.volume-type,Values=%s'
+        % cls.DEFAULT_ROOT_DISK_TYPE,
         'Name=virtualization-type,Values=%s' % virt_type,
-        'Name=architecture,Values=%s' % processor_architecture]
+        'Name=architecture,Values=%s' % processor_architecture,
+    ]
     if cls.IMAGE_PRODUCT_CODE_FILTER:
-      describe_cmd.extend(['Name=product-code,Values=%s' %
-                           cls.IMAGE_PRODUCT_CODE_FILTER])
+      describe_cmd.extend(
+          ['Name=product-code,Values=%s' % cls.IMAGE_PRODUCT_CODE_FILTER]
+      )
     if cls.IMAGE_DESCRIPTION_FILTER:
-      describe_cmd.extend(['Name=description,Values=%s' %
-                           cls.IMAGE_DESCRIPTION_FILTER])
+      describe_cmd.extend(
+          ['Name=description,Values=%s' % cls.IMAGE_DESCRIPTION_FILTER]
+      )
     if cls.ALLOW_DEPRECATED_IMAGE:
       describe_cmd.append('--include-deprecated')
     else:
@@ -717,8 +742,9 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     stdout, _ = util.IssueRetryableCommand(describe_cmd)
 
     if not stdout:
-      raise AwsImageNotFoundError('aws describe-images did not produce valid '
-                                  'output.')
+      raise AwsImageNotFoundError(
+          'aws describe-images did not produce valid output.'
+      )
 
     if cls.IMAGE_NAME_REGEX:
       # Further filter images by the IMAGE_NAME_REGEX filter.
@@ -732,9 +758,11 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
           excluded_images.append(image)
 
       if excluded_images:
-        logging.debug('Excluded the following images with regex "%s": %s',
-                      image_name_regex,
-                      sorted(image['Name'] for image in excluded_images))
+        logging.debug(
+            'Excluded the following images with regex "%s": %s',
+            image_name_regex,
+            sorted(image['Name'] for image in excluded_images),
+        )
     else:
       images = json.loads(stdout)
 
@@ -743,35 +771,46 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
 
     return max(images, key=lambda image: image['CreationDate'])['ImageId']
 
-  @vm_util.Retry(max_retries=2)
-  def _PostCreate(self):
-    """Get the instance's data and tag it."""
+  def _RunDescribeInstancesCommand(self):
+    """Runs the describe-instances command and return the response as JSON."""
     describe_cmd = util.AWS_PREFIX + [
         'ec2',
         'describe-instances',
         '--region=%s' % self.region,
-        '--instance-ids=%s' % self.id]
-    logging.info('Getting instance %s public IP. This will fail until '
-                 'a public IP is available, but will be retried.', self.id)
+        '--filter=Name=client-token,Values=%s' % self.client_token,
+    ]
     stdout, _ = util.IssueRetryableCommand(describe_cmd)
-    response = json.loads(stdout)
+    return json.loads(stdout)
+
+  @vm_util.Retry(max_retries=2)
+  def _PostCreate(self):
+    """Get the instance's data and tag it."""
+    logging.info(
+        'Getting instance %s public IP. This will fail until '
+        'a public IP is available, but will be retried.',
+        self.id,
+    )
+    response = self._RunDescribeInstancesCommand()
     instance = response['Reservations'][0]['Instances'][0]
     self.internal_ip = instance['PrivateIpAddress']
     for network_interface in instance.get('NetworkInterfaces', []):
       # Ensures primary NIC is first
       if network_interface['Attachment']['DeviceIndex'] == 0:
-        self.internal_ips = ([network_interface['PrivateIpAddress']] +
-                             self.internal_ips)
+        self.internal_ips = [
+            network_interface['PrivateIpAddress']
+        ] + self.internal_ips
       else:
         self.internal_ips.append(network_interface['PrivateIpAddress'])
     if util.IsRegion(self.zone):
       self.zone = str(instance['Placement']['AvailabilityZone'])
 
     assert self.group_id == instance['SecurityGroups'][0]['GroupId'], (
-        self.group_id, instance['SecurityGroups'][0]['GroupId'])
+        self.group_id,
+        instance['SecurityGroups'][0]['GroupId'],
+    )
     if FLAGS.aws_efa:
       self._ConfigureEfa(instance)
-    elif aws_network.AWS_ENI_COUNT.value > 1:
+    elif self.network_eni_count > 1:
       self._ConfigureElasticIp(instance)
     elif 'PublicIpAddress' in instance:
       self.ip_address = instance['PublicIpAddress']
@@ -805,8 +844,9 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
       self.RemoteCommand(f'curl -O {url}; tar -xzf {tarfile}')
       self._InstallEfa()
       # Run test program to confirm EFA working
-      self.RemoteCommand('cd aws-efa-installer; '
-                         'PATH=${PATH}:/opt/amazon/efa/bin ./efa_test.sh')
+      self.RemoteCommand(
+          'cd aws-efa-installer; PATH=${PATH}:/opt/amazon/efa/bin ./efa_test.sh'
+      )
 
   def _ConfigureElasticIp(self, instance):
     """Create and associate Elastic IP.
@@ -822,10 +862,10 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
         break
     assert network_interface_id is not None
 
-    stdout, _, _ = vm_util.IssueCommand(util.AWS_PREFIX +
-                                        ['ec2', 'allocate-address',
-                                         f'--region={self.region}',
-                                         '--domain=vpc'])
+    stdout, _, _ = vm_util.IssueCommand(
+        util.AWS_PREFIX
+        + ['ec2', 'allocate-address', f'--region={self.region}', '--domain=vpc']
+    )
     response = json.loads(stdout)
     self.ip_address = response['PublicIp']
     self.allocation_id = response['AllocationId']
@@ -833,10 +873,15 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     util.AddDefaultTags(self.allocation_id, self.region)
 
     stdout, _, _ = vm_util.IssueCommand(
-        util.AWS_PREFIX + ['ec2', 'associate-address',
-                           f'--region={self.region}',
-                           f'--allocation-id={self.allocation_id}',
-                           f'--network-interface-id={network_interface_id}'])
+        util.AWS_PREFIX
+        + [
+            'ec2',
+            'associate-address',
+            f'--region={self.region}',
+            f'--allocation-id={self.allocation_id}',
+            f'--network-interface-id={network_interface_id}',
+        ]
+    )
     response = json.loads(stdout)
     self.association_id = response['AssociationId']
 
@@ -846,32 +891,172 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     See https://aws.amazon.com/hpc/efa/
     """
     if not self.TryRemoteCommand('ulimit -l | grep unlimited'):
-      self.RemoteCommand(f'echo "{self.user_name} - memlock unlimited" | '
-                         'sudo tee -a /etc/security/limits.conf')
+      self.RemoteCommand(
+          f'echo "{self.user_name} - memlock unlimited" | '
+          'sudo tee -a /etc/security/limits.conf'
+      )
     self.RemoteCommand('cd aws-efa-installer; sudo ./efa_installer.sh -y')
     if not self.TryRemoteCommand('ulimit -l | grep unlimited'):
       # efa_installer.sh should reboot enabling this change, reboot if necessary
       self.Reboot()
 
+  def _GenerateCreateCommand(self):
+    """Generate VM Create Command."""
+    assert self.network is not None
+    placement = []
+    if not util.IsRegion(self.zone):
+      placement.append('AvailabilityZone=%s' % self.zone)
+    if self.use_dedicated_host:
+      placement.append('Tenancy=host,HostId=%s' % self.host.id)
+      self.num_hosts = len(self.host_list)
+    elif self.placement_group:
+      placement.append('GroupName=%s' % self.placement_group.name)
+
+    placement = ','.join(placement)
+    block_device_map = GetBlockDeviceMap(self)
+    if not self.aws_tags:
+      # Set tags for the AWS VM. If we are retrying the create, we have to use
+      # the same tags from the previous call.
+      self.aws_tags.update(self.vm_metadata)
+      self.aws_tags.update(util.MakeDefaultTags())
+      # Signal (along with timeout_utc) that VM is short lived.
+      self.aws_tags['vm_nature'] = 'ephemeral'
+    create_cmd = util.AWS_PREFIX + [
+        'ec2',
+        'run-instances',
+        '--region=%s' % self.region,
+        '--client-token=%s' % self.client_token,
+        '--image-id=%s' % self.image,
+        '--instance-type=%s' % self.machine_type,
+        '--key-name=%s' % AwsKeyFileManager.GetKeyNameForRun(),
+        '--tag-specifications=%s'
+        % util.FormatTagSpecifications('instance', self.aws_tags),
+    ]
+
+    if FLAGS.aws_vm_hibernate:
+      create_cmd.extend([
+          '--hibernation-options=Configured=true',
+      ])
+
+    # query fails on hpc6a.48xlarge which already disables smt.
+    if FLAGS.disable_smt and self.machine_type not in (
+        'hpc6a.48xlarge', 'hpc6id.32xlarge', 'hpc7a.96xlarge'):
+      query_cmd = util.AWS_PREFIX + [
+          'ec2',
+          'describe-instance-types',
+          '--instance-types',
+          self.machine_type,
+          '--query',
+          'InstanceTypes[0].VCpuInfo.DefaultCores',
+      ]
+      stdout, _, _ = vm_util.IssueCommand(query_cmd)
+      cores = int(json.loads(stdout))
+      create_cmd.append(f'--cpu-options=CoreCount={cores},ThreadsPerCore=1')
+    if FLAGS.aws_efa:
+      efas = ['--network-interfaces']
+      for device_index in range(FLAGS.aws_efa_count):
+        # You can assign up to one EFA per network card.
+        efa_params = _EFA_PARAMS.copy()
+        efa_params.update({
+            'NetworkCardIndex': device_index,
+            'DeviceIndex': device_index,
+            'Groups': self.group_id,
+            'SubnetId': self.network.subnet.id,
+        })
+        if (
+            self.machine_type in _EFA_V2_MACHINE_TYPES
+            and efa_params['DeviceIndex']
+        ):
+          efa_params['DeviceIndex'] = 1
+        if FLAGS.aws_efa_count == 1 and self.assign_external_ip:
+          efa_params['AssociatePublicIpAddress'] = True
+        efas.append(
+            ','.join(
+                f'{key}={value}' for key, value in sorted(efa_params.items())
+            )
+        )
+      create_cmd.extend(efas)
+    elif self.network_eni_count > 1:
+      enis = ['--network-interfaces']
+      enis_per_network_card = self.network_eni_count // self.network_card_count
+      for device_index in range(self.network_eni_count):
+        eni_params = _ENI_PARAMS.copy()
+        eni_params.update({
+            'NetworkCardIndex': device_index // enis_per_network_card,
+            'DeviceIndex': device_index,
+            'Groups': self.group_id,
+            'SubnetId': self.network.subnet.id,
+        })
+        enis.append(
+            ','.join(
+                f'{key}={value}' for key, value in sorted(eni_params.items())
+            )
+        )
+      create_cmd.extend(enis)
+    else:
+      if self.assign_external_ip:
+        create_cmd.append('--associate-public-ip-address')
+      create_cmd.append(f'--subnet-id={self.network.subnet.id}')
+    if block_device_map:
+      create_cmd.append('--block-device-mappings=%s' % block_device_map)
+    if placement:
+      create_cmd.append('--placement=%s' % placement)
+    if FLAGS.aws_credit_specification:
+      create_cmd.append(
+          '--credit-specification=%s' % FLAGS.aws_credit_specification
+      )
+    if self.user_data:
+      create_cmd.append('--user-data=%s' % self.user_data)
+    if self.capacity_reservation_id:
+      create_cmd.append(
+          '--capacity-reservation-specification=CapacityReservationTarget='
+          '{CapacityReservationId=%s}'
+          % self.capacity_reservation_id
+      )
+    if self.use_spot_instance:
+      instance_market_options = collections.OrderedDict()
+      spot_options = collections.OrderedDict()
+      spot_options['SpotInstanceType'] = 'one-time'
+      spot_options['InstanceInterruptionBehavior'] = 'terminate'
+      if self.spot_price:
+        spot_options['MaxPrice'] = str(self.spot_price)
+      if self.spot_block_duration_minutes:
+        spot_options['BlockDurationMinutes'] = self.spot_block_duration_minutes
+      instance_market_options['MarketType'] = 'spot'
+      instance_market_options['SpotOptions'] = spot_options
+      create_cmd.append(
+          '--instance-market-options=%s' % json.dumps(instance_market_options)
+      )
+    if self.instance_profile:
+      create_cmd.append(
+          f'--iam-instance-profile=Name={self.instance_profile}'
+      )
+    return create_cmd
+
   def _CreateDependencies(self):
     """Create VM dependencies."""
     AwsKeyFileManager.ImportKeyfile(self.region)
     # GetDefaultImage calls the AWS CLI.
-    self.image = self.image or self.GetDefaultImage(self.machine_type,
-                                                    self.region)
+    self.image = self.image or self.GetDefaultImage(
+        self.machine_type, self.region
+    )
     self.AllowRemoteAccessPorts()
 
     if self.use_dedicated_host:
       with self._lock:
-        if (not self.host_list or (self.num_vms_per_host and
-                                   self.host_list[-1].fill_fraction +
-                                   1.0 / self.num_vms_per_host > 1.0)):
+        if not self.host_list or (
+            self.num_vms_per_host
+            and self.host_list[-1].fill_fraction + 1.0 / self.num_vms_per_host
+            > 1.0
+        ):
           host = AwsDedicatedHost(self.machine_type, self.zone)
           self.host_list.append(host)
           host.Create()
         self.host = self.host_list[-1]
         if self.num_vms_per_host:
           self.host.fill_fraction += 1.0 / self.num_vms_per_host
+
+    self.create_cmd = self._GenerateCreateCommand()
 
   def _DeleteDependencies(self):
     """Delete VM dependencies."""
@@ -886,130 +1071,24 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
 
   def _Create(self):
     """Create a VM instance."""
-    placement = []
-    if not util.IsRegion(self.zone):
-      placement.append('AvailabilityZone=%s' % self.zone)
-    if self.use_dedicated_host:
-      placement.append('Tenancy=host,HostId=%s' % self.host.id)
-      num_hosts = len(self.host_list)
-    elif self.placement_group:
-      placement.append('GroupName=%s' % self.placement_group.name)
-
-    placement = ','.join(placement)
-    block_device_map = GetBlockDeviceMap(self)
-    if not self.aws_tags:
-      # Set tags for the AWS VM. If we are retrying the create, we have to use
-      # the same tags from the previous call.
-      self.aws_tags.update(self.vm_metadata)
-      self.aws_tags.update(util.MakeDefaultTags())
-    create_cmd = util.AWS_PREFIX + [
-        'ec2',
-        'run-instances',
-        '--region=%s' % self.region,
-        '--client-token=%s' % self.client_token,
-        '--image-id=%s' % self.image,
-        '--instance-type=%s' % self.machine_type,
-        '--key-name=%s' % AwsKeyFileManager.GetKeyNameForRun(),
-        '--tag-specifications=%s' %
-        util.FormatTagSpecifications('instance', self.aws_tags)]
-
-    if FLAGS.aws_vm_hibernate:
-      create_cmd.extend([
-          '--hibernation-options=Configured=true',
-      ])
-
-    # query fails on hpc6a.48xlarge which already disables smt.
-    if FLAGS.disable_smt and self.machine_type != 'hpc6a.48xlarge':
-      query_cmd = util.AWS_PREFIX + [
-          'ec2',
-          'describe-instance-types',
-          '--instance-types',
-          self.machine_type,
-          '--query',
-          'InstanceTypes[0].VCpuInfo.DefaultCores'
-      ]
-      stdout, _, retcode = vm_util.IssueCommand(query_cmd)
-      cores = int(json.loads(stdout))
-      create_cmd.append(f'--cpu-options=CoreCount={cores},ThreadsPerCore=1')
-    if FLAGS.aws_efa:
-      efas = ['--network-interfaces']
-      for device_index in range(FLAGS.aws_efa_count):
-        # You can assign up to one EFA per network card.
-        efa_params = _EFA_PARAMS.copy()
-        efa_params.update({
-            'NetworkCardIndex': device_index,
-            'DeviceIndex': device_index,
-            'Groups': self.group_id,
-            'SubnetId': self.network.subnet.id
-        })
-        if FLAGS.aws_efa_count == 1 and self.assign_external_ip:
-          efa_params['AssociatePublicIpAddress'] = True
-        efas.append(','.join(f'{key}={value}' for key, value in
-                             sorted(efa_params.items())))
-      create_cmd.extend(efas)
-    elif aws_network.AWS_ENI_COUNT.value > 1:
-      enis = ['--network-interfaces']
-      enis_per_network_card = (
-          aws_network.AWS_ENI_COUNT.value //
-          aws_network.AWS_NETWORK_CARD_COUNT.value
-          )
-      for device_index in range(aws_network.AWS_ENI_COUNT.value):
-        eni_params = _ENI_PARAMS.copy()
-        eni_params.update({
-            'NetworkCardIndex': device_index // enis_per_network_card,
-            'DeviceIndex': device_index,
-            'Groups': self.group_id,
-            'SubnetId': self.network.subnets[device_index].id,
-        })
-        enis.append(','.join(f'{key}={value}' for key, value in
-                             sorted(eni_params.items())))
-      create_cmd.extend(enis)
-    else:
-      if self.assign_external_ip:
-        create_cmd.append('--associate-public-ip-address')
-      create_cmd.append(f'--subnet-id={self.network.subnet.id}')
-    if block_device_map:
-      create_cmd.append('--block-device-mappings=%s' % block_device_map)
-    if placement:
-      create_cmd.append('--placement=%s' % placement)
-    if FLAGS.aws_credit_specification:
-      create_cmd.append('--credit-specification=%s' %
-                        FLAGS.aws_credit_specification)
-    if self.user_data:
-      create_cmd.append('--user-data=%s' % self.user_data)
-    if self.capacity_reservation_id:
-      create_cmd.append(
-          '--capacity-reservation-specification=CapacityReservationTarget='
-          '{CapacityReservationId=%s}' % self.capacity_reservation_id)
-    if self.use_spot_instance:
-      instance_market_options = collections.OrderedDict()
-      spot_options = collections.OrderedDict()
-      spot_options['SpotInstanceType'] = 'one-time'
-      spot_options['InstanceInterruptionBehavior'] = 'terminate'
-      if self.spot_price:
-        spot_options['MaxPrice'] = str(self.spot_price)
-      if self.spot_block_duration_minutes:
-        spot_options['BlockDurationMinutes'] = self.spot_block_duration_minutes
-      instance_market_options['MarketType'] = 'spot'
-      instance_market_options['SpotOptions'] = spot_options
-      create_cmd.append(
-          '--instance-market-options=%s' % json.dumps(instance_market_options))
-    _, stderr, retcode = vm_util.IssueCommand(create_cmd,
-                                              raise_on_failure=False)
+    _, stderr, retcode = vm_util.IssueCommand(
+        self.create_cmd, raise_on_failure=False
+    )
 
     if self.use_dedicated_host and 'InsufficientCapacityOnHost' in stderr:
       if self.num_vms_per_host:
         raise errors.Resource.CreationError(
             'Failed to create host: %d vms of type %s per host exceeds '
-            'memory capacity limits of the host' %
-            (self.num_vms_per_host, self.machine_type))
+            'memory capacity limits of the host'
+            % (self.num_vms_per_host, self.machine_type)
+        )
       else:
         logging.warning(
             'Creation failed due to insufficient host capacity. A new host '
             'will be created and instance creation will be retried.'
         )
         with self._lock:
-          if num_hosts == len(self.host_list):
+          if self.num_hosts == len(self.host_list):
             host = AwsDedicatedHost(self.machine_type, self.zone)
             self.host_list.append(host)
             host.Create()
@@ -1042,18 +1121,26 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     # separate zone. Retrying fixes this error.
     if 'InvalidPlacementGroup.InUse' in stderr:
       raise errors.Resource.RetryableCreationError(stderr)
+    if self.use_spot_instance and re.search(
+        r'Your requested instance type .+ is not supported in your requested'
+        r' Availability Zone',
+        stderr,
+    ):
+      raise errors.Benchmarks.InsufficientCapacityCloudFailure(stderr)
     if 'Unsupported' in stderr:
       raise errors.Benchmarks.UnsupportedConfigError(stderr)
     if retcode:
       raise errors.Resource.CreationError(
-          'Failed to create VM: %s return code: %s' % (stderr, retcode))
+          'Failed to create VM: %s return code: %s' % (stderr, retcode)
+      )
     if not self.create_return_time:
       self.create_return_time = time.time()
 
   @vm_util.Retry(
       poll_interval=0.5,
       log_errors=True,
-      retryable_exceptions=(AwsTransitionalVmRetryableError,))
+      retryable_exceptions=(AwsTransitionalVmRetryableError,),
+  )
   def _WaitForStoppedStatus(self):
     """Returns the status of the VM.
 
@@ -1107,25 +1194,21 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
       vm_util.IssueCommand(suspend_cmd)
     except:
       raise errors.Benchmarks.KnownIntermittentError(
-          'Instance is still not ready to hibernate')
+          'Instance is still not ready to hibernate'
+      )
 
     self._PostSuspend()
 
   @vm_util.Retry(
-      poll_interval=0.5,
-      retryable_exceptions=(AwsTransitionalVmRetryableError,))
+      poll_interval=0.5, retryable_exceptions=(AwsTransitionalVmRetryableError,)
+  )
   def _WaitForNewIP(self):
     """Checks for a new IP address, waiting if the VM is still pending.
 
     Raises:
       AwsTransitionalVmRetryableError: If VM is pending. This is retried.
     """
-    status_cmd = util.AWS_PREFIX + [
-        'ec2', 'describe-instances', f'--region={self.region}',
-        f'--instance-ids={self.id}'
-    ]
-    stdout, _, _ = vm_util.IssueCommand(status_cmd)
-    response = json.loads(stdout)
+    response = self._RunDescribeInstancesCommand()
     instance = response['Reservations'][0]['Instances'][0]
     if 'PublicIpAddress' in instance:
       self.ip_address = instance['PublicIpAddress']
@@ -1154,39 +1237,53 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
           'ec2',
           'terminate-instances',
           '--region=%s' % self.region,
-          '--instance-ids=%s' % self.id]
+          '--instance-ids=%s' % self.id,
+      ]
       vm_util.IssueCommand(delete_cmd, raise_on_failure=False)
     if hasattr(self, 'spot_instance_request_id'):
       cancel_cmd = util.AWS_PREFIX + [
           '--region=%s' % self.region,
           'ec2',
           'cancel-spot-instance-requests',
-          '--spot-instance-request-ids=%s' % self.spot_instance_request_id]
+          '--spot-instance-request-ids=%s' % self.spot_instance_request_id,
+      ]
       vm_util.IssueCommand(cancel_cmd, raise_on_failure=False)
 
-    if FLAGS.aws_efa or aws_network.AWS_ENI_COUNT.value > 1:
+    if FLAGS.aws_efa or self.network_eni_count > 1:
       if self.association_id:
-        vm_util.IssueCommand(util.AWS_PREFIX +
-                             ['ec2', 'disassociate-address',
-                              f'--region={self.region}',
-                              f'--association-id={self.association_id}'])
+        vm_util.IssueCommand(
+            util.AWS_PREFIX
+            + [
+                'ec2',
+                'disassociate-address',
+                f'--region={self.region}',
+                f'--association-id={self.association_id}',
+            ]
+        )
 
       if self.allocation_id:
-        vm_util.IssueCommand(util.AWS_PREFIX +
-                             ['ec2', 'release-address',
-                              f'--region={self.region}',
-                              f'--allocation-id={self.allocation_id}'])
+        vm_util.IssueCommand(
+            util.AWS_PREFIX
+            + [
+                'ec2',
+                'release-address',
+                f'--region={self.region}',
+                f'--allocation-id={self.allocation_id}',
+            ]
+        )
 
   #  _Start or _Stop not yet implemented for AWS
   def _Start(self):
     """Starts the VM."""
     if not self.id:
       raise errors.Benchmarks.RunError(
-          'Expected VM id to be non-null. Please make sure the VM exists.')
+          'Expected VM id to be non-null. Please make sure the VM exists.'
+      )
     start_cmd = util.AWS_PREFIX + [
-        'ec2', 'start-instances',
+        'ec2',
+        'start-instances',
         f'--region={self.region}',
-        f'--instance-ids={self.id}'
+        f'--instance-ids={self.id}',
     ]
     vm_util.IssueCommand(start_cmd)
 
@@ -1197,11 +1294,13 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     """Stops the VM."""
     if not self.id:
       raise errors.Benchmarks.RunError(
-          'Expected VM id to be non-null. Please make sure the VM exists.')
+          'Expected VM id to be non-null. Please make sure the VM exists.'
+      )
     stop_cmd = util.AWS_PREFIX + [
-        'ec2', 'stop-instances',
+        'ec2',
+        'stop-instances',
         f'--region={self.region}',
-        f'--instance-ids={self.id}'
+        f'--instance-ids={self.id}',
     ]
     vm_util.IssueCommand(stop_cmd)
 
@@ -1214,56 +1313,61 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
           '--region=%s' % self.region,
           'ec2',
           'describe-spot-instance-requests',
-          '--spot-instance-request-ids=%s' % self.spot_instance_request_id]
+          '--spot-instance-request-ids=%s' % self.spot_instance_request_id,
+      ]
       stdout, _, _ = vm_util.IssueCommand(describe_cmd)
       sir_response = json.loads(stdout)['SpotInstanceRequests']
       self.spot_status_code = sir_response[0]['Status']['Code']
       self.spot_early_termination = (
-          self.spot_status_code in AWS_INITIATED_SPOT_TERMINAL_STATUSES)
+          self.spot_status_code in AWS_INITIATED_SPOT_TERMINAL_STATUSES
+      )
 
-  @vm_util.Retry(poll_interval=1,
-                 log_errors=False,
-                 retryable_exceptions=(AwsTransitionalVmRetryableError,
-                                       LookupError))
+  @vm_util.Retry(
+      poll_interval=1,
+      log_errors=False,
+      retryable_exceptions=(AwsTransitionalVmRetryableError, LookupError),
+  )
   def _Exists(self):
     """Returns whether the VM exists."""
-    describe_cmd = util.AWS_PREFIX + [
-        'ec2',
-        'describe-instances',
-        '--region=%s' % self.region,
-        '--filter=Name=client-token,Values=%s' % self.client_token]
-    stdout, _ = util.IssueRetryableCommand(describe_cmd)
-    response = json.loads(stdout)
+    response = self._RunDescribeInstancesCommand()
     reservations = response['Reservations']
     if not reservations or len(reservations) != 1:
-      logging.info('describe-instances did not return exactly one reservation. '
-                   'This sometimes shows up immediately after a successful '
-                   'run-instances command. Retrying describe-instances '
-                   'command.')
+      logging.info(
+          'describe-instances did not return exactly one reservation. '
+          'This sometimes shows up immediately after a successful '
+          'run-instances command. Retrying describe-instances '
+          'command.'
+      )
       raise AwsTransitionalVmRetryableError()
     instances = reservations[0]['Instances']
     if instances:
       status = instances[0]['State']['Name']
       # In this path run-instances succeeded, a pending instance was created,
       # but not fulfilled so it moved to terminated.
-      if (status == TERMINATED and
-          instances[0]['StateReason']['Code'] ==
-          'Server.InsufficientInstanceCapacity'):
+      if (
+          status == TERMINATED
+          and instances[0]['StateReason']['Code']
+          == 'Server.InsufficientInstanceCapacity'
+      ):
         raise errors.Benchmarks.InsufficientCapacityCloudFailure(
-            instances[0]['StateReason']['Message'])
+            instances[0]['StateReason']['Message']
+        )
       # In this path run-instances succeeded, a pending instance was created,
       # but instance is shutting down due to internal server error. This is a
       # retryable command for run-instance.
       # Client token needs to be refreshed for idempotency.
-      elif (status == SHUTTING_DOWN and
-            instances[0]['StateReason']['Code'] == 'Server.InternalError'):
+      elif (
+          status == SHUTTING_DOWN
+          and instances[0]['StateReason']['Code'] == 'Server.InternalError'
+      ):
         self.client_token = str(uuid.uuid4())
       # When measuring time-to-delete, we want Exists() to retry until the
       # VM is in the TERMINATED state. Otherwise, it is fine to say that
       # the VM no longer exists when it is SHUTTING_DOWN.
       elif pkb_flags.MEASURE_DELETE.value and status == SHUTTING_DOWN:
-        logging.info('VM has status %s, retrying describe-instances command',
-                     status)
+        logging.info(
+            'VM has status %s, retrying describe-instances command', status
+        )
         raise AwsTransitionalVmRetryableError()
       return status in INSTANCE_EXISTS_STATUSES
     else:
@@ -1272,8 +1376,11 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
   @vm_util.Retry(
       poll_interval=1,
       log_errors=False,
-      retryable_exceptions=(AwsUnknownStatusError,
-                            AwsTransitionalVmRetryableError,))
+      retryable_exceptions=(
+          AwsUnknownStatusError,
+          AwsTransitionalVmRetryableError,
+      ),
+  )
   def _WaitUntilRunning(self):
     """Waits until the VM is running.
 
@@ -1285,29 +1392,27 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
       AwsVmNotCreatedError: If the VM does not have a create_start_time by the
         time it reaches this phase of provisioning.
     """
-    describe_cmd = util.AWS_PREFIX + [
-        'ec2',
-        'describe-instances',
-        '--region=%s' % self.region,
-        '--filter=Name=client-token,Values=%s' % self.client_token]
-
-    stdout, _ = util.IssueRetryableCommand(describe_cmd)
-    response = json.loads(stdout)
+    response = self._RunDescribeInstancesCommand()
     reservations = response['Reservations']
     if not reservations or len(reservations) != 1:
       if not self.create_start_time:
-        logging.info('VM does not have a create_start_time; '
-                     'provisioning failed.')
+        logging.info(
+            'VM does not have a create_start_time; provisioning failed.'
+        )
         raise AwsVmNotCreatedError()
-      logging.info('describe-instances did not return exactly one reservation. '
-                   'This sometimes shows up immediately after a successful '
-                   'run-instances command. Retrying describe-instances '
-                   'command.')
+      logging.info(
+          'describe-instances did not return exactly one reservation. '
+          'This sometimes shows up immediately after a successful '
+          'run-instances command. Retrying describe-instances '
+          'command.'
+      )
       raise AwsTransitionalVmRetryableError()
     instances = reservations[0]['Instances']
     if not instances or len(instances) != 1:
-      logging.info('describe-instances did not return exactly one instance. '
-                   'Retrying describe-instances command.')
+      logging.info(
+          'describe-instances did not return exactly one instance. '
+          'Retrying describe-instances command.'
+      )
       raise AwsTransitionalVmRetryableError()
     status = instances[0]['State']['Name']
     self.id = instances[0]['InstanceId']
@@ -1315,22 +1420,28 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
       self.spot_instance_request_id = instances[0]['SpotInstanceRequestId']
 
     if status in INSTANCE_TRANSITIONAL_STATUSES:
-      logging.info('VM has status %s; retrying describe-instances command.',
-                   status)
+      logging.info(
+          'VM has status %s; retrying describe-instances command.', status
+      )
       raise AwsTransitionalVmRetryableError()
     # In this path run-instances succeeded, a pending instance was created, but
     # not fulfilled so it moved to terminated.
-    elif (status == TERMINATED and
-          instances[0]['StateReason']['Code'] ==
-          'Server.InsufficientInstanceCapacity'):
+    elif (
+        status == TERMINATED
+        and instances[0]['StateReason']['Code']
+        == 'Server.InsufficientInstanceCapacity'
+    ):
       raise errors.Benchmarks.InsufficientCapacityCloudFailure(
-          instances[0]['StateReason']['Message'])
+          instances[0]['StateReason']['Message']
+      )
     # In this path run-instances succeeded, a pending instance was created, but
     # instance is shutting down due to internal server error. This is a
     # retryable command for run-instance.
     # Client token needs to be refreshed for idempotency.
-    elif (status == SHUTTING_DOWN and
-          instances[0]['StateReason']['Code'] == 'Server.InternalError'):
+    elif (
+        status == SHUTTING_DOWN
+        and instances[0]['StateReason']['Code'] == 'Server.InternalError'
+    ):
       self.client_token = str(uuid.uuid4())
     # Set the running time
     elif status == RUNNING:
@@ -1339,166 +1450,28 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     # TODO(user): Adjust this function to properly handle ALL potential
     #  VM statuses. In the meantime, just retry if the VM is not yet running.
     else:
-      raise AwsUnknownStatusError(f'Unknown status: {status}; '
-                                  'retrying describe-instances command')
+      raise AwsUnknownStatusError(
+          f'Unknown status: {status}; retrying describe-instances command'
+      )
 
-  def _GetNvmeBootIndex(self):
-    if (aws_disk.LocalDriveIsNvme(self.machine_type) and
-        aws_disk.EbsDriveIsNvme(self.machine_type)):
-      # identify boot drive
-      # If this command ever fails consider 'findmnt -nM / -o source'
-      cmd = ('realpath /dev/disk/by-label/cloudimg-rootfs '
-             '| grep --only-matching "nvme[0-9]*"')
-      boot_drive = self.RemoteCommand(cmd, ignore_failure=True)[0].strip()
-      if boot_drive:
-        # get the boot drive index by dropping the nvme prefix
-        boot_idx = int(boot_drive[4:])
-        logging.info('found boot drive at nvme index %d', boot_idx)
-        return boot_idx
-      else:
-        logging.warning('Failed to identify NVME boot drive index. Assuming 0.')
-        return 0
+  def SetDiskSpec(self, disk_spec, disk_count):
+    """Sets Disk Specs of the current VM. Calls before the VM is created."""
+    self.create_disk_strategy = aws_disk_strategies.GetCreateDiskStrategy(
+        self, disk_spec, disk_count
+    )
 
-  def CreateScratchDisk(self, spec_index, disk_spec):
-    """Create a VM's scratch disk.
-
-    Args:
-      spec_index: Deterministic order of this disk_spec in the VM's list of
-        disk_specs.
-      disk_spec: virtual_machine.BaseDiskSpec object of the disk.
-
-    Raises:
-      CreationError: If an NFS disk is listed but the NFS service not created.
-    """
-    # Instantiate the disk(s) that we want to create.
-    disks = []
-    nvme_boot_drive_index = self._GetNvmeBootIndex()
-    for i in range(disk_spec.num_striped_disks):
-      if disk_spec.disk_type == disk.NFS:
-        data_disk = self._GetNfsService().CreateNfsDisk()
-      else:
-        disk_spec_id = BuildDiskSpecId(spec_index, i)
-        data_disk = aws_disk.AwsDisk(
-            disk_spec, self.zone, self.machine_type, disk_spec_id)
-      if disk_spec.disk_type == disk.LOCAL:
-        device_letter = chr(ord(DRIVE_START_LETTER) + self.local_disk_counter)
-        data_disk.AssignDeviceLetter(device_letter, nvme_boot_drive_index)
-        # Local disk numbers start at 1 (0 is the system disk).
-        data_disk.disk_number = self.local_disk_counter + 1
-        self.local_disk_counter += 1
-        if self.local_disk_counter > self.max_local_disks:
-          raise errors.Error('Not enough local disks.')
-      elif disk_spec.disk_type == disk.NFS:
-        pass
-      else:
-        # Remote disk numbers start at 1 + max_local disks (0 is the system disk
-        # and local disks occupy [1, max_local_disks]).
-        data_disk.disk_number = (self.remote_disk_counter +
-                                 1 + self.max_local_disks)
-        self.remote_disk_counter += 1
-      disks.append(data_disk)
-
-    scratch_disk = self._CreateScratchDiskFromDisks(disk_spec, disks)
-    # here, all disks are created (either at vm creation or in line above).
-    # But we don't have all the raw device paths,
-    # which are necessary for preparing the scratch disk.
-    nvme_devices = self.GetNVMEDeviceInfo()
-    self.PopulateNVMEDevicePath(scratch_disk, nvme_devices)
-    self.UpdateDevicePath(scratch_disk)
-    self._PrepareScratchDisk(scratch_disk, disk_spec)
-
-  def PopulateNVMEDevicePath(self, scratch_disk, nvme_devices):
-    local_devices = []
-    ebs_devices = {}
-    for device in nvme_devices:
-      device_path = device['DevicePath']
-      model_number = device['ModelNumber']
-      volume_id = device['SerialNumber'].replace('vol', 'vol-')
-      if model_number == 'Amazon Elastic Block Store':
-        ebs_devices[volume_id] = device_path
-      elif model_number == 'Amazon EC2 NVMe Instance Storage':
-        local_devices.append(device_path)
-      else:
-        raise errors.Benchmarks.UnsupportedConfigError(
-            f'{model_number} NVME devices is not supported.')
-
-    # because local devices are assigned in a round robin manner,
-    # some local devices might already have been assigned (previous spec_index).
-    # remove local devices that have been already been assigned.
-    for _, aws_id in self.disk_identifiers_by_device.items():
-      if aws_id.path in local_devices:
-        local_devices.remove(aws_id.path)
-
-    if not local_devices and not ebs_devices:
-      return
-
-    disks = scratch_disk.disks if scratch_disk.is_striped else [scratch_disk]
-    for d in disks:
-      if d.disk_type == disk.NFS:
-        continue
-      elif d.disk_type == disk.LOCAL:
-        if aws_disk.LocalDriveIsNvme(self.machine_type):
-          # assign in a round robin manner. Since NVME local disks
-          # are created ignoring all pkb naming conventions and assigned
-          # random names on the fly.
-          disk_name = self.GetDeviceByDiskSpecId(d.disk_spec_id)
-          self.LogDeviceByName(disk_name, None, local_devices.pop())
-      elif aws_disk.EbsDriveIsNvme(self.machine_type):
-        # EBS NVME volumes have disk_name assigned
-        # looks up disk_name by disk_spec_id
-        # populate the aws identifier information
-        disk_name = self.GetDeviceByDiskSpecId(d.disk_spec_id)
-        volume_id = self.GetVolumeIdByDevice(disk_name)
-        if volume_id in ebs_devices:
-          self.UpdateDeviceByName(disk_name, volume_id, ebs_devices[volume_id])
-
-  def UpdateDevicePath(self, scratch_disk):
-    """Updates the paths for all raw devices inside the VM."""
-    disks = scratch_disk.disks if scratch_disk.is_striped else [scratch_disk]
-    for d in disks:
-      if d.disk_type == disk.NFS:
-        continue
-      device_name = self.GetDeviceByDiskSpecId(d.disk_spec_id)
-      d.device_path = self.GetPathByDevice(device_name)
+  def SetupAllScratchDisks(self):
+    """Set up all scratch disks of the current VM."""
+    self.create_disk_strategy.GetSetupDiskStrategy().SetUpDisk()
 
   def LogDeviceByDiskSpecId(self, disk_spec_id, device_name):
     """Records the deterministic disk_spec order to device name for lookup."""
     self.device_by_disk_spec_id[disk_spec_id] = device_name
 
-  def GetDeviceByDiskSpecId(self, disk_spec_id):
-    """Gets the logged device name by disk_spec_id."""
-    assert disk_spec_id is not None
-    return self.device_by_disk_spec_id.get(disk_spec_id, None)
-
   def LogDeviceByName(self, device_name, volume_id, path=None):
     """Records disk identifiers to device name for lookup."""
     aws_ids = aws_disk.AWSDiskIdentifiers(volume_id=volume_id, path=path)
     self.disk_identifiers_by_device[device_name] = aws_ids
-
-  def GetVolumeIdByDevice(self, disk_name):
-    """Gets the logged volume id by disk_name."""
-    assert disk_name is not None
-    aws_ids = self.disk_identifiers_by_device.get(disk_name, None)
-    assert aws_ids is not None
-    return aws_ids.volume_id
-
-  def GetPathByDevice(self, disk_name):
-    """Gets the logged device path."""
-    assert disk_name is not None
-    aws_ids = self.disk_identifiers_by_device.get(disk_name, None)
-    assert aws_ids is not None
-    return aws_ids.path
-
-  def UpdateDeviceByName(self, device_name, volume_id=None, path=None):
-    """Gets the volume id by disk_name."""
-    assert device_name is not None
-    aws_ids = self.disk_identifiers_by_device.get(device_name, None)
-    assert aws_ids is not None
-    if aws_ids.volume_id and volume_id:
-      assert aws_ids.volume_id == volume_id
-    # not asserting path similarity because we need to overwrite the path of
-    # ebs nvme devices (set to /dev/xvdb? on creation and re-named to nvme?n?)
-    self.LogDeviceByName(device_name, volume_id, path)
 
   def AddMetadata(self, **kwargs):
     """Adds metadata to the VM."""
@@ -1509,10 +1482,14 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
   def InstallCli(self):
     """Installs the AWS cli and credentials on this AWS vm."""
     self.Install('awscli')
-    self.Install('aws_credentials')
 
-  def DownloadPreprovisionedData(self, install_path, module_name, filename,
-                                 timeout=FIVE_MINUTE_TIMEOUT):
+  def DownloadPreprovisionedData(
+      self,
+      install_path,
+      module_name,
+      filename,
+      timeout=virtual_machine.PREPROVISIONED_DATA_TIMEOUT,
+  ):
     """Downloads a data file from an AWS S3 bucket with pre-provisioned data.
 
     Use --aws_preprovisioned_data_bucket to specify the name of the bucket.
@@ -1521,20 +1498,28 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
       install_path: The install path on this VM.
       module_name: Name of the module associated with this data file.
       filename: The name of the file that was downloaded.
-      timeout: Timeout value for downloading preprovisionedData, Five minutes
-      by default.
+      timeout: Timeout value for downloading preprovisionedData, Five minutes by
+        default.
     """
     self.InstallCli()
     # TODO(deitz): Add retry logic.
-    self.RobustRemoteCommand(GenerateDownloadPreprovisionedDataCommand(
-        install_path, module_name, filename), timeout=timeout)
+    self.RobustRemoteCommand(
+        GenerateDownloadPreprovisionedDataCommand(
+            install_path, module_name, filename
+        ),
+        timeout=timeout,
+    )
 
   def ShouldDownloadPreprovisionedData(self, module_name, filename):
     """Returns whether or not preprovisioned data is available."""
-    self.Install('aws_credentials')
-    self.Install('awscli')
-    return FLAGS.aws_preprovisioned_data_bucket and self.TryRemoteCommand(
-        GenerateStatPreprovisionedDataCommand(module_name, filename))
+    if aws_flags.AWS_PREPROVISIONED_DATA_BUCKET.value:
+      # Guaranteed by flag validation
+      assert self.instance_profile
+      self.InstallCli()
+      return self.TryRemoteCommand(
+          GenerateStatPreprovisionedDataCommand(module_name, filename)
+      )
+    return False
 
   def IsInterruptible(self):
     """Returns whether this vm is an interruptible vm (spot vm).
@@ -1568,11 +1553,12 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     result['boot_disk_size'] = self.boot_disk_size
     if self.use_dedicated_host:
       result['num_vms_per_host'] = self.num_vms_per_host
-    result['nic_count'] = aws_network.AWS_ENI_COUNT.value
+    result['nic_count'] = self.network_eni_count
     result['efa'] = FLAGS.aws_efa
     if FLAGS.aws_efa:
       result['efa_version'] = FLAGS.aws_efa_version
       result['efa_count'] = FLAGS.aws_efa_count
+      result['nic_count'] = FLAGS.aws_efa_count
     result['preemptible'] = self.use_spot_instance
     return result
 
@@ -1585,14 +1571,16 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     return self.DiskTypeCreatedOnVMCreation(data_disk.disk_type)
 
 
-class ClearBasedAwsVirtualMachine(AwsVirtualMachine,
-                                  linux_virtual_machine.ClearMixin):
+class ClearBasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.ClearMixin
+):
   IMAGE_NAME_FILTER_PATTERN = 'clear/images/*/clear-*'
   DEFAULT_USER_NAME = 'clear'
 
 
-class CoreOsBasedAwsVirtualMachine(AwsVirtualMachine,
-                                   linux_virtual_machine.CoreOsMixin):
+class CoreOsBasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.CoreOsMixin
+):
   IMAGE_NAME_FILTER_PATTERN = 'fedora-coreos-*'
   # CoreOS only distinguishes between stable and testing in the description
   IMAGE_DESCRIPTION_FILTER = 'Fedora CoreOS stable *'
@@ -1600,8 +1588,9 @@ class CoreOsBasedAwsVirtualMachine(AwsVirtualMachine,
   DEFAULT_USER_NAME = 'core'
 
 
-class Debian9BasedAwsVirtualMachine(AwsVirtualMachine,
-                                    linux_virtual_machine.Debian9Mixin):
+class Debian9BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.Debian9Mixin
+):
   # From https://wiki.debian.org/Cloud/AmazonEC2Image/Stretch
   IMAGE_NAME_FILTER_PATTERN = 'debian-stretch-{alternate_architecture}-*'
   IMAGE_OWNER = DEBIAN_9_IMAGE_PROJECT
@@ -1612,8 +1601,9 @@ class Debian9BasedAwsVirtualMachine(AwsVirtualMachine,
     raise NotImplementedError()
 
 
-class Debian10BasedAwsVirtualMachine(AwsVirtualMachine,
-                                     linux_virtual_machine.Debian10Mixin):
+class Debian10BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.Debian10Mixin
+):
   # From https://wiki.debian.org/Cloud/AmazonEC2Image/Buster
   IMAGE_NAME_FILTER_PATTERN = 'debian-10-{alternate_architecture}-*'
   IMAGE_OWNER = DEBIAN_IMAGE_PROJECT
@@ -1621,13 +1611,14 @@ class Debian10BasedAwsVirtualMachine(AwsVirtualMachine,
 
 
 class Debian10BackportsBasedAwsVirtualMachine(
-    Debian10BasedAwsVirtualMachine,
-    linux_virtual_machine.Debian10BackportsMixin):
+    Debian10BasedAwsVirtualMachine, linux_virtual_machine.Debian10BackportsMixin
+):
   IMAGE_NAME_FILTER_PATTERN = 'debian-10-backports-{alternate_architecture}-*'
 
 
-class Debian11BasedAwsVirtualMachine(AwsVirtualMachine,
-                                     linux_virtual_machine.Debian11Mixin):
+class Debian11BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.Debian11Mixin
+):
   # From https://wiki.debian.org/Cloud/AmazonEC2Image/Bullseye
   IMAGE_NAME_FILTER_PATTERN = 'debian-11-{alternate_architecture}-*'
   IMAGE_OWNER = DEBIAN_IMAGE_PROJECT
@@ -1635,9 +1626,18 @@ class Debian11BasedAwsVirtualMachine(AwsVirtualMachine,
 
 
 class Debian11BackportsBasedAwsVirtualMachine(
-    Debian11BasedAwsVirtualMachine,
-    linux_virtual_machine.Debian11BackportsMixin):
+    Debian11BasedAwsVirtualMachine, linux_virtual_machine.Debian11BackportsMixin
+):
   IMAGE_NAME_FILTER_PATTERN = 'debian-11-backports-{alternate_architecture}-*'
+
+
+class Debian12BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.Debian12Mixin
+):
+  # From https://wiki.debian.org/Cloud/AmazonEC2Image/Bookworm
+  IMAGE_NAME_FILTER_PATTERN = 'debian-12-{alternate_architecture}-*'
+  IMAGE_OWNER = DEBIAN_IMAGE_PROJECT
+  DEFAULT_USER_NAME = 'admin'
 
 
 class UbuntuBasedAwsVirtualMachine(AwsVirtualMachine):
@@ -1645,79 +1645,210 @@ class UbuntuBasedAwsVirtualMachine(AwsVirtualMachine):
   DEFAULT_USER_NAME = 'ubuntu'
 
 
-class Ubuntu1604BasedAwsVirtualMachine(UbuntuBasedAwsVirtualMachine,
-                                       linux_virtual_machine.Ubuntu1604Mixin):
-  IMAGE_NAME_FILTER_PATTERN = 'ubuntu/images/*/ubuntu-xenial-16.04-{alternate_architecture}-server-20*'
+class Ubuntu1604BasedAwsVirtualMachine(
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu1604Mixin
+):
+  IMAGE_NAME_FILTER_PATTERN = (
+      'ubuntu/images/*/ubuntu-xenial-16.04-{alternate_architecture}-server-20*'
+  )
 
   def _InstallEfa(self):
     super(Ubuntu1604BasedAwsVirtualMachine, self)._InstallEfa()
     self.Reboot()
 
 
-class Ubuntu1804BasedAwsVirtualMachine(UbuntuBasedAwsVirtualMachine,
-                                       linux_virtual_machine.Ubuntu1804Mixin):
-  IMAGE_NAME_FILTER_PATTERN = 'ubuntu/images/*/ubuntu-bionic-18.04-{alternate_architecture}-server-20*'
+class Ubuntu1804BasedAwsVirtualMachine(
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu1804Mixin
+):
+  IMAGE_NAME_FILTER_PATTERN = (
+      'ubuntu/images/*/ubuntu-bionic-18.04-{alternate_architecture}-server-20*'
+  )
 
 
 class Ubuntu1804EfaBasedAwsVirtualMachine(
-    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu1804EfaMixin):
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu1804EfaMixin
+):
   IMAGE_OWNER = UBUNTU_EFA_IMAGE_PROJECT
   IMAGE_NAME_FILTER_PATTERN = 'Deep Learning AMI GPU CUDA * (Ubuntu 18.04) *'
 
 
-class Ubuntu2004BasedAwsVirtualMachine(UbuntuBasedAwsVirtualMachine,
-                                       linux_virtual_machine.Ubuntu2004Mixin):
-  IMAGE_NAME_FILTER_PATTERN = 'ubuntu/images/*/ubuntu-focal-20.04-{alternate_architecture}-server-20*'
+class Ubuntu2004BasedAwsVirtualMachine(
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2004Mixin
+):
+  IMAGE_NAME_FILTER_PATTERN = (
+      'ubuntu/images/*/ubuntu-focal-20.04-{alternate_architecture}-server-20*'
+  )
 
 
 class Ubuntu2004EfaBasedAwsVirtualMachine(
-    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2004EfaMixin):
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2004EfaMixin
+):
+  """Ubuntu2004 Base DLAMI virtual machine."""
   IMAGE_OWNER = UBUNTU_EFA_IMAGE_PROJECT
-  IMAGE_NAME_FILTER_PATTERN = 'Deep Learning AMI GPU CUDA * (Ubuntu 20.04) *'
+  DEFAULT_ROOT_DISK_TYPE = 'gp3'
+  IMAGE_NAME_FILTER_PATTERN = 'Deep Learning Base GPU AMI (Ubuntu 20.04) *'
 
 
-class Ubuntu2204BasedAwsVirtualMachine(UbuntuBasedAwsVirtualMachine,
-                                       linux_virtual_machine.Ubuntu2204Mixin):
-  IMAGE_NAME_FILTER_PATTERN = 'ubuntu/images/*/ubuntu-jammy-22.04-{alternate_architecture}-server-20*'
+class Ubuntu2004DeepLearningAMIBasedAWSVirtualMachine(
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2004DLMixin):
+  """Ubuntu2004 DLAMI VMs.
+
+  This uses same underlying image as Ubuntu2004 EFA based VMs. But skips package
+  installation whenever possible.
+  """
+  IMAGE_OWNER = UBUNTU_EFA_IMAGE_PROJECT
+  DEFAULT_ROOT_DISK_TYPE = 'gp3'
+  IMAGE_NAME_FILTER_PATTERN = (
+      'Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 20.04) *'
+  )
+
+  def __init__(self, vm_spec):
+    """Initialize a AmazonLinux2 Base DLAMI virtual machine.
+
+    Args:
+      vm_spec: virtual_machine.BaseVirtualMachineSpec object of the vm.
+
+    Raises:
+      ValueError: If an incompatible vm_spec is passed.
+    """
+    super(Ubuntu2004DeepLearningAMIBasedAWSVirtualMachine, self).__init__(
+        vm_spec)
+    # Add preinstalled packages for Deep Learning AMI
+    self._installed_packages.add('nccl')
+    self._installed_packages.add('cuda_toolkit')
+    self._installed_packages.add('openmpi')
+
+  def SetupAllScratchDisks(self):
+    # Ubuntu2004 DLAMI mount the disk by default, which might break PKB logic.
+    self.RemoteCommand('sudo umount /opt/dlami/nvme', ignore_failure=True)
+    self.RemoteCommand('sudo vgremove vg.01 -y', ignore_failure=True)
+    super().SetupAllScratchDisks()
+
+  def UpdateDockerfile(self, dockerfile):
+    """Add provider specific instructions to a docker file."""
+    installation_script = r"""RUN curl -O https://efa-installer.amazonaws.com/aws-efa-installer-1.31.0.tar.gz
+RUN tar -xf aws-efa-installer-1.31.0.tar.gz && cd aws-efa-installer && ./efa_installer.sh --mpi=openmpi4 -y -g -d --skip-kmod --skip-limit-conf --no-verify
+RUN apt-get install libhwloc-dev -y
+RUN wget https://github.com/aws/aws-ofi-nccl/releases/download/v1.8.1-aws/aws-ofi-nccl-1.8.1-aws.tar.gz
+RUN export PATH=/opt/amazon/openmpi/bin/:\$PATH
+RUN tar -xf aws-ofi-nccl-1.8.1-aws.tar.gz && cd aws-ofi-nccl-1.8.1-aws && ./configure --prefix=/opt/aws-ofi-nccl --with-mpi=/opt/amazon/openmpi --with-libfabric=/opt/amazon/efa --with-cuda=/usr/local/cuda --enable-platform-aws && make && make install
+ENV LD_LIBRARY_PATH=/opt/aws-ofi-nccl/lib:/opt/amazon/efa:\$LD_LIBRARY_PATH
+"""
+    for line in installation_script.splitlines():
+      self.RemoteCommand(f'echo "{line}" >> {dockerfile}')
+
+  def OnStartup(self):
+    super().OnStartup()
+    self.InstallPackages('s3ql')
+    # This only works for x86
+    self.RemoteCommand(
+        'wget https://s3.amazonaws.com/mountpoint-s3-release/latest/'
+        'x86_64/mount-s3.deb'
+    )
+    self.RemoteCommand('sudo apt-get install ./mount-s3.deb')
 
 
-class JujuBasedAwsVirtualMachine(UbuntuBasedAwsVirtualMachine,
-                                 linux_virtual_machine.JujuMixin):
+class AmazonLinux2EfaBasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.AmazonLinux2DLMixin
+):
+  """AmazonLinux2 Base DLAMI virtual machine."""
+
+  IMAGE_OWNER = UBUNTU_EFA_IMAGE_PROJECT
+  DEFAULT_ROOT_DISK_TYPE = 'gp3'
+  IMAGE_NAME_FILTER_PATTERN = 'Deep Learning Base AMI (Amazon Linux 2) *'
+
+  def __init__(self, vm_spec):
+    """Initialize a AmazonLinux2 Base DLAMI virtual machine.
+
+    Args:
+      vm_spec: virtual_machine.BaseVirtualMachineSpec object of the vm.
+
+    Raises:
+      ValueError: If an incompatible vm_spec is passed.
+    """
+    super(AmazonLinux2EfaBasedAwsVirtualMachine, self).__init__(vm_spec)
+    # Add preinstalled packages for Deep Learning AMI
+    self._installed_packages.add('nccl')
+    self._installed_packages.add('cuda_toolkit')
+    self._installed_packages.add('openmpi')
+
+
+class Ubuntu2204BasedAwsVirtualMachine(
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2204Mixin
+):
+  IMAGE_NAME_FILTER_PATTERN = (
+      'ubuntu/images/*/ubuntu-jammy-22.04-{alternate_architecture}-server-20*'
+  )
+
+
+class Ubuntu2310BasedAwsVirtualMachine(
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2310Mixin
+):
+  IMAGE_NAME_FILTER_PATTERN = (
+      'ubuntu/images/*/ubuntu-mantic-23.10-{alternate_architecture}-server-20*'
+  )
+  DEFAULT_ROOT_DISK_TYPE = 'gp3'
+
+
+class Ubuntu2404BasedAwsVirtualMachine(
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2404Mixin
+):
+  IMAGE_NAME_FILTER_PATTERN = (
+      'ubuntu/images/*/ubuntu-noble-24.04-{alternate_architecture}-server-20*'
+  )
+  DEFAULT_ROOT_DISK_TYPE = 'gp3'
+
+
+class JujuBasedAwsVirtualMachine(
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.JujuMixin
+):
   """Class with configuration for AWS Juju virtual machines."""
-  IMAGE_NAME_FILTER_PATTERN = 'ubuntu/images/*/ubuntu-trusty-14.04-{alternate_architecture}-server-20*'
+
+  IMAGE_NAME_FILTER_PATTERN = (
+      'ubuntu/images/*/ubuntu-trusty-14.04-{alternate_architecture}-server-20*'
+  )
 
 
 class AmazonLinux2BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.AmazonLinux2Mixin):
+    AwsVirtualMachine, linux_virtual_machine.AmazonLinux2Mixin
+):
   """Class with configuration for AWS Amazon Linux 2 virtual machines."""
+
   IMAGE_SSM_PATTERN = '/aws/service/ami-amazon-linux-latest/amzn2-ami-{virt_type}-{architecture}-{disk_type}'
 
 
-class AmazonNeuronBasedAwsVirtualMachine(AmazonLinux2BasedAwsVirtualMachine,
-                                         linux_virtual_machine.AmazonNeuronMixin
-                                        ):
+class AmazonNeuronBasedAwsVirtualMachine(
+    AmazonLinux2BasedAwsVirtualMachine, linux_virtual_machine.AmazonNeuronMixin
+):
   """Class with configuration for AWS Amazon Neuron virtual machines."""
+
   pass
 
 
 class AmazonLinux2023BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.AmazonLinux2023Mixin):
+    AwsVirtualMachine, linux_virtual_machine.AmazonLinux2023Mixin
+):
   """Class with configuration for AWS Amazon Linux 2023 virtual machines."""
+
   IMAGE_SSM_PATTERN = '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-{architecture}'
 
 
-class Rhel7BasedAwsVirtualMachine(AwsVirtualMachine,
-                                  linux_virtual_machine.Rhel7Mixin):
+class Rhel7BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.Rhel7Mixin
+):
   """Class with configuration for AWS RHEL 7 virtual machines."""
+
   # Documentation on finding RHEL images:
   # https://access.redhat.com/articles/3692431
   IMAGE_NAME_FILTER_PATTERN = 'RHEL-7*'
   IMAGE_OWNER = RHEL_IMAGE_PROJECT
 
 
-class Rhel8BasedAwsVirtualMachine(AwsVirtualMachine,
-                                  linux_virtual_machine.Rhel8Mixin):
+class Rhel8BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.Rhel8Mixin
+):
   """Class with configuration for AWS RHEL 8 virtual machines."""
+
   # Documentation on finding RHEL images:
   # https://access.redhat.com/articles/3692431
   # All RHEL AMIs are HVM. HVM- blocks HVM_BETA.
@@ -1725,9 +1856,11 @@ class Rhel8BasedAwsVirtualMachine(AwsVirtualMachine,
   IMAGE_OWNER = RHEL_IMAGE_PROJECT
 
 
-class Rhel9BasedAwsVirtualMachine(AwsVirtualMachine,
-                                  linux_virtual_machine.Rhel9Mixin):
+class Rhel9BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.Rhel9Mixin
+):
   """Class with configuration for AWS RHEL 9 virtual machines."""
+
   # Documentation on finding RHEL images:
   # https://access.redhat.com/articles/3692431
   # All RHEL AMIs are HVM. HVM- blocks HVM_BETA.
@@ -1735,9 +1868,11 @@ class Rhel9BasedAwsVirtualMachine(AwsVirtualMachine,
   IMAGE_OWNER = RHEL_IMAGE_PROJECT
 
 
-class CentOs7BasedAwsVirtualMachine(AwsVirtualMachine,
-                                    linux_virtual_machine.CentOs7Mixin):
+class CentOs7BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.CentOs7Mixin
+):
   """Class with configuration for AWS CentOS 7 virtual machines."""
+
   # Documentation on finding the CentOS 7 image:
   # https://wiki.centos.org/Cloud/AWS#x86_64
   IMAGE_NAME_FILTER_PATTERN = 'CentOS Linux 7*'
@@ -1745,17 +1880,21 @@ class CentOs7BasedAwsVirtualMachine(AwsVirtualMachine,
   DEFAULT_USER_NAME = 'centos'
 
   def _InstallEfa(self):
-    logging.info('Upgrading Centos7 kernel, installing kernel headers and '
-                 'rebooting before installing EFA.')
+    logging.info(
+        'Upgrading Centos7 kernel, installing kernel headers and '
+        'rebooting before installing EFA.'
+    )
     self.RemoteCommand('sudo yum upgrade -y kernel')
     self.InstallPackages('kernel-devel')
     self.Reboot()
     super()._InstallEfa()
 
 
-class CentOs8BasedAwsVirtualMachine(AwsVirtualMachine,
-                                    linux_virtual_machine.CentOs8Mixin):
+class CentOs8BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.CentOs8Mixin
+):
   """Class with configuration for AWS CentOS 8 virtual machines."""
+
   # This describes the official AMIs listed here:
   # https://wiki.centos.org/Cloud/AWS#Official_CentOS_Linux_:_Public_Images
   IMAGE_OWNER = CENTOS_IMAGE_PROJECT
@@ -1764,8 +1903,10 @@ class CentOs8BasedAwsVirtualMachine(AwsVirtualMachine,
 
 
 class CentOsStream8BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.CentOsStream8Mixin):
+    AwsVirtualMachine, linux_virtual_machine.CentOsStream8Mixin
+):
   """Class with configuration for AWS CentOS Stream 8 virtual machines."""
+
   # This describes the official AMIs listed here:
   # https://wiki.centos.org/Cloud/AWS#Official_CentOS_Linux_:_Public_Images
   IMAGE_OWNER = CENTOS_IMAGE_PROJECT
@@ -1773,44 +1914,56 @@ class CentOsStream8BasedAwsVirtualMachine(
   DEFAULT_USER_NAME = 'centos'
 
 
-class RockyLinux8BasedAwsVirtualMachine(AwsVirtualMachine,
-                                        linux_virtual_machine.RockyLinux8Mixin):
+class RockyLinux8BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.RockyLinux8Mixin
+):
   """Class with configuration for AWS Rocky Linux 8 virtual machines."""
+
   IMAGE_OWNER = ROCKY_LINUX_IMAGE_PROJECT
   IMAGE_NAME_FILTER_PATTERN = 'Rocky-8-*'
   DEFAULT_USER_NAME = 'rocky'
 
 
-class RockyLinux9BasedAwsVirtualMachine(AwsVirtualMachine,
-                                        linux_virtual_machine.RockyLinux9Mixin):
+class RockyLinux9BasedAwsVirtualMachine(
+    AwsVirtualMachine, linux_virtual_machine.RockyLinux9Mixin
+):
   """Class with configuration for AWS Rocky Linux 9 virtual machines."""
+
   IMAGE_OWNER = ROCKY_LINUX_IMAGE_PROJECT
   IMAGE_NAME_FILTER_PATTERN = 'Rocky-9-*'
   DEFAULT_USER_NAME = 'rocky'
 
 
 class CentOsStream9BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.CentOsStream9Mixin):
+    AwsVirtualMachine, linux_virtual_machine.CentOsStream9Mixin
+):
   """Class with configuration for AWS CentOS Stream 9 virtual machines."""
+
   # This describes the official AMIs listed here:
   # https://wiki.centos.org/Cloud/AWS#Official_CentOS_Linux_:_Public_Images
   IMAGE_OWNER = CENTOS_IMAGE_PROJECT
   IMAGE_NAME_FILTER_PATTERN = 'CentOS Stream 9*'
 
 
-class BaseWindowsAwsVirtualMachine(AwsVirtualMachine,
-                                   windows_virtual_machine.BaseWindowsMixin):
+class BaseWindowsAwsVirtualMachine(
+    AwsVirtualMachine, windows_virtual_machine.BaseWindowsMixin
+):
   """Support for Windows machines on AWS."""
+
   DEFAULT_USER_NAME = 'Administrator'
 
   def __init__(self, vm_spec):
     super(BaseWindowsAwsVirtualMachine, self).__init__(vm_spec)
-    self.user_data = ('<powershell>%s</powershell>' %
-                      windows_virtual_machine.STARTUP_SCRIPT)
+    self.user_data = (
+        '<powershell>%s</powershell>' % windows_virtual_machine.STARTUP_SCRIPT
+    )
 
   def DownloadPreprovisionedData(
-      self, install_path, module_name, filename,
-      timeout=FIVE_MINUTE_TIMEOUT
+      self,
+      install_path,
+      module_name,
+      filename,
+      timeout=virtual_machine.PREPROVISIONED_DATA_TIMEOUT,
   ):
     """Downloads a data file from an AWS S3 bucket with pre-provisioned data.
 
@@ -1820,8 +1973,8 @@ class BaseWindowsAwsVirtualMachine(AwsVirtualMachine,
       install_path: The install path on this VM.
       module_name: Name of the module associated with this data file.
       filename: The name of the file that was downloaded.
-      timeout: Timeout value for downloading preprovisionedData, Five minutes
-      by default.
+      timeout: Timeout value for downloading preprovisionedData, Five minutes by
+        default.
     """
     # TODO(deitz): Add retry logic.
     temp_local_path = vm_util.GetTempDir()
@@ -1832,16 +1985,22 @@ class BaseWindowsAwsVirtualMachine(AwsVirtualMachine,
         timeout=timeout,
     )
     self.PushFile(
-        vm_util.PrependTempDir(filename),
-        ntpath.join(install_path, filename)
+        vm_util.PrependTempDir(filename), ntpath.join(install_path, filename)
     )
     vm_util.IssueCommand(['rm', vm_util.PrependTempDir(filename)])
 
   def ShouldDownloadPreprovisionedData(self, module_name, filename):
     """Returns whether or not preprovisioned data is available."""
-    return FLAGS.aws_preprovisioned_data_bucket and vm_util.IssueCommand(
-        GenerateStatPreprovisionedDataCommand(
-            module_name, filename).split(' '), raise_on_failure=False)[-1] == 0
+    return (
+        FLAGS.aws_preprovisioned_data_bucket
+        and vm_util.IssueCommand(
+            GenerateStatPreprovisionedDataCommand(module_name, filename).split(
+                ' '
+            ),
+            raise_on_failure=False,
+        )[-1]
+        == 0
+    )
 
   @vm_util.Retry()
   def _GetDecodedPasswordData(self):
@@ -1850,7 +2009,8 @@ class BaseWindowsAwsVirtualMachine(AwsVirtualMachine,
         'ec2',
         'get-password-data',
         '--region=%s' % self.region,
-        '--instance-id=%s' % self.id]
+        '--instance-id=%s' % self.id,
+    ]
     stdout, _ = util.IssueRetryableCommand(get_password_cmd)
     response = json.loads(stdout)
     password_data = response['PasswordData']
@@ -1875,13 +2035,15 @@ class BaseWindowsAwsVirtualMachine(AwsVirtualMachine,
     with vm_util.NamedTemporaryFile() as tf:
       tf.write(decoded_password_data)
       tf.close()
-      decrypt_cmd = ['openssl',
-                     'rsautl',
-                     '-decrypt',
-                     '-in',
-                     tf.name,
-                     '-inkey',
-                     vm_util.GetPrivateKeyPath()]
+      decrypt_cmd = [
+          'openssl',
+          'rsautl',
+          '-decrypt',
+          '-in',
+          tf.name,
+          '-inkey',
+          vm_util.GetPrivateKeyPath(),
+      ]
       password, _ = vm_util.IssueRetryableCommand(decrypt_cmd)
       self.password = password
 
@@ -1897,8 +2059,11 @@ class BaseWindowsAwsVirtualMachine(AwsVirtualMachine,
 
   @vm_util.Retry(
       max_retries=10,
-      retryable_exceptions=(AwsUnexpectedWindowsAdapterOutputError,
-                            errors.VirtualMachine.RemoteCommandError))
+      retryable_exceptions=(
+          AwsUnexpectedWindowsAdapterOutputError,
+          errors.VirtualMachine.RemoteCommandError,
+      ),
+  )
   def DisableInterruptModeration(self):
     """Disable the networking feature 'Interrupt Moderation'."""
 
@@ -1906,9 +2071,12 @@ class BaseWindowsAwsVirtualMachine(AwsVirtualMachine,
     net_adapters, _ = self.RemoteCommand('Get-NetAdapter')
     if 'Intel(R) 82599 Virtual Function' not in net_adapters:
       raise AwsDriverDoesntSupportFeatureError(
-          'Driver not tested with Interrupt Moderation in PKB.')
-    aws_int_dis_path = ('HKLM\\SYSTEM\\ControlSet001\\Control\\Class\\'
-                        '{4d36e972-e325-11ce-bfc1-08002be10318}\\0011')
+          'Driver not tested with Interrupt Moderation in PKB.'
+      )
+    aws_int_dis_path = (
+        'HKLM\\SYSTEM\\ControlSet001\\Control\\Class\\'
+        '{4d36e972-e325-11ce-bfc1-08002be10318}\\0011'
+    )
     command = 'reg add "%s" /v *InterruptModeration /d 0 /f' % aws_int_dis_path
     self.RemoteCommand(command)
     try:
@@ -1919,99 +2087,141 @@ class BaseWindowsAwsVirtualMachine(AwsVirtualMachine,
       # broken.
       pass
     int_dis_value, _ = self.RemoteCommand(
-        'reg query "%s" /v *InterruptModeration' % aws_int_dis_path)
+        'reg query "%s" /v *InterruptModeration' % aws_int_dis_path
+    )
     # The second line should look like:
     #     *InterruptModeration    REG_SZ    0
     registry_query_lines = int_dis_value.splitlines()
     if len(registry_query_lines) < 3:
       raise AwsUnexpectedWindowsAdapterOutputError(
-          'registry query failed: %s ' % int_dis_value)
+          'registry query failed: %s ' % int_dis_value
+      )
     registry_query_result = registry_query_lines[2].split()
     if len(registry_query_result) < 3:
       raise AwsUnexpectedWindowsAdapterOutputError(
-          'unexpected registry query response: %s' % int_dis_value)
+          'unexpected registry query response: %s' % int_dis_value
+      )
     if registry_query_result[2] != '0':
       raise AwsUnexpectedWindowsAdapterOutputError(
-          'InterruptModeration failed to disable')
+          'InterruptModeration failed to disable'
+      )
 
-
-class Windows2012CoreAwsVirtualMachine(
-    BaseWindowsAwsVirtualMachine, windows_virtual_machine.Windows2012CoreMixin):
-  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2012-R2_RTM-English-64Bit-Core'
+  def DiskDriveIsLocal(self, device, model):
+    """Helper method to determine if a disk drive is a local ssd to stripe."""
+    if 'Amazon Elastic B' in model:
+      return False
+    return True
 
 
 class Windows2016CoreAwsVirtualMachine(
-    BaseWindowsAwsVirtualMachine, windows_virtual_machine.Windows2016CoreMixin):
-  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2016-English-Core-Base'
+    BaseWindowsAwsVirtualMachine, windows_virtual_machine.Windows2016CoreMixin
+):
+  IMAGE_SSM_PATTERN = (
+      '/aws/service/ami-windows-latest/Windows_Server-2016-English-Core-Base'
+  )
 
 
 class Windows2019CoreAwsVirtualMachine(
-    BaseWindowsAwsVirtualMachine, windows_virtual_machine.Windows2019CoreMixin):
-  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2019-English-Core-Base'
+    BaseWindowsAwsVirtualMachine, windows_virtual_machine.Windows2019CoreMixin
+):
+  IMAGE_SSM_PATTERN = (
+      '/aws/service/ami-windows-latest/Windows_Server-2019-English-Core-Base'
+  )
 
 
 class Windows2022CoreAwsVirtualMachine(
-    BaseWindowsAwsVirtualMachine, windows_virtual_machine.Windows2022CoreMixin):
-  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2022-English-Core-Base'
-
-
-class Windows2012DesktopAwsVirtualMachine(
-    BaseWindowsAwsVirtualMachine,
-    windows_virtual_machine.Windows2012DesktopMixin):
-  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2012-R2_RTM-English-64Bit-Base'
+    BaseWindowsAwsVirtualMachine, windows_virtual_machine.Windows2022CoreMixin
+):
+  IMAGE_SSM_PATTERN = (
+      '/aws/service/ami-windows-latest/Windows_Server-2022-English-Core-Base'
+  )
 
 
 class Windows2016DesktopAwsVirtualMachine(
     BaseWindowsAwsVirtualMachine,
-    windows_virtual_machine.Windows2016DesktopMixin):
-  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2016-English-Full-Base'
+    windows_virtual_machine.Windows2016DesktopMixin,
+):
+  IMAGE_SSM_PATTERN = (
+      '/aws/service/ami-windows-latest/Windows_Server-2016-English-Full-Base'
+  )
 
 
 class Windows2019DesktopAwsVirtualMachine(
     BaseWindowsAwsVirtualMachine,
-    windows_virtual_machine.Windows2019DesktopMixin):
-  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base'
+    windows_virtual_machine.Windows2019DesktopMixin,
+):
+  IMAGE_SSM_PATTERN = (
+      '/aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base'
+  )
 
 
 class Windows2022DesktopAwsVirtualMachine(
     BaseWindowsAwsVirtualMachine,
-    windows_virtual_machine.Windows2022DesktopMixin):
-  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base'
+    windows_virtual_machine.Windows2022DesktopMixin,
+):
+  IMAGE_SSM_PATTERN = (
+      '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base'
+  )
 
 
 class Windows2019DesktopSQLServer2019StandardAwsVirtualMachine(
     BaseWindowsAwsVirtualMachine,
-    windows_virtual_machine.Windows2019SQLServer2019Standard):
+    windows_virtual_machine.Windows2019SQLServer2019Standard,
+):
   IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2019-English-Full-SQL_2019_Standard'
 
 
 class Windows2019DesktopSQLServer2019EnterpriseAwsVirtualMachine(
     BaseWindowsAwsVirtualMachine,
-    windows_virtual_machine.Windows2019SQLServer2019Enterprise):
+    windows_virtual_machine.Windows2019SQLServer2019Enterprise,
+):
   IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2019-English-Full-SQL_2019_Enterprise'
 
 
 class Windows2022DesktopSQLServer2019StandardAwsVirtualMachine(
     BaseWindowsAwsVirtualMachine,
-    windows_virtual_machine.Windows2022SQLServer2019Standard):
+    windows_virtual_machine.Windows2022SQLServer2019Standard,
+):
   IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-SQL_2019_Standard'
 
 
 class Windows2022DesktopSQLServer2019EnterpriseAwsVirtualMachine(
     BaseWindowsAwsVirtualMachine,
-    windows_virtual_machine.Windows2022SQLServer2019Enterprise):
+    windows_virtual_machine.Windows2022SQLServer2019Enterprise,
+):
   IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-SQL_2019_Enterprise'
 
 
-def GenerateDownloadPreprovisionedDataCommand(install_path, module_name,
-                                              filename):
+class Windows2022DesktopSQLServer2022StandardAwsVirtualMachine(
+    BaseWindowsAwsVirtualMachine,
+    windows_virtual_machine.Windows2022SQLServer2022Standard,
+):
+  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-SQL_2022_Standard'
+
+
+class Windows2022DesktopSQLServer2022EnterpriseAwsVirtualMachine(
+    BaseWindowsAwsVirtualMachine,
+    windows_virtual_machine.Windows2022SQLServer2022Enterprise,
+):
+  IMAGE_SSM_PATTERN = '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-SQL_2022_Enterprise'
+
+
+def GenerateDownloadPreprovisionedDataCommand(
+    install_path, module_name, filename
+):
   """Returns a string used to download preprovisioned data."""
   return 'aws s3 cp --only-show-errors s3://%s/%s/%s %s' % (
-      FLAGS.aws_preprovisioned_data_bucket, module_name, filename,
-      posixpath.join(install_path, filename))
+      FLAGS.aws_preprovisioned_data_bucket,
+      module_name,
+      filename,
+      posixpath.join(install_path, filename),
+  )
 
 
 def GenerateStatPreprovisionedDataCommand(module_name, filename):
   """Returns a string used to download preprovisioned data."""
   return 'aws s3api head-object --bucket %s --key %s/%s' % (
-      FLAGS.aws_preprovisioned_data_bucket, module_name, filename)
+      FLAGS.aws_preprovisioned_data_bucket,
+      module_name,
+      filename,
+  )

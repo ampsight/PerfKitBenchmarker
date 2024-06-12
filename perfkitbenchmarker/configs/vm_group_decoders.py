@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Module containing a VM group spec and related decoders."""
+from typing import Optional
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import os_types
@@ -48,42 +49,70 @@ class VmGroupSpec(spec.BaseSpec):
 
   cloud: str
   disk_count: int
+  disk_type: str
   disk_spec: disk.BaseDiskSpec
   os_type: str
   static_vms: list[static_virtual_machine.StaticVmSpec]
   vm_count: int
   vm_spec: virtual_machine.BaseVmSpec
+  vm_as_nfs: bool
+  vm_as_nfs_disk_spec: Optional[disk.BaseNFSDiskSpec]
   placement_group_name: str
   cidr: str
 
   def __init__(self, component_full_name, flag_values=None, **kwargs):
     super(VmGroupSpec, self).__init__(
-        component_full_name, flag_values=flag_values, **kwargs)
+        component_full_name, flag_values=flag_values, **kwargs
+    )
     ignore_package_requirements = (
         getattr(flag_values, 'ignore_package_requirements', True)
-        if flag_values else True)
+        if flag_values
+        else True
+    )
     providers.LoadProvider(self.cloud, ignore_package_requirements)
+    provider = self.cloud
+    if (
+        flag_values
+        and flag_values['vm_platform'].present
+        and flag_values['vm_platform'].value
+        != provider_info.DEFAULT_VM_PLATFORM
+    ):
+      provider = flag_values['vm_platform'].value
     if self.disk_spec:
-      disk_config = getattr(self.disk_spec, self.cloud, None)
+      disk_config = getattr(self.disk_spec, provider, None)
       if disk_config is None:
         raise errors.Config.MissingOption(
             '{0}.cloud is "{1}", but {0}.disk_spec does not contain a '
-            'configuration for "{1}".'.format(component_full_name, self.cloud))
-      disk_spec_class = disk.GetDiskSpecClass(self.cloud)
+            'configuration for "{1}".'.format(component_full_name, self.cloud)
+        )
+      disk_type = disk_config.get('disk_type', None)
+      if flag_values and flag_values['data_disk_type'].present:
+        disk_type = flag_values['data_disk_type'].value
+      disk_spec_class = disk.GetDiskSpecClass(self.cloud, disk_type)
       self.disk_spec = disk_spec_class(
           '{0}.disk_spec.{1}'.format(component_full_name, self.cloud),
           flag_values=flag_values,
-          **disk_config)
-    vm_config = getattr(self.vm_spec, self.cloud, None)
+          **disk_config
+      )
+
+      if self.vm_as_nfs:
+        self.vm_as_nfs_disk_spec = disk.BaseNFSDiskSpec(
+            '{0}.disk_spec.{1}'.format(component_full_name, self.cloud),
+            flag_values=flag_values,
+            **disk_config
+        )
+    vm_config = getattr(self.vm_spec, provider, None)
     if vm_config is None:
       raise errors.Config.MissingOption(
           '{0}.cloud is "{1}", but {0}.vm_spec does not contain a '
-          'configuration for "{1}".'.format(component_full_name, self.cloud))
-    vm_spec_class = virtual_machine.GetVmSpecClass(self.cloud)
+          'configuration for "{1}".'.format(component_full_name, self.cloud)
+      )
+    vm_spec_class = virtual_machine.GetVmSpecClass(cloud=self.cloud)
     self.vm_spec = vm_spec_class(
         '{0}.vm_spec.{1}'.format(component_full_name, self.cloud),
         flag_values=flag_values,
-        **vm_config)
+        **vm_config
+    )
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -96,34 +125,37 @@ class VmGroupSpec(spec.BaseSpec):
     """
     result = super(VmGroupSpec, cls)._GetOptionDecoderConstructions()
     result.update({
-        'cloud': (option_decoders.EnumDecoder, {
-            'valid_values': provider_info.VALID_CLOUDS
-        }),
-        'disk_count': (option_decoders.IntDecoder, {
-            'default': _DEFAULT_DISK_COUNT,
-            'min': 0,
-            'none_ok': True
-        }),
-        'disk_spec': (option_decoders.PerCloudConfigDecoder, {
-            'default': None,
-            'none_ok': True
-        }),
-        'os_type': (option_decoders.EnumDecoder, {
-            'valid_values': os_types.ALL
-        }),
+        'cloud': (
+            option_decoders.EnumDecoder,
+            {'valid_values': provider_info.VALID_CLOUDS},
+        ),
+        'disk_count': (
+            option_decoders.IntDecoder,
+            {'default': _DEFAULT_DISK_COUNT, 'min': 0, 'none_ok': True},
+        ),
+        'vm_as_nfs': (
+            option_decoders.BooleanDecoder,
+            {'default': False, 'none_ok': True},
+        ),
+        'disk_spec': (
+            spec.PerCloudConfigDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'os_type': (
+            option_decoders.EnumDecoder,
+            {'valid_values': os_types.ALL},
+        ),
         'static_vms': (static_vm_decoders.StaticVmListDecoder, {}),
-        'vm_count': (option_decoders.IntDecoder, {
-            'default': _DEFAULT_VM_COUNT,
-            'min': 0
-        }),
-        'cidr': (option_decoders.StringDecoder, {
-            'default': None
-        }),
-        'vm_spec': (option_decoders.PerCloudConfigDecoder, {}),
-        'placement_group_name': (option_decoders.StringDecoder, {
-            'default': None,
-            'none_ok': True
-        }),
+        'vm_count': (
+            option_decoders.IntDecoder,
+            {'default': _DEFAULT_VM_COUNT, 'min': 0},
+        ),
+        'cidr': (option_decoders.StringDecoder, {'default': None}),
+        'vm_spec': (spec.PerCloudConfigDecoder, {}),
+        'placement_group_name': (
+            option_decoders.StringDecoder,
+            {'default': None, 'none_ok': True},
+        ),
     })
     return result
 
@@ -171,16 +203,18 @@ class VmGroupsDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    vm_group_configs = super(VmGroupsDecoder,
-                             self).Decode(value, component_full_name,
-                                          flag_values)
+    vm_group_configs = super(VmGroupsDecoder, self).Decode(
+        value, component_full_name, flag_values
+    )
     result = {}
     for vm_group_name, vm_group_config in vm_group_configs.items():
       result[vm_group_name] = VmGroupSpec(
           '{0}.{1}'.format(
-              self._GetOptionFullName(component_full_name), vm_group_name),
+              self._GetOptionFullName(component_full_name), vm_group_name
+          ),
           flag_values=flag_values,
-          **vm_group_config)
+          **vm_group_config
+      )
     return result
 
 
@@ -206,10 +240,11 @@ class VmGroupSpecDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    vm_group_config = super(VmGroupSpecDecoder,
-                            self).Decode(value, component_full_name,
-                                         flag_values)
+    vm_group_config = super(VmGroupSpecDecoder, self).Decode(
+        value, component_full_name, flag_values
+    )
     return VmGroupSpec(
         self._GetOptionFullName(component_full_name),
         flag_values=flag_values,
-        **vm_group_config)
+        **vm_group_config
+    )

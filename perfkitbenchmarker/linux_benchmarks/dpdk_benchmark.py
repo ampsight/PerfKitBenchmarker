@@ -178,9 +178,11 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> list[sample.Sample]:
       'dpdk_test_length': _DPDK_TEST_LENGTH.value,
   }
 
+  dpdk_cmd = 'sudo dpdk-testpmd'
+
   client_cmd = (
-      'sudo dpdk-testpmd'
-      f' -a {client_vm.secondary_nic_bus_info}'
+      dpdk_cmd
+      + f' -a {client_vm.secondary_nic_bus_info}'
       f' -l 0-{_DPDK_NB_CORES.value} --'
       f' --forward-mode={_DPDK_FORWARD_MODE.value[0]}'
       f' --tx-ip={client_vm.internal_ips[1]},{server_vm.internal_ips[1]}'
@@ -193,13 +195,12 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> list[sample.Sample]:
   if client_vm.CLOUD == 'AWS':
     client_cmd += f' --eth-peer=0,{server_vm.secondary_mac_addr}'
 
-  # --txonly-multi-flow only works with patch
   if _DPDK_TXONLY_MULTI_FLOW.value:
     client_cmd += ' --txonly-multi-flow'
 
   server_cmd = (
-      'sudo dpdk-testpmd'
-      f' -a {server_vm.secondary_nic_bus_info}'
+      dpdk_cmd
+      + f' -a {server_vm.secondary_nic_bus_info}'
       f' -l 0-{_DPDK_NB_CORES.value} --'
       f' --txq={_DPDK_TXQ.value}'
       f' --rxq={_DPDK_RXQ.value}'

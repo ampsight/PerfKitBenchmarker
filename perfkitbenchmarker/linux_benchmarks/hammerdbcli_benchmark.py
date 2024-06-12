@@ -1,4 +1,5 @@
 """Runs the HammerDB relational database benchmark."""
+
 import posixpath
 from typing import Any, Dict, List
 
@@ -14,6 +15,10 @@ from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker.linux_packages import hammerdb
 from perfkitbenchmarker.providers.gcp import gcp_alloy_db  # pylint: disable=unused-import
 
+# Update this version when changing a config
+# TODO(chunla) Consider adding checks to make sure this version gets updated.
+CONFIG_VERSION = 'v1.0'
+
 # MYSQL Config file path
 MYSQL_CONFIG_PATH = '/etc/mysql/mysql.conf.d/mysqld.cnf'
 FLAGS = flags.FLAGS
@@ -23,6 +28,7 @@ INNODB_BUFFER_POOL_SIZE = '{{INNODB_BUFFER_POOL_SIZE}}'
 SHARED_BUFFER_SIZE = '{{SHARED_BUFFER_SIZE}}'
 MAX_CONNECTIONS = '{{MAX_CONNECTIONS}}'
 PG_VERSION = '{{PG_VERSION}}'
+SCRATCH_DIR_PLACEHOLDER = '{{SCRATCH_DIR}}'
 BENCHMARK_NAME = 'hammerdbcli'
 BENCHMARK_CONFIG = """
 hammerdbcli:
@@ -124,7 +130,11 @@ def Prepare(benchmark_spec: bm_spec.BenchmarkSpec):
   vm = benchmark_spec.vms[0]
   relational_db = benchmark_spec.relational_db
   db_engine = relational_db.engine
-  hammerdb.SetDefaultConfig()
+  num_cpus = None
+  if hasattr(relational_db, 'server_vm'):
+    server_vm = relational_db.server_vm
+    num_cpus = server_vm.NumCpusForBenchmark()
+  hammerdb.SetDefaultConfig(num_cpus)
   db_name = hammerdb.MAP_SCRIPT_TO_DATABASE_NAME[hammerdb.HAMMERDB_SCRIPT.value]
 
   if FLAGS.cloud == 'Azure' and db_engine == 'mysql' and FLAGS.use_managed_db:
@@ -195,26 +205,31 @@ def SetOptimizedServerConfiguration(
 
 
 def SetMysqlOptimizedServerConfiguration(
-    optimized_server_config: str, server_vm: virtual_machine.BaseVirtualMachine,
-    relational_db: r_db.BaseRelationalDb):
+    optimized_server_config: str,
+    server_vm: virtual_machine.BaseVirtualMachine,
+    relational_db: r_db.BaseRelationalDb,
+):
   """Set the optimized configuration for hammerdb for Mysql.
 
   Args:
-    optimized_server_config: The optimized server configuration type.
-      Currently support MINIMUM_RECOVERY and RESTORABLE
+    optimized_server_config: The optimized server configuration type. Currently
+      support MINIMUM_RECOVERY and RESTORABLE
     server_vm: Server VM to host the database.
     relational_db: Relational database class.
   """
-  file_name_prefix = (
-      f'hammerdb_optimized_{optimized_server_config}_')
+  file_name_prefix = f'hammerdb_optimized_{optimized_server_config}_'
   config = file_name_prefix + 'mysqld.cnf'
   server_vm.PushFile(
       data.ResourcePath(posixpath.join('relational_db_configs', config)),
       '',
   )
-  hammerdb.SearchAndReplaceGuestFile(server_vm, '~/', config,
-                                     INNODB_BUFFER_POOL_SIZE,
-                                     relational_db.innodb_buffer_pool_size)
+  hammerdb.SearchAndReplaceGuestFile(
+      server_vm,
+      '~/',
+      config,
+      INNODB_BUFFER_POOL_SIZE,
+      relational_db.innodb_buffer_pool_size,
+  )
   server_vm.RemoteCommand(f'sudo mv {config} {MYSQL_CONFIG_PATH}')
   server_vm.RemoteCommand(f'sudo chown mysql:mysql {MYSQL_CONFIG_PATH}')
   server_vm.RemoteCommand(f'sudo cat {MYSQL_CONFIG_PATH}')
@@ -225,13 +240,15 @@ def SetMysqlOptimizedServerConfiguration(
 
 
 def SetPostgresOptimizedServerConfiguration(
-    optimized_server_config: str, server_vm: virtual_machine.BaseVirtualMachine,
-    relational_db: r_db.BaseRelationalDb):
+    optimized_server_config: str,
+    server_vm: virtual_machine.BaseVirtualMachine,
+    relational_db: r_db.BaseRelationalDb,
+):
   """Set the optimized configuration for hammerdb for postgres.
 
   Args:
-    optimized_server_config: The optimized server configuration type.
-      Currently support MINIMUM_RECOVERY and RESTORABLE
+    optimized_server_config: The optimized server configuration type. Currently
+      support MINIMUM_RECOVERY and RESTORABLE
     server_vm: Server VM to host the database.
     relational_db: Relational database class.
   """
@@ -248,26 +265,43 @@ def SetPostgresOptimizedServerConfiguration(
   shared_buffer_size_mb = shared_buffer_size * 1000
 
   huge_page_number = int(shared_buffer_size_mb / 2 * 1.2)
-  server_vm.RemoteCommand(f'echo "vm.nr_hugepages = {huge_page_number}" '
-                          '| sudo tee -a'
-                          ' /etc/sysctl.conf')
+  server_vm.RemoteCommand(
+      f'echo "vm.nr_hugepages = {huge_page_number}" '
+      '| sudo tee -a'
+      ' /etc/sysctl.conf'
+  )
   server_vm.RemoteCommand('sudo sysctl -p')
 
-  config = (
-      f'hammerdb_optimized_{optimized_server_config}_') + 'postgresql.conf'
+  config = f'hammerdb_optimized_{optimized_server_config}_' + 'postgresql.conf'
   server_vm.PushFile(
       data.ResourcePath(posixpath.join('relational_db_configs', config)),
       '',
   )
-  hammerdb.SearchAndReplaceGuestFile(server_vm, '~/', config, MAX_CONNECTIONS,
-                                     str(hammerdb.HAMMERDB_NUM_VU.value + 10))
-  hammerdb.SearchAndReplaceGuestFile(server_vm, '~/',
-                                     config, SHARED_BUFFER_SIZE,
-                                     str(shared_buffer_size))
-  hammerdb.SearchAndReplaceGuestFile(server_vm, '~/', config, PG_VERSION, '13')
-  server_vm.RemoteCommand('sudo bash -c "cat '
-                          f'{config} '
-                          '> /etc/postgresql/13/main/postgresql.conf"')
+  hammerdb.SearchAndReplaceGuestFile(
+      server_vm,
+      '~/',
+      config,
+      MAX_CONNECTIONS,
+      str(hammerdb.HAMMERDB_NUM_VU.value + 10),
+  )
+  hammerdb.SearchAndReplaceGuestFile(
+      server_vm, '~/', config, SHARED_BUFFER_SIZE, str(shared_buffer_size)
+  )
+  db_version = relational_db.spec.engine_version
+  hammerdb.SearchAndReplaceGuestFile(
+      server_vm, '~/', config, PG_VERSION, db_version
+  )
+  hammerdb.SearchAndReplaceGuestFile(
+      server_vm,
+      '~/',
+      config,
+      SCRATCH_DIR_PLACEHOLDER,
+      server_vm.GetScratchDir(),
+  )
+  server_vm.RemoteCommand(
+      f'sudo bash -c "cat {config} >'
+      f' /etc/postgresql/{db_version}/main/postgresql.conf"'
+  )
   server_vm.RemoteCommand('sudo systemctl restart postgresql')
 
 
@@ -293,26 +327,40 @@ def Run(benchmark_spec: bm_spec.BenchmarkSpec) -> List[sample.Sample]:
   """
   vm = benchmark_spec.vms[0]
   relational_db = benchmark_spec.relational_db
-  hammerdb.SetDefaultConfig()
+  num_cpus = None
+  if hasattr(relational_db, 'server_vm'):
+    server_vm = relational_db.server_vm
+    num_cpus = server_vm.NumCpusForBenchmark()
+  hammerdb.SetDefaultConfig(num_cpus)
   db_engine = relational_db.engine
   metadata = hammerdb.GetMetadata(db_engine)
-
+  # TODO(chunla) Consider if we should have separate versioning for each config.
+  metadata['hammerdbcli_config_version'] = CONFIG_VERSION
   script = hammerdb.HAMMERDB_SCRIPT.value
   timeout = hammerdb.HAMMERDB_RUN_TIMEOUT.value
   database_name = hammerdb.MAP_SCRIPT_TO_DATABASE_NAME[script]
   samples = []
   for i in range(1, 1 + hammerdb.NUM_RUN.value):
     metadata['run_iteration'] = i
-    current_samples = hammerdb.Run(vm, db_engine, script, timeout=timeout)
-    if (db_engine == sql_engine_utils.ALLOYDB and
-        relational_db.enable_columnar_engine_recommendation and i == 1):
+    stdout = hammerdb.Run(vm, db_engine, script, timeout=timeout)
+    current_samples = hammerdb.ParseResults(script=script, stdout=stdout, vm=vm)
+    if (
+        db_engine == sql_engine_utils.ALLOYDB
+        and relational_db.enable_columnar_engine_recommendation
+        and i == 1
+    ):
       columnar_size, relation = relational_db.GetColumnarEngineRecommendation(
-          'tpch')
+          'tpch'
+      )
       relational_db.UpdateAlloyDBFlags(
-          columnar_size, True, 'off', relation=relation)
+          columnar_size, True, 'off', relation=relation
+      )
       relational_db.WaitColumnarEnginePopulates(database_name)
       # Another prewarm
-      current_samples = hammerdb.Run(vm, db_engine, script, timeout=timeout)
+      stdout = hammerdb.Run(vm, db_engine, script, timeout=timeout)
+      current_samples = hammerdb.ParseResults(
+          script=script, stdout=stdout, vm=vm
+      )
 
     for s in current_samples:
       s.metadata.update(metadata)
@@ -324,7 +372,7 @@ def Cleanup(benchmark_spec: bm_spec.BenchmarkSpec):
   """Cleanup the VM to its original state.
 
   Args:
-    benchmark_spec: The benchmark specification. Contains all data that
-      is required to run the benchmark.
+    benchmark_spec: The benchmark specification. Contains all data that is
+      required to run the benchmark.
   """
   del benchmark_spec

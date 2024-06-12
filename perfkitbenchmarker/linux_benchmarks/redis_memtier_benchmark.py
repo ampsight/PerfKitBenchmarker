@@ -21,7 +21,6 @@ Redis homepage: http://redis.io/
 memtier_benchmark homepage: https://github.com/RedisLabs/memtier_benchmark
 """
 
-import logging
 from typing import Any, Dict, List, Optional
 
 from absl import flags
@@ -50,19 +49,35 @@ SERVER_OS_TYPE = flags.DEFINE_string(
     None,
     'If provided, overrides the redis server os type.',
 )
-flags.DEFINE_string('redis_memtier_client_machine_type', None,
-                    'If provided, overrides the memtier client machine type.')
-flags.DEFINE_string('redis_memtier_server_machine_type', None,
-                    'If provided, overrides the redis server machine type.')
+flags.DEFINE_string(
+    'redis_memtier_client_machine_type',
+    None,
+    'If provided, overrides the memtier client machine type.',
+)
+flags.DEFINE_string(
+    'redis_memtier_server_machine_type',
+    None,
+    'If provided, overrides the redis server machine type.',
+)
 REDIS_MEMTIER_MEASURE_CPU = flags.DEFINE_bool(
-    'redis_memtier_measure_cpu', False, 'If true, measure cpu usage on the '
-    'server via top tool. Defaults to False.')
+    'redis_memtier_measure_cpu',
+    False,
+    'If true, measure cpu usage on the server via top tool. Defaults to False.',
+)
 BENCHMARK_NAME = 'redis_memtier'
 BENCHMARK_CONFIG = """
 redis_memtier:
   description: >
       Run memtier_benchmark against Redis.
       Specify the number of client VMs with --redis_clients.
+  flags:
+    memtier_protocol: redis
+    create_and_boot_post_task_delay: 5
+    memtier_data_size: 1024
+    memtier_pipeline: 1
+    placement_group_style: none
+    redis_simulate_aof: False
+    redis_server_io_threads: 0
   vm_groups:
     servers:
       vm_spec: *default_dual_core
@@ -78,14 +93,16 @@ _BenchmarkSpec = benchmark_spec.BenchmarkSpec
 
 def CheckPrerequisites(_):
   """Verifies that benchmark setup is correct."""
-  if len(redis_server.GetRedisPorts()) > 1 and (
-      len(FLAGS.memtier_pipeline) > 1 or
-      len(FLAGS.memtier_threads) > 1 or
-      len(FLAGS.memtier_clients) > 1):
+  if len(redis_server.GetRedisPorts()) >= 0 and (
+      len(FLAGS.memtier_pipeline) > 1
+      or len(FLAGS.memtier_threads) > 1
+      or len(FLAGS.memtier_clients) > 1
+  ):
     raise errors.Setup.InvalidFlagConfigurationError(
         'There can only be 1 setting for pipeline, threads and clients if '
         'there are multiple redis endpoints. Consider splitting up the '
-        'benchmarking.')
+        'benchmarking.'
+    )
 
 
 def GetConfig(user_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -100,22 +117,13 @@ def GetConfig(user_config: Dict[str, Any]) -> Dict[str, Any]:
   if FLAGS.redis_memtier_client_machine_type:
     vm_spec = config['vm_groups']['clients']['vm_spec']
     for cloud in vm_spec:
-      vm_spec[cloud]['machine_type'] = (
-          FLAGS.redis_memtier_client_machine_type)
+      vm_spec[cloud]['machine_type'] = FLAGS.redis_memtier_client_machine_type
   if FLAGS.redis_memtier_server_machine_type:
     vm_spec = config['vm_groups']['servers']['vm_spec']
     for cloud in vm_spec:
-      vm_spec[cloud]['machine_type'] = (
-          FLAGS.redis_memtier_server_machine_type)
-  if redis_server.REDIS_SIMULATE_AOF.value:
-    config['vm_groups']['servers']['disk_spec']['GCP']['disk_type'] = 'local'
-    config['vm_groups']['servers']['vm_spec']['GCP']['num_local_ssds'] = 8
-    # To auto mount scratch disks (/scratch0, /scratch1, ...etc)
-    config['vm_groups']['servers']['disk_count'] = 7
-    FLAGS.num_striped_disks = 7
-    FLAGS.gce_ssd_interface = 'NVME'
-  else:
-    config['vm_groups']['servers'].pop('disk_spec')
+      vm_spec[cloud]['machine_type'] = FLAGS.redis_memtier_server_machine_type
+  if not redis_server.REDIS_SIMULATE_AOF.value:
+    config['vm_groups']['servers']['disk_count'] = 0
   return config
 
 
@@ -124,7 +132,8 @@ def Prepare(bm_spec: _BenchmarkSpec) -> None:
   server_count = len(bm_spec.vm_groups['servers'])
   if server_count != 1:
     raise errors.Benchmarks.PrepareException(
-        f'Expected servers vm count to be 1, got {server_count}')
+        f'Expected servers vm count to be 1, got {server_count}'
+    )
   client_vms = bm_spec.vm_groups['clients']
   server_vm = bm_spec.vm_groups['servers'][0]
 
@@ -132,29 +141,6 @@ def Prepare(bm_spec: _BenchmarkSpec) -> None:
   background_tasks.RunThreaded(
       lambda client: client.Install('memtier'), client_vms
   )
-
-  if redis_server.REDIS_SIMULATE_AOF.value:
-    server_vm.Install('mdadm')
-    server_vm.RemoteCommand(
-        'yes | sudo mdadm --create /dev/md1 --level=stripe --force --raid-devices=1 /dev/nvme0n8'
-        )
-    server_vm.RemoteCommand('sudo mkfs.ext4 -F /dev/md1')
-    server_vm.RemoteCommand(
-        f'sudo mkdir -p /{redis_server.REDIS_BACKUP}; '
-        f'sudo mount -o discard /dev/md1 /{redis_server.REDIS_BACKUP} && '
-        f'sudo chown $USER:$USER /{redis_server.REDIS_BACKUP};'
-        )
-
-    server_vm.InstallPackages('fio')
-    for disk in server_vm.scratch_disks:
-      cmd = ('sudo fio --name=global --direct=1 --ioengine=libaio --numjobs=1 '
-             '--refill_buffers --scramble_buffers=1 --allow_mounted_write=1 '
-             '--blocksize=128k --rw=write --iodepth=64 '
-             f'--size={disk.disk_size}G --name=wipc '
-             f'--filename={disk.mount_point}/fio_data &> /dev/null &')
-      logging.info('Start filling %s. This may take up to 30min...',
-                   disk.mount_point)
-      server_vm.RemoteCommand(cmd)
 
   # Install redis on the 1st machine.
   server_vm.Install('redis_server')
@@ -164,7 +150,7 @@ def Prepare(bm_spec: _BenchmarkSpec) -> None:
   # Run 4 at a time with only the first client VM to reduce memory
   # fragmentation and avoid overloading the server
   bm_spec.redis_endpoint_ip = bm_spec.vm_groups['servers'][0].internal_ip
-  ports = redis_server.GetRedisPorts()
+  ports = redis_server.GetRedisPorts(server_vm)
   ports_group_of_four = [ports[i : i + 4] for i in range(0, len(ports), 4)]
   for ports_group in ports_group_of_four:
     # pylint: disable=g-long-lambda
@@ -197,9 +183,11 @@ def Run(bm_spec: _BenchmarkSpec) -> List[sample.Sample]:
     server_vm.RemoteCommand(f'bash {_TOP_SCRIPT}')
 
   raw_results = memtier.RunOverAllThreadsPipelinesAndClients(
-      client_vms, bm_spec.redis_endpoint_ip, redis_server.GetRedisPorts()
+      client_vms,
+      bm_spec.redis_endpoint_ip,
+      redis_server.GetRedisPorts(server_vm),
   )
-  redis_metadata = redis_server.GetMetadata()
+  redis_metadata = redis_server.GetMetadata(server_vm)
 
   top_results = []
   if measure_cpu_on_server_vm:
@@ -229,8 +217,15 @@ def _GetTopResults(server_vm) -> List[sample.Sample]:
     columns = line.split(',')
     idle_value, _ = columns[3].strip().split(' ')
     samples.append(
-        sample.Sample('CPU Idle time', idle_value, '%Cpu(s)',
-                      {'time_series_sec': row_index,
-                       'cpu_idle_percent': idle_value,}))
+        sample.Sample(
+            'CPU Idle time',
+            idle_value,
+            '%Cpu(s)',
+            {
+                'time_series_sec': row_index,
+                'cpu_idle_percent': idle_value,
+            },
+        )
+    )
     row_index += 1
   return samples

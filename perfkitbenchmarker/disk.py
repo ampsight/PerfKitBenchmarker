@@ -17,46 +17,74 @@ Disks can be created, deleted, attached to VMs, and detached from VMs.
 """
 
 import abc
-import logging
+import time
+from typing import List
 
 from absl import flags
 from perfkitbenchmarker import resource
+from perfkitbenchmarker import sample
 from perfkitbenchmarker.configs import option_decoders
 from perfkitbenchmarker.configs import spec
 import six
 
-flags.DEFINE_boolean('nfs_timeout_hard', True,
-                     'Whether to use hard or soft for NFS mount.')
+flags.DEFINE_boolean(
+    'nfs_timeout_hard', True, 'Whether to use hard or soft for NFS mount.'
+)
 flags.DEFINE_integer('nfs_rsize', 1048576, 'NFS read size.')
 flags.DEFINE_integer('nfs_wsize', 1048576, 'NFS write size.')
 flags.DEFINE_integer('nfs_timeout', 60, 'NFS timeout.')
 flags.DEFINE_integer('nfs_retries', 2, 'NFS Retries.')
 flags.DEFINE_integer(
-    'nfs_nconnect', None, 'Number of connections that each NFS client should '
-    'establish to the server.')
+    'nfs_nconnect',
+    None,
+    'Number of connections that each NFS client should '
+    'establish to the server.',
+)
 flags.DEFINE_boolean(
-    'nfs_noresvport', False,
+    'nfs_noresvport',
+    False,
     'Whether the NFS client should use a non-privileged '
-    'source port. Suggested to use with EFS')
+    'source port. Suggested to use with EFS',
+)
 flags.DEFINE_boolean(
-    'nfs_managed', True,
+    'nfs_managed',
+    True,
     'Use a managed NFS service if using NFS disks. Otherwise '
-    'start an NFS server on the first VM.')
+    'start an NFS server on the first VM.',
+)
 flags.DEFINE_string(
-    'nfs_ip_address', None,
+    'nfs_ip_address',
+    None,
     'If specified, PKB will target this ip address when '
     'mounting NFS "disks" rather than provisioning an NFS '
-    'Service for the corresponding cloud.')
+    'Service for the corresponding cloud.',
+)
 flags.DEFINE_string(
-    'nfs_directory', None,
+    'nfs_directory',
+    None,
     'Directory to mount if using a StaticNfsService. This '
     'corresponds to the "VOLUME_NAME" of other NfsService '
-    'classes.')
+    'classes.',
+)
 flags.DEFINE_string('smb_version', '3.0', 'SMB version.')
-flags.DEFINE_list('mount_options', [],
-                  'Additional arguments to supply when mounting.')
-flags.DEFINE_list('fstab_options', [],
-                  'Additional arguments to supply to fstab.')
+flags.DEFINE_list(
+    'mount_options', [], 'Additional arguments to supply when mounting.'
+)
+flags.DEFINE_list(
+    'fstab_options', [], 'Additional arguments to supply to fstab.'
+)
+flags.DEFINE_integer(
+    'provisioned_iops',
+    None,
+    'Iops to provision, if applicable. Defaults to None.',
+)
+flags.DEFINE_bool('multi_writer_mode', False, 'Multi-writer mode.')
+flags.DEFINE_integer(
+    'provisioned_throughput',
+    None,
+    'Throughput to provision, if applicable. Defaults to None.',
+)
+
 
 FLAGS = flags.FLAGS
 
@@ -83,9 +111,6 @@ SMB = 'smb'
 # FUSE mounted object storage bucket
 OBJECT_STORAGE = 'object_storage'
 
-# Map old disk type names to new disk type names
-DISK_TYPE_MAPS = dict()
-
 # Standard metadata keys relating to disks
 MEDIA = 'media'
 REPLICATION = 'replication'
@@ -100,57 +125,17 @@ DEFAULT_MOUNT_OPTIONS = 'discard'
 DEFAULT_FSTAB_OPTIONS = 'defaults'
 
 
-# TODO(user): remove this function when we remove the deprecated
-# flags and disk type names.
-def RegisterDiskTypeMap(provider_name, type_map):
-  """Register a map from legacy disk type names to modern ones.
-
-  The translation machinery looks here to find the map corresponding
-  to the chosen provider and translates the user's flags and configs
-  to the new naming system. This function should be removed once the
-  (deprecated) legacy flags are removed.
-
-  Args:
-    provider_name: a string. The name of the provider. Must match the names we
-      give to providers in benchmark_spec.py.
-    type_map: a dict. Maps generic disk type names (STANDARD, REMOTE_SSD, PIOPS)
-      to provider-specific names.
-  """
-
-  DISK_TYPE_MAPS[provider_name] = type_map
-
-
-def GetDiskSpecClass(cloud):
+def GetDiskSpecClass(cloud, disk_type):
   """Get the DiskSpec class corresponding to 'cloud'."""
-  return spec.GetSpecClass(BaseDiskSpec, CLOUD=cloud)
+  spec_class = spec.GetSpecClass(BaseDiskSpec, CLOUD=cloud, DISK_TYPE=disk_type)
+  # GetSpecClass will return base spec if failed
+  if spec_class is BaseDiskSpec:
+    return spec.GetSpecClass(BaseDiskSpec, CLOUD=cloud)
+  return spec_class
 
 
-def WarnAndTranslateDiskTypes(name, cloud):
-  """Translate old disk types to new disk types, printing warnings if needed.
-
-  Args:
-    name: a string specifying a disk type, either new or old.
-    cloud: the cloud we're running on.
-
-  Returns:
-    The new-style disk type name (i.e. the provider's name for the type).
-  """
-
-  if cloud in DISK_TYPE_MAPS:
-    disk_type_map = DISK_TYPE_MAPS[cloud]
-    if name in disk_type_map and disk_type_map[name] != name:
-      new_name = disk_type_map[name]
-      logging.warning(
-          'Disk type name %s is deprecated and will be removed. '
-          'Translating to %s for now.', name, new_name)
-      return new_name
-    else:
-      return name
-  else:
-    logging.info('No legacy->new disk type map for provider %s', cloud)
-    # The provider has not been updated to use new-style names. We
-    # need to keep benchmarks working, so we pass through the name.
-    return name
+def IsRemoteDisk(disk_type):
+  return disk_type not in [LOCAL, NFS, SMB, RAM]
 
 
 class BaseDiskSpec(spec.BaseSpec):
@@ -174,6 +159,14 @@ class BaseDiskSpec(spec.BaseSpec):
   def __init__(self, *args, **kwargs):
     self.device_path: str = None
     self.mount_point: str = None
+    self.disk_type: str = None
+    self.disk_size: int = None
+    self.num_striped_disks: int = None
+    self.num_partitions = None
+    self.partition_size = None
+    self.provisioned_iops = None
+    self.provisioned_throughput = None
+    self.multi_writer_mode: bool = False
     super(BaseDiskSpec, self).__init__(*args, **kwargs)
 
   @classmethod
@@ -201,6 +194,112 @@ class BaseDiskSpec(spec.BaseSpec):
       config_values['num_striped_disks'] = flag_values.num_striped_disks
     if flag_values['scratch_dir'].present:
       config_values['mount_point'] = flag_values.scratch_dir
+    if flag_values['num_partitions'].present:
+      config_values['num_partitions'] = flag_values.num_partitions
+    if flag_values['partition_size'].present:
+      config_values['partition_size'] = flag_values.partition_size
+    if flag_values['provisioned_iops'].present:
+      config_values['provisioned_iops'] = flag_values.provisioned_iops
+    if flag_values['provisioned_throughput'].present:
+      config_values['provisioned_throughput'] = (
+          flag_values.provisioned_throughput
+      )
+    if flag_values['multi_writer_mode'].present:
+      config_values['multi_writer_mode'] = flag_values.multi_writer_mode
+
+  @classmethod
+  def _GetOptionDecoderConstructions(cls):
+    """Gets decoder classes and constructor args for each configurable option.
+
+    Can be overridden by derived classes to add options or impose additional
+    requirements on existing options.
+
+    Returns:
+      dict. Maps option name string to a (ConfigOptionDecoder class, dict) pair.
+          The pair specifies a decoder class and its __init__() keyword
+          arguments to construct in order to decode the named option.
+    """
+    result = super(BaseDiskSpec, cls)._GetOptionDecoderConstructions()
+    result.update({
+        'device_path': (
+            option_decoders.StringDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'disk_number': (
+            option_decoders.IntDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'disk_size': (
+            option_decoders.IntDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'disk_type': (
+            option_decoders.StringDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'mount_point': (
+            option_decoders.StringDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'num_striped_disks': (
+            option_decoders.IntDecoder,
+            {'default': 1, 'min': 1},
+        ),
+        'num_partitions': (
+            option_decoders.IntDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'partition_size': (
+            option_decoders.StringDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'provisioned_iops': (
+            option_decoders.IntDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'provisioned_throughput': (
+            option_decoders.IntDecoder,
+            {'default': None, 'none_ok': True},
+        ),
+        'multi_writer_mode': (
+            option_decoders.BooleanDecoder,
+            {'default': False, 'none_ok': True},
+        ),
+    })
+    return result
+
+
+class BaseNFSDiskSpec(BaseDiskSpec):
+  """Stores the information needed to create a base NFT Disk."""
+
+  SPEC_TYPE = 'BaseDiskSpec'
+  CLOUD = None
+  DISK_TYPE = NFS
+  SPEC_ATTRS = ['CLOUD', 'DISK_TYPE']
+
+  def __init__(self, *args, **kwargs):
+    self.device_path: str = None
+    self.mount_point: str = None
+    super(BaseNFSDiskSpec, self).__init__(*args, **kwargs)
+    self.disk_type = NFS
+
+  @classmethod
+  def _ApplyFlags(cls, config_values, flag_values):
+    """Overrides config values with flag values.
+
+    Can be overridden by derived classes to add support for specific flags.
+
+    Args:
+      config_values: dict mapping config option names to provided values. Is
+        modified by this function.
+      flag_values: flags.FlagValues. Runtime flags that may override the
+        provided config values.
+
+    Returns:
+      dict mapping config option names to values derived from the config
+      values or flag values.
+    """
+    super(BaseNFSDiskSpec, cls)._ApplyFlags(config_values, flag_values)
     if flag_values['nfs_version'].present:
       config_values['nfs_version'] = flag_values.nfs_version
     if flag_values['nfs_timeout_hard'].present:
@@ -221,6 +320,65 @@ class BaseDiskSpec(spec.BaseSpec):
       config_values['nfs_managed'] = flag_values.nfs_managed
     if flag_values['nfs_directory'].present:
       config_values['nfs_directory'] = flag_values.nfs_directory
+
+  @classmethod
+  def _GetOptionDecoderConstructions(cls):
+    """Gets decoder classes and constructor args for each configurable option.
+
+    Can be overridden by derived classes to add options or impose additional
+    requirements on existing options.
+
+    Returns:
+      dict. Maps option name string to a (ConfigOptionDecoder class, dict) pair.
+          The pair specifies a decoder class and its __init__() keyword
+          arguments to construct in order to decode the named option.
+    """
+    result = super(BaseNFSDiskSpec, cls)._GetOptionDecoderConstructions()
+    result.update({
+        'nfs_version': (option_decoders.StringDecoder, {'default': None}),
+        'nfs_ip_address': (option_decoders.StringDecoder, {'default': None}),
+        'nfs_managed': (option_decoders.BooleanDecoder, {'default': True}),
+        'nfs_directory': (option_decoders.StringDecoder, {'default': None}),
+        'nfs_rsize': (option_decoders.IntDecoder, {'default': 1048576}),
+        'nfs_wsize': (option_decoders.IntDecoder, {'default': 1048576}),
+        'nfs_timeout': (option_decoders.IntDecoder, {'default': 60}),
+        'nfs_timeout_hard': (option_decoders.BooleanDecoder, {'default': True}),
+        'nfs_retries': (option_decoders.IntDecoder, {'default': 2}),
+        'nfs_nconnect': (option_decoders.IntDecoder, {'default': None}),
+    })
+    return result
+
+
+class BaseSMBDiskSpec(BaseDiskSpec):
+  """Stores the information needed to create a SMB Disk."""
+
+  SPEC_TYPE = 'BaseDiskSpec'
+  CLOUD = None
+  DISK_TYPE = SMB
+  SPEC_ATTRS = ['CLOUD', 'DISK_TYPE']
+
+  def __init__(self, *args, **kwargs):
+    self.device_path: str = None
+    self.mount_point: str = None
+    super(BaseSMBDiskSpec, self).__init__(*args, **kwargs)
+
+  @classmethod
+  def _ApplyFlags(cls, config_values, flag_values):
+    """Overrides config values with flag values.
+
+    Can be overridden by derived classes to add support for specific flags.
+
+    Args:
+      config_values: dict mapping config option names to provided values. Is
+        modified by this function.
+      flag_values: flags.FlagValues. Runtime flags that may override the
+        provided config values.
+
+    Returns:
+      dict mapping config option names to values derived from the config
+      values or flag values.
+    """
+    super(BaseSMBDiskSpec, cls)._ApplyFlags(config_values, flag_values)
     if flag_values['smb_version'].present:
       config_values['smb_version'] = flag_values.smb_version
 
@@ -236,71 +394,23 @@ class BaseDiskSpec(spec.BaseSpec):
           The pair specifies a decoder class and its __init__() keyword
           arguments to construct in order to decode the named option.
     """
-    result = super(BaseDiskSpec, cls)._GetOptionDecoderConstructions()
+    result = super(BaseSMBDiskSpec, cls)._GetOptionDecoderConstructions()
     result.update({
-        'device_path': (option_decoders.StringDecoder, {
-            'default': None,
-            'none_ok': True
-        }),
-        'disk_number': (option_decoders.IntDecoder, {
-            'default': None,
-            'none_ok': True
-        }),
-        'disk_size': (option_decoders.IntDecoder, {
-            'default': None,
-            'none_ok': True
-        }),
-        'disk_type': (option_decoders.StringDecoder, {
-            'default': None,
-            'none_ok': True
-        }),
-        'mount_point': (option_decoders.StringDecoder, {
-            'default': None,
-            'none_ok': True
-        }),
-        'num_striped_disks': (option_decoders.IntDecoder, {
-            'default': 1,
-            'min': 1
-        }),
-        'nfs_version': (option_decoders.StringDecoder, {
-            'default': None
-        }),
-        'nfs_ip_address': (option_decoders.StringDecoder, {
-            'default': None
-        }),
-        'nfs_managed': (option_decoders.BooleanDecoder, {
-            'default': True
-        }),
-        'nfs_directory': (option_decoders.StringDecoder, {
-            'default': None
-        }),
-        'nfs_rsize': (option_decoders.IntDecoder, {
-            'default': 1048576
-        }),
-        'nfs_wsize': (option_decoders.IntDecoder, {
-            'default': 1048576
-        }),
-        'nfs_timeout': (option_decoders.IntDecoder, {
-            'default': 60
-        }),
-        'nfs_timeout_hard': (option_decoders.BooleanDecoder, {
-            'default': True
-        }),
-        'nfs_retries': (option_decoders.IntDecoder, {
-            'default': 2
-        }),
-        'nfs_nconnect': (option_decoders.IntDecoder, {
-            'default': None
-        }),
-        'smb_version': (option_decoders.StringDecoder, {
-            'default': '3.0'
-        }),
+        'smb_version': (option_decoders.StringDecoder, {'default': '3.0'}),
     })
     return result
 
 
 class BaseDisk(resource.BaseResource):
-  """Object representing a Base Disk."""
+  """Object representing a Base Disk.
+
+  attach_start_time: time when we start the disk attach to vm
+  attach_end_time: time when disk attach to vm is done
+  detach_start_time: time when we start the disk detach from vm
+  detach_end_time: time when disk detach from vm is done
+  create_disk_start_time: time when start disk creation command
+  create_disk_end_time: time when we end disk creation command
+  """
 
   is_striped = False
 
@@ -310,6 +420,9 @@ class BaseDisk(resource.BaseResource):
     self.disk_type = disk_spec.disk_type
     self.mount_point = disk_spec.mount_point
     self.num_striped_disks = disk_spec.num_striped_disks
+    self.num_partitions = disk_spec.num_partitions
+    self.partition_size = disk_spec.partition_size
+    self.multi_writer_disk: bool = disk_spec.multi_writer_mode
     self.metadata.update({
         'type': self.disk_type,
         'size': self.disk_size,
@@ -332,6 +445,15 @@ class BaseDisk(resource.BaseResource):
     # numbers are used in diskpart scripts in order to identify the disks
     # that we want to operate on.
     self.disk_number = disk_spec.disk_number
+    self.attach_start_time: float = None
+    self.attach_end_time: float = None
+    self.detach_start_time: float = None
+    self.detach_end_time: float = None
+    self.create_disk_start_time: float = None
+    self.create_disk_end_time: float = None
+    self.disk_create_time: float = None
+    self.disk_detach_time: float = None
+    self.time_to_visibility: float = None
 
   @property
   def mount_options(self):
@@ -362,8 +484,15 @@ class BaseDisk(resource.BaseResource):
     self.metadata.update({'fstab_options': opts})
     return opts
 
-  @abc.abstractmethod
   def Attach(self, vm):
+    """Attaches the disk to a VM and calculates the attach time.
+
+    Args:
+      vm: The BaseVirtualMachine instance to which the disk will be attached.
+    """
+    self._Attach(vm)
+
+  def _Attach(self, vm):
     """Attaches the disk to a VM.
 
     Args:
@@ -373,21 +502,77 @@ class BaseDisk(resource.BaseResource):
 
   def Detach(self):
     """Detaches the disk from a VM."""
-    # This is currently never called.
-    # TODO(pclay): Figure out if static VMs should call this.
-    raise NotImplementedError
+    self.detach_start_time = time.time()
+    self._Detach()
+    self.detach_end_time = time.time()
+
+  def _Detach(self):
+    """Detaches the disk from a VM."""
+    pass
 
   def GetDevicePath(self):
     """Returns the path to the device inside a Linux VM."""
-    if self.device_path is None:
-      raise ValueError('device_path is None.')
     return self.device_path
 
   def GetDeviceId(self):
     """Return the Windows DeviceId of this disk."""
-    if self.disk_number is None:
-      raise ValueError('disk_number is None.')
     return r'\\.\PHYSICALDRIVE%s' % self.disk_number
+
+  def _Create(self):
+    # handled by disk
+    pass
+
+  def _Delete(self):
+    # handled by disk
+    pass
+
+  def GetAttachTime(self):
+    if self.attach_start_time and self.attach_end_time:
+      return self.attach_end_time - self.attach_start_time
+
+  def GetCreateTime(self):
+    if self.create_disk_start_time and self.create_disk_end_time:
+      return self.create_disk_end_time - self.create_disk_start_time
+
+  def GetDetachTime(self):
+    if self.detach_start_time and self.detach_end_time:
+      return self.detach_end_time - self.detach_start_time
+
+  def GetSamples(self) -> List[sample.Sample]:
+    samples = super(BaseDisk, self).GetSamples()
+    metadata = self.GetResourceMetadata()
+    metadata['resource_class'] = self.__class__.__name__
+    if self.GetAttachTime():
+      samples.append(
+          sample.Sample(
+              'Time to Attach Disk',
+              self.GetAttachTime(),
+              'seconds',
+              metadata,
+          )
+      )
+    if self.GetDetachTime():
+      samples.append(
+          sample.Sample(
+              'Time to Detach Disk',
+              self.GetDetachTime(),
+              'seconds',
+              metadata,
+          )
+      )
+    if self.GetCreateTime():
+      samples.append(
+          sample.Sample(
+              'Time to Create Disk',
+              self.GetCreateTime(),
+              'seconds',
+              metadata,
+          )
+      )
+    return samples
+
+  def IsNvme(self):
+    raise NotImplementedError()
 
 
 class StripedDisk(BaseDisk):
@@ -421,49 +606,52 @@ class StripedDisk(BaseDisk):
     for disk in self.disks:
       disk.Delete()
 
-  def Attach(self, vm):
+  def _Attach(self, vm):
     for disk in self.disks:
       disk.Attach(vm)
 
-  def Detach(self):
+  def _Detach(self):
     for disk in self.disks:
       disk.Detach()
 
+  def GetAttachTime(self):
+    disk_attach_time = None
+    for disk_details in self.disks:
+      disk_details_attach_time = disk_details.GetAttachTime()
+      if not disk_details_attach_time:
+        raise ValueError(
+            'No attach time found for disk %s' % disk_details.GetDeviceId()
+        )
+      if not disk_attach_time:
+        disk_attach_time = disk_details_attach_time
+      else:
+        disk_attach_time = max(
+            disk_attach_time, disk_details_attach_time
+        )
+    return disk_attach_time
 
-class MountableDisk(BaseDisk):
-  """Object representing a disk that produces a mounted directory.
+  def GetCreateTime(self):
+    if self.disk_create_time:
+      return self.disk_create_time
+    for disk_details in self.disks:
+      disk_details_create_time = disk_details.GetCreateTime()
+      if not disk_details_create_time:
+        raise ValueError(
+            'No create time found for disk %s' % disk_details.GetDeviceId()
+        )
+      if not self.disk_create_time:
+        self.disk_create_time = disk_details_create_time
+      else:
+        self.disk_create_time = max(
+            self.disk_create_time, disk_details_create_time
+        )
+    return self.disk_create_time
 
-  Examples are RamDisks or FUSE file systems.
-  """
-
-  def Attach(self, vm):
-    """Attaches the disk to a VM.
-
-    Args:
-      vm: The BaseVirtualMachine instance to which the disk will be attached.
-    """
-    pass
-
-  def GetDevicePath(self):
-    """Returns the path to the device inside a Linux VM."""
-    return None
-
-  def GetDeviceId(self):
-    """Return the Windows DeviceId of this disk."""
-    return None
-
-  def _Create(self):
-    """Creates the disk."""
-    pass
-
-  def _Delete(self):
-    """Deletes the disk."""
-    pass
-
-  @abc.abstractmethod
-  def Mount(self, vm):
-    """Mount disk at specified mount point."""
-    raise NotImplementedError()
+  def IsNvme(self):
+    for d in self.disks:
+      if not d.IsNvme():
+        return False
+    return True
 
 
 class NetworkDisk(BaseDisk):
@@ -478,7 +666,8 @@ class NetworkDisk(BaseDisk):
   def mount_options(self):
     opts = []
     for key, value in sorted(
-        six.iteritems(self._GetNetworkDiskMountOptionsDict())):
+        six.iteritems(self._GetNetworkDiskMountOptionsDict())
+    ):
       opts.append('%s' % key if value is None else '%s=%s' % (key, value))
     return ','.join(opts)
 
@@ -500,9 +689,6 @@ class NetworkDisk(BaseDisk):
     pass
 
 
-# TODO(user): adds to the disk.GetDiskSpecClass registry
-# that only has the cloud as the key.  Look into using (cloud, disk_type)
-# if causes problems
 class NfsDisk(NetworkDisk):
   """Provides options for mounting NFS drives.
 
@@ -514,11 +700,13 @@ class NfsDisk(NetworkDisk):
     nfs_tier: The NFS tier / performance level of the server.
   """
 
-  def __init__(self,
-               disk_spec,
-               remote_mount_address,
-               default_nfs_version=None,
-               nfs_tier=None):
+  def __init__(
+      self,
+      disk_spec,
+      remote_mount_address,
+      default_nfs_version=None,
+      nfs_tier=None,
+  ):
     super(NfsDisk, self).__init__(disk_spec)
     self.nfs_version = disk_spec.nfs_version or default_nfs_version
     self.nfs_timeout_hard = disk_spec.nfs_timeout_hard
@@ -569,12 +757,14 @@ class SmbDisk(NetworkDisk):
     smb_tier: The SMB tier / performance level of the server.
   """
 
-  def __init__(self,
-               disk_spec,
-               remote_mount_address,
-               storage_account_and_key,
-               default_smb_version=None,
-               smb_tier=None):
+  def __init__(
+      self,
+      disk_spec,
+      remote_mount_address,
+      storage_account_and_key,
+      default_smb_version=None,
+      smb_tier=None,
+  ):
     super(SmbDisk, self).__init__(disk_spec)
     self.smb_version = disk_spec.smb_version
     self.device_path = remote_mount_address

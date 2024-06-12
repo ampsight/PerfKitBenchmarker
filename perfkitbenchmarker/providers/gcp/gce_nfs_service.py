@@ -4,6 +4,7 @@ import json
 import logging
 
 from absl import flags
+from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import nfs_service
 from perfkitbenchmarker import provider_info
@@ -14,8 +15,13 @@ from perfkitbenchmarker.providers.gcp import util
 FLAGS = flags.FLAGS
 
 
+class GceNFSDiskSpec(disk.BaseNFSDiskSpec):
+  CLOUD = provider_info.GCP
+
+
 class GceNfsService(nfs_service.BaseNfsService):
   """Resource for GCE NFS service."""
+
   CLOUD = provider_info.GCP
   NFS_TIERS = (
       'STANDARD',
@@ -42,11 +48,16 @@ class GceNfsService(nfs_service.BaseNfsService):
   def _Create(self):
     logging.info('Creating NFS server %s', self.name)
     volume_arg = 'name={0},capacity={1}'.format(
-        self.server_directory.strip('/'), self.disk_spec.disk_size)
+        self.server_directory.strip('/'), self.disk_spec.disk_size
+    )
     network_arg = 'name={0}'.format(self.network)
     args = [
-        '--file-share', volume_arg, '--network', network_arg, '--labels',
-        util.MakeFormattedDefaultTags()
+        '--file-share',
+        volume_arg,
+        '--network',
+        network_arg,
+        '--labels',
+        util.MakeFormattedDefaultTags(),
     ]
     if self.nfs_tier:
       args += ['--tier', self.nfs_tier]
@@ -58,7 +69,8 @@ class GceNfsService(nfs_service.BaseNfsService):
         logging.info('Reusing existing NFS server %s', self.name)
       else:
         raise errors.Resource.RetryableCreationError(
-            'Error creating NFS service %s' % self.name, ex)
+            'Error creating NFS service %s' % self.name, ex
+        )
 
   def _Delete(self):
     logging.info('Deleting NFS server %s', self.name)
@@ -97,7 +109,8 @@ class GceNfsService(nfs_service.BaseNfsService):
     cmd += [str(arg) for arg in args]
     cmd += ['--location', self._GetLocation()]
     stdout, stderr, retcode = vm_util.IssueCommand(
-        cmd, raise_on_failure=False, timeout=1800)
+        cmd, raise_on_failure=False, timeout=1800
+    )
     if retcode:
       raise errors.Error('Error running command %s : %s' % (verb, stderr))
     return json.loads(stdout)

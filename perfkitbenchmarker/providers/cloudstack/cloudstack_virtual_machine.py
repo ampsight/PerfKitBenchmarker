@@ -11,16 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Class representing a Cloudstack instance. This module uses the csapi
-library which calls the cloudstack API. For more information refer to
-the Cloudstack documentation at https://github.com/syed/PerfKitBenchmarker.git
+"""Class representing a Cloudstack instance.
+
+This module uses the csapi library which calls the cloudstack API. For more
+information refer to the Cloudstack documentation at
+https://github.com/syed/PerfKitBenchmarker.git
 """
 
 
 import logging
 
 from absl import flags
+from perfkitbenchmarker import disk_strategies
 from perfkitbenchmarker import linux_virtual_machine as linux_vm
 from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import virtual_machine
@@ -43,7 +45,6 @@ class CloudStackVirtualMachine(virtual_machine.BaseVirtualMachine):
   DEFAULT_USER_NAME = 'cca-user'
   DEFAULT_PROJECT = 'cloudops-Engineering'
 
-
   def __init__(self, vm_spec):
     """Initialize a CloudStack virtual machine.
 
@@ -53,24 +54,23 @@ class CloudStackVirtualMachine(virtual_machine.BaseVirtualMachine):
     super(CloudStackVirtualMachine, self).__init__(vm_spec)
     self.network = cloudstack_network.CloudStackNetwork.GetNetwork(self)
 
-    self.cs = util.CsClient(FLAGS.CS_API_URL,
-                            FLAGS.CS_API_KEY,
-                            FLAGS.CS_API_SECRET)
+    self.cs = util.CsClient(
+        FLAGS.CS_API_URL, FLAGS.CS_API_KEY, FLAGS.CS_API_SECRET
+    )
 
     self.project_id = None
     if FLAGS.project:
       project = self.cs.get_project(FLAGS.project)
-      assert project, "Project not found"
+      assert project, 'Project not found'
       self.project_id = project['id']
 
     zone = self.cs.get_zone(self.zone)
-    assert zone, "Zone not found"
+    assert zone, 'Zone not found'
 
     self.zone_id = zone['id']
     self.user_name = self.DEFAULT_USER_NAME
     self.image = self.image or self.DEFAULT_IMAGE
     self.disk_counter = 0
-
 
   @vm_util.Retry(max_retries=3)
   def _CreateDependencies(self):
@@ -82,13 +82,11 @@ class CloudStackVirtualMachine(virtual_machine.BaseVirtualMachine):
       pub_key = keyfd.read()
 
       if not self.cs.get_ssh_keypair(self.ssh_keypair_name, self.project_id):
+        res = self.cs.register_ssh_keypair(
+            self.ssh_keypair_name, pub_key, self.project_id
+        )
 
-        res = self.cs.register_ssh_keypair(self.ssh_keypair_name,
-                                           pub_key,
-                                           self.project_id)
-
-        assert res, "Unable to create ssh keypair"
-
+        assert res, 'Unable to create ssh keypair'
 
     # Allocate a public ip
     network_id = self.network.id
@@ -101,8 +99,7 @@ class CloudStackVirtualMachine(virtual_machine.BaseVirtualMachine):
       self.ip_address = public_ip['ipaddress']
       self.ip_address_id = public_ip['id']
     else:
-      logging.warn("Unable to allocate public IP")
-
+      logging.warn('Unable to allocate public IP')
 
   def _DeleteDependencies(self):
     """Delete VM dependencies."""
@@ -119,27 +116,28 @@ class CloudStackVirtualMachine(virtual_machine.BaseVirtualMachine):
     """Create a Cloudstack VM instance."""
 
     service_offering = self.cs.get_serviceoffering(self.machine_type)
-    assert service_offering, "No service offering found"
+    assert service_offering, 'No service offering found'
 
     template = self.cs.get_template(self.image, self.project_id)
-    assert template, "No template found"
+    assert template, 'No template found'
 
     network_id = self.network.id
 
     vm = None
-    vm = self.cs.create_vm(self.name,
-                           self.zone_id,
-                           service_offering['id'],
-                           template['id'],
-                           [network_id],
-                           self.ssh_keypair_name,
-                           self.project_id)
+    vm = self.cs.create_vm(
+        self.name,
+        self.zone_id,
+        service_offering['id'],
+        template['id'],
+        [network_id],
+        self.ssh_keypair_name,
+        self.project_id,
+    )
 
-    assert vm, "Unable to create VM"
+    assert vm, 'Unable to create VM'
 
     self._vm = vm
     self.id = vm['virtualmachine']['id']
-
 
   @vm_util.Retry(max_retries=3)
   def _PostCreate(self):
@@ -151,14 +149,11 @@ class CloudStackVirtualMachine(virtual_machine.BaseVirtualMachine):
 
     # Create a Static NAT rule
     if not self.cs.snat_rule_exists(self.ip_address_id, self.id):
+      snat_rule = self.cs.enable_static_nat(
+          self.ip_address_id, self.id, self.network.id
+      )
 
-      snat_rule = self.cs.enable_static_nat(self.ip_address_id,
-                                            self.id,
-                                            self.network.id)
-
-
-      assert snat_rule, "Unable to create static NAT"
-
+      assert snat_rule, 'Unable to create static NAT'
 
   def _Delete(self):
     """Delete the VM instance."""
@@ -189,20 +184,21 @@ class CloudStackVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.disks = []
 
     for i in range(disk_spec.num_striped_disks):
-
       name = 'disk-%s-%d-%d' % (self.name, i + 1, self.disk_counter)
-      scratch_disk = cloudstack_disk.CloudStackDisk(disk_spec,
-                                                    name,
-                                                    self.zone_id,
-                                                    self.project_id)
+      scratch_disk = cloudstack_disk.CloudStackDisk(
+          disk_spec, name, self.zone_id, self.project_id
+      )
 
       self.disks.append(scratch_disk)
       self.disk_counter += 1
 
     scratch_disk = self._CreateScratchDiskFromDisks(disk_spec, self.disks)
-    self._PrepareScratchDisk(scratch_disk, disk_spec)
+    disk_strategies.PrepareScratchDiskStrategy().PrepareScratchDisk(
+        self, scratch_disk, disk_spec
+    )
 
 
-class CentOs7BasedCloudStackVirtualMachine(CloudStackVirtualMachine,
-                                           linux_vm.CentOs7Mixin):
+class CentOs7BasedCloudStackVirtualMachine(
+    CloudStackVirtualMachine, linux_vm.CentOs7Mixin
+):
   DEFAULT_IMAGE = 'CentOS 7 HVM base (64bit)'

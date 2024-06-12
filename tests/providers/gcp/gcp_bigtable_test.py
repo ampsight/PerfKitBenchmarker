@@ -17,11 +17,13 @@ import inspect
 import unittest
 from absl import flags
 from absl.testing import flagsaver
+from absl.testing import parameterized
 import mock
-
 from perfkitbenchmarker import errors
+from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.gcp import gcp_bigtable
 from perfkitbenchmarker.providers.gcp import util
+from tests import matchers
 from tests import pkb_common_test_case
 import requests
 
@@ -38,6 +40,23 @@ VALID_JSON_BASE = """
       "state": "READY"
     }}
 """
+
+_TEST_LIST_CLUSTERS_OUTPUT = [
+    {
+        'defaultStorageType': 'SSD',
+        'location': 'projects/pkb-test/locations/us-west1-a',
+        'name': 'projects/pkb-test/instances/pkb-bigtable-730b1e6b/clusters/pkb-bigtable-730b1e6b-1',
+        'serveNodes': 3,
+        'state': 'READY',
+    },
+    {
+        'defaultStorageType': 'SSD',
+        'location': 'projects/pkb-test/locations/us-west1-c',
+        'name': 'projects/pkb-test/instances/pkb-bigtable-730b1e6b/clusters/pkb-bigtable-730b1e6b-0',
+        'serveNodes': 3,
+        'state': 'READY',
+    },
+]
 
 
 OUT_OF_QUOTA_STDERR = """
@@ -85,7 +104,8 @@ cloud_bigtable_ycsb:
 
 def GetTestBigtableInstance(spec=_TEST_BENCHMARK_SPEC):
   test_benchmark_spec = pkb_common_test_case.CreateBenchmarkSpecFromYaml(
-      yaml_string=spec, benchmark_name='cloud_bigtable_ycsb')
+      yaml_string=spec, benchmark_name='cloud_bigtable_ycsb'
+  )
   test_benchmark_spec.ConstructNonRelationalDb()
   return test_benchmark_spec.non_relational_db
 
@@ -97,14 +117,16 @@ class GcpBigtableTestCase(pkb_common_test_case.PkbCommonTestCase):
     self.bigtable = GetTestBigtableInstance()
 
   def testNotFoundTable(self):
-    with mock.patch.object(util.GcloudCommand, 'Issue',
-                           return_value=('', '', 1)):
+    with mock.patch.object(
+        util.GcloudCommand, 'Issue', return_value=('', '', 1)
+    ):
       self.assertFalse(self.bigtable._Exists())
 
   def testFoundTable(self):
     stdout = VALID_JSON_BASE.format(project=PROJECT, name=NAME)
-    with mock.patch.object(util.GcloudCommand, 'Issue',
-                           return_value=(stdout, '', 0)):
+    with mock.patch.object(
+        util.GcloudCommand, 'Issue', return_value=(stdout, '', 0)
+    ):
       self.assertTrue(self.bigtable._Exists())
 
   def testQuotaError(self):
@@ -112,7 +134,9 @@ class GcpBigtableTestCase(pkb_common_test_case.PkbCommonTestCase):
         mock.patch.object(
             util.GcloudCommand,
             'Issue',
-            return_value=[None, OUT_OF_QUOTA_STDERR, None]))
+            return_value=[None, OUT_OF_QUOTA_STDERR, None],
+        )
+    )
     with self.assertRaises(errors.Benchmarks.QuotaFailure):
       self.bigtable._Create()
 
@@ -162,7 +186,9 @@ class GcpBigtableTestCase(pkb_common_test_case.PkbCommonTestCase):
         mock.patch.object(
             gcp_bigtable,
             'GetClustersDescription',
-            return_value=mock_get_cluster_output))
+            return_value=mock_get_cluster_output,
+        )
+    )
 
     # Act
     actual_metadata = instance.GetResourceMetadata()
@@ -189,7 +215,7 @@ class GcpBigtableTestCase(pkb_common_test_case.PkbCommonTestCase):
         'bigtable_replication_zone': 'parsed_rep_zone',
         'bigtable_storage_type': 'ssd',
         'bigtable_node_count': 3,
-        'bigtable_multicluster_routing': True
+        'bigtable_multicluster_routing': True,
     }
     self.assertEqual(actual_metadata, expected_metadata)
 
@@ -216,12 +242,18 @@ class GcpBigtableTestCase(pkb_common_test_case.PkbCommonTestCase):
     actual_flag_values = bigtable._BuildClusterConfigs()
 
     # Assert
-    expected_flag_values = [('id=test_name-0,zone=test_zone,'
-                             'autoscaling-min-nodes=1,autoscaling-max-nodes=5,'
-                             'autoscaling-cpu-target=50'),
-                            ('id=test_name-1,zone=test_replication_zone,'
-                             'autoscaling-min-nodes=1,autoscaling-max-nodes=5,'
-                             'autoscaling-cpu-target=50')]
+    expected_flag_values = [
+        (
+            'id=test_name-0,zone=test_zone,'
+            'autoscaling-min-nodes=1,autoscaling-max-nodes=5,'
+            'autoscaling-cpu-target=50'
+        ),
+        (
+            'id=test_name-1,zone=test_replication_zone,'
+            'autoscaling-min-nodes=1,autoscaling-max-nodes=5,'
+            'autoscaling-cpu-target=50'
+        ),
+    ]
     self.assertEqual(actual_flag_values, expected_flag_values)
 
   @flagsaver.flagsaver(run_uri='test_uri')
@@ -242,12 +274,17 @@ class GcpBigtableTestCase(pkb_common_test_case.PkbCommonTestCase):
         mock.patch.object(
             util.GcloudCommand,
             'Issue',
-            return_value=(mock_json_response, '', 0)))
+            return_value=(mock_json_response, '', 0),
+        )
+    )
     self.enter_context(
-        mock.patch.object(util, 'GetAccessToken', return_value='test_token'))
+        mock.patch.object(util, 'GetAccessToken', return_value='test_token')
+    )
     mock_request = self.enter_context(
         mock.patch.object(
-            requests, 'patch', return_value=mock.Mock(status_code=200)))
+            requests, 'patch', return_value=mock.Mock(status_code=200)
+        )
+    )
 
     # Act
     new_labels = {
@@ -268,9 +305,10 @@ class GcpBigtableTestCase(pkb_common_test_case.PkbCommonTestCase):
             'labels': {
                 'benchmark': 'test_benchmark_2',
                 'timeout_minutes': '10',
-                'metadata': 'test_metadata'
+                'metadata': 'test_metadata',
             }
-        })
+        },
+    )
 
   def testBigtableGcloudCommand(self):
     bigtable = GetTestBigtableInstance()
@@ -281,6 +319,92 @@ class GcpBigtableTestCase(pkb_common_test_case.PkbCommonTestCase):
     self.assertEqual(cmd.args, ['instances', 'test'])
     self.assertEqual(cmd.flags['project'], PROJECT)
     self.assertEmpty(cmd.flags['zone'])
+
+  def testSetNodes(self):
+    test_instance = GetTestBigtableInstance()
+    test_instance.user_managed = False
+    self.enter_context(
+        mock.patch.object(
+            test_instance,
+            '_GetClusters',
+            return_value=_TEST_LIST_CLUSTERS_OUTPUT,
+        )
+    )
+    self.enter_context(
+        mock.patch.object(test_instance, '_Exists', return_value=True)
+    )
+    cmd = self.enter_context(
+        mock.patch.object(vm_util, 'IssueCommand', return_value=[None, None, 0])
+    )
+
+    test_instance._UpdateNodes(6)
+
+    self.assertSequenceEqual(
+        [
+            mock.call(
+                matchers.HASALLOF('--num-nodes', '6'), stack_level=mock.ANY
+            ),
+            mock.call(
+                matchers.HASALLOF('--num-nodes', '6'), stack_level=mock.ANY
+            ),
+        ],
+        cmd.mock_calls,
+    )
+
+  def testSetNodesSkipsIfCountAlreadyCorrect(self):
+    test_instance = GetTestBigtableInstance()
+    self.enter_context(
+        mock.patch.object(
+            test_instance,
+            '_GetClusters',
+            return_value=_TEST_LIST_CLUSTERS_OUTPUT,
+        )
+    )
+    self.enter_context(
+        mock.patch.object(test_instance, '_Exists', return_value=True)
+    )
+    cmd = self.enter_context(
+        mock.patch.object(vm_util, 'IssueCommand', return_value=[None, None, 0])
+    )
+
+    test_instance._UpdateNodes(3)
+
+    cmd.assert_not_called()
+
+  @parameterized.named_parameters([
+      {
+          'testcase_name': 'AllRead',
+          'write_proportion': 0.0,
+          'read_proportion': 1.0,
+          'expected_qps': 30000,
+      },
+      {
+          'testcase_name': 'AllWrite',
+          'write_proportion': 1.0,
+          'read_proportion': 0.0,
+          'expected_qps': 30000,
+      },
+      {
+          'testcase_name': 'ReadWrite',
+          'write_proportion': 0.5,
+          'read_proportion': 0.5,
+          'expected_qps': 30000,
+      },
+  ])
+  def testCalculateStartingThroughput(
+      self, write_proportion, read_proportion, expected_qps
+  ):
+    # Arrange
+    test_bigtable = GetTestBigtableInstance()
+    test_bigtable.nodes = 3
+
+    # Act
+    actual_qps = test_bigtable.CalculateTheoreticalMaxThroughput(
+        read_proportion, write_proportion
+    )
+
+    # Assert
+    self.assertEqual(expected_qps, actual_qps)
 
 
 if __name__ == '__main__':

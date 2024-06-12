@@ -22,7 +22,7 @@ import logging
 import os
 import pickle
 import threading
-from typing import List
+from typing import Any
 import uuid
 
 from absl import flags
@@ -34,11 +34,13 @@ from perfkitbenchmarker import container_service
 from perfkitbenchmarker import context
 from perfkitbenchmarker import data_discovery_service
 from perfkitbenchmarker import disk
+from perfkitbenchmarker import dpb_constants
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import edw_compute_resource
 from perfkitbenchmarker import edw_service
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import flag_util
+from perfkitbenchmarker import flags as pkb_flags
 from perfkitbenchmarker import key as cloud_key
 from perfkitbenchmarker import messaging_service
 from perfkitbenchmarker import nfs_service
@@ -50,12 +52,12 @@ from perfkitbenchmarker import providers
 from perfkitbenchmarker import relational_db
 from perfkitbenchmarker import resource as resource_type
 from perfkitbenchmarker import smb_service
-from perfkitbenchmarker import spark_service
 from perfkitbenchmarker import stages
 from perfkitbenchmarker import static_virtual_machine as static_vm
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker import vpn_service
+from perfkitbenchmarker.configs import benchmark_config_spec
 from perfkitbenchmarker.configs import freeze_restore_spec
 import six
 from six.moves import range
@@ -63,16 +65,18 @@ import six.moves._thread
 import six.moves.copyreg
 
 
-def PickleLock(lock):
+def PickleLock(lock: threading.Lock):
   return UnPickleLock, (lock.locked(),)
 
 
-def UnPickleLock(locked, *args):
+def UnPickleLock(locked: bool, *args):
+  del args
   lock = threading.Lock()
   if locked:
     if not lock.acquire(False):
       raise pickle.UnpicklingError('Cannot acquire lock')
   return lock
+
 
 six.moves.copyreg.pickle(six.moves._thread.LockType, PickleLock)
 
@@ -85,19 +89,32 @@ SKIP_CHECK = 'none'
 METADATA_TIME_FORMAT = '%Y%m%dt%H%M%Sz'
 FLAGS = flags.FLAGS
 
-flags.DEFINE_enum('cloud', provider_info.GCP, provider_info.VALID_CLOUDS,
-                  'Name of the cloud to use.')
-flags.DEFINE_string('scratch_dir', None,
-                    'Base name for all scratch disk directories in the VM. '
-                    'Upon creation, these directories will have numbers '
-                    'appended to them (for example /scratch0, /scratch1, etc).')
-flags.DEFINE_string('startup_script', None,
-                    'Script to run right after vm boot.')
-flags.DEFINE_string('postrun_script', None,
-                    'Script to run right after run stage.')
-flags.DEFINE_integer('create_and_boot_post_task_delay', None,
-                     'Delay in seconds to delay in between boot tasks.')
+flags.DEFINE_enum(
+    'cloud',
+    provider_info.GCP,
+    provider_info.VALID_CLOUDS,
+    'Name of the cloud to use.',
+)
+flags.DEFINE_string(
+    'scratch_dir',
+    None,
+    'Base name for all scratch disk directories in the VM. '
+    'Upon creation, these directories will have numbers '
+    'appended to them (for example /scratch0, /scratch1, etc).',
+)
+flags.DEFINE_string(
+    'startup_script', None, 'Script to run right after vm boot.'
+)
+flags.DEFINE_string(
+    'postrun_script', None, 'Script to run right after run stage.'
+)
+flags.DEFINE_integer(
+    'create_and_boot_post_task_delay',
+    None,
+    'Delay in seconds to delay in between boot tasks.',
+)
 # pyformat: disable
+# TODO(user): Delete this flag after fulling updating gcl.
 flags.DEFINE_enum('benchmark_compatibility_checking', SUPPORTED,
                   [SUPPORTED, NOT_EXCLUDED, SKIP_CHECK],
                   'Method used to check compatibility between the benchmark '
@@ -110,20 +127,25 @@ flags.DEFINE_enum('benchmark_compatibility_checking', SUPPORTED,
 # pyformat: enable
 
 
-class BenchmarkSpec(object):
+class BenchmarkSpec:
   """Contains the various data required to make a benchmark run."""
 
   total_benchmarks = 0
 
-  def __init__(self, benchmark_module, benchmark_config, benchmark_uid):
+  def __init__(
+      self,
+      benchmark_module: Any,
+      benchmark_config: benchmark_config_spec.BenchmarkConfigSpec,
+      benchmark_uid: str,
+  ):
     """Initialize a BenchmarkSpec object.
 
     Args:
       benchmark_module: The benchmark module object.
       benchmark_config: BenchmarkConfigSpec. The configuration for the
-          benchmark.
-      benchmark_uid: An identifier unique to this run of the benchmark even
-          if the same benchmark is run multiple times with different configs.
+        benchmark.
+      benchmark_uid: An identifier unique to this run of the benchmark even if
+        the same benchmark is run multiple times with different configs.
     """
     self.config = benchmark_config
     self.name = benchmark_module.BENCHMARK_NAME
@@ -133,13 +155,14 @@ class BenchmarkSpec(object):
     self.status_detail = None
     BenchmarkSpec.total_benchmarks += 1
     self.sequence_number = BenchmarkSpec.total_benchmarks
-    self.resources: List[resource_type.Resource] = []
+    self.resources: list[resource_type.BaseResource] = []
     self.vms = []
     self.regional_networks = {}
     self.networks = {}
-    self.custom_subnets = {k: {
-        'cloud': v.cloud,
-        'cidr': v.cidr} for (k, v) in self.config.vm_groups.items()}
+    self.custom_subnets = {
+        k: {'cloud': v.cloud, 'cidr': v.cidr}
+        for (k, v) in self.config.vm_groups.items()
+    }
     self.firewalls = {}
     self.networks_lock = threading.Lock()
     self.firewalls_lock = threading.Lock()
@@ -148,9 +171,8 @@ class BenchmarkSpec(object):
     self.container_registry = None
     self.deleted = False
     self.uuid = '%s-%s' % (FLAGS.run_uri, uuid.uuid4())
-    self.always_call_cleanup = False
-    self.spark_service = None
-    self.dpb_service = None
+    self.always_call_cleanup = pkb_flags.ALWAYS_CALL_CLEANUP.value
+    self.dpb_service: dpb_service.BaseDpbService = None
     self.container_cluster = None
     self.key = None
     self.relational_db = None
@@ -168,9 +190,15 @@ class BenchmarkSpec(object):
     self.capacity_reservations = []
     self.placement_group_specs = benchmark_config.placement_group_specs or {}
     self.placement_groups = {}
-    self.vms_to_boot = (
-        self.config.vm_groups if self.config.relational_db is None else
-        relational_db.VmsToBoot(self.config.relational_db.vm_groups))
+    # Benchmark configs for relational_db and vm_groups can both be included.
+    # This is currently used for combo benchmarks.
+    self.vms_to_boot = {}
+    if self.config.relational_db:
+      self.vms_to_boot.update(
+          relational_db.VmsToBoot(self.config.relational_db.vm_groups)
+      )
+    if self.config.vm_groups:
+      self.vms_to_boot.update(self.config.vm_groups)
     self.vpc_peering = self.config.vpc_peering
 
     self.vpn_service = None
@@ -181,6 +209,19 @@ class BenchmarkSpec(object):
 
     self.restore_spec = None
     self.freeze_path = None
+
+    # Used by huggingface_bert_pretraining
+    self.path: str
+    self.run_dir: str
+    self.data_dir: str
+    self.ckpt_dir: str
+    # Used by redis_memtier and keydb_memtier
+    self.redis_endpoint_ip: str
+    self.keydb_endpoint_ip: str
+    # Used by dino_benchmark
+    self.imagenet_dir: str
+    # Used by mlperf_inference_cpu_benchmark
+    self.cm: str
 
     # Modules can't be pickled, but functions can, so we store the functions
     # necessary to run the benchmark.
@@ -195,9 +236,9 @@ class BenchmarkSpec(object):
     return '%s(%r)' % (self.__class__, self.__dict__)
 
   def __str__(self):
-    return(
-        'Benchmark name: {0}\nFlags: {1}'
-        .format(self.name, self.config.flags))
+    return 'Benchmark name: {0}\nFlags: {1}'.format(
+        self.name, self.config.flags
+    )
 
   @contextlib.contextmanager
   def RedirectGlobalFlags(self):
@@ -211,8 +252,10 @@ class BenchmarkSpec(object):
       yield
 
   def _InitializeFromSpec(
-      self, attribute_name: str,
-      resource_spec: freeze_restore_spec.FreezeRestoreSpec) -> bool:
+      self,
+      attribute_name: str,
+      resource_spec: freeze_restore_spec.FreezeRestoreSpec,
+  ) -> bool:
     """Initializes the BenchmarkSpec attribute from the restore_spec.
 
     Args:
@@ -242,9 +285,11 @@ class BenchmarkSpec(object):
     cluster_type = self.config.container_cluster.type
     providers.LoadProvider(cloud)
     container_cluster_class = container_service.GetContainerClusterClass(
-        cloud, cluster_type)
+        cloud, cluster_type
+    )
     self.container_cluster = container_cluster_class(
-        self.config.container_cluster)
+        self.config.container_cluster
+    )
     self.resources.append(self.container_cluster)
 
   def ConstructContainerRegistry(self):
@@ -254,9 +299,11 @@ class BenchmarkSpec(object):
     cloud = self.config.container_registry.cloud
     providers.LoadProvider(cloud)
     container_registry_class = container_service.GetContainerRegistryClass(
-        cloud)
+        cloud
+    )
     self.container_registry = container_registry_class(
-        self.config.container_registry)
+        self.config.container_registry
+    )
     self.resources.append(self.container_registry)
 
   def ConstructDpbService(self):
@@ -269,20 +316,23 @@ class BenchmarkSpec(object):
     providers.LoadProvider(dpb_service_cloud)
 
     dpb_service_type = dpb_service_spec.service_type
-    dpb_service_class = dpb_service.GetDpbServiceClass(dpb_service_cloud,
-                                                       dpb_service_type)
+    dpb_service_class = dpb_service.GetDpbServiceClass(
+        dpb_service_cloud, dpb_service_type
+    )
     self.dpb_service = dpb_service_class(dpb_service_spec)
 
     # If the dpb service is un-managed, the provisioning needs to be handed
     # over to the vm creation module.
     if dpb_service_type in [
-        dpb_service.UNMANAGED_DPB_SVC_YARN_CLUSTER,
-        dpb_service.UNMANAGED_SPARK_CLUSTER
+        dpb_constants.UNMANAGED_DPB_SVC_YARN_CLUSTER,
+        dpb_constants.UNMANAGED_SPARK_CLUSTER,
     ]:
       # Ensure non cluster vms are not present in the spec.
       if self.vms_to_boot:
-        raise Exception('Invalid Non cluster vm group {0} when benchmarking '
-                        'unmanaged dpb service'.format(self.vms_to_boot))
+        raise errors.Benchmarks.UnsupportedConfigError(
+            'Invalid Non cluster vm group {0} when benchmarking '
+            'unmanaged dpb service'.format(self.vms_to_boot)
+        )
 
       base_vm_spec = dpb_service_spec.worker_group
       base_vm_spec.vm_spec.zone = self.dpb_service.dpb_service_zone
@@ -306,27 +356,33 @@ class BenchmarkSpec(object):
     is_managed_db = self.config.relational_db.is_managed_db
     engine = self.config.relational_db.engine
     providers.LoadProvider(cloud)
-    relational_db_class = (
-        relational_db.GetRelationalDbClass(cloud, is_managed_db, engine))
+    relational_db_class = relational_db.GetRelationalDbClass(
+        cloud, is_managed_db, engine
+    )
     if not self.config.relational_db.engine_version:
       self.config.relational_db.engine_version = (
-          relational_db_class.GetDefaultEngineVersion(engine))
+          relational_db_class.GetDefaultEngineVersion(engine)
+      )
     self.relational_db = relational_db_class(self.config.relational_db)
 
   def ConstructNonRelationalDb(self) -> None:
     """Initializes the non_relational db."""
-    db_spec: non_relational_db.BaseNonRelationalDbSpec = self.config.non_relational_db
+    db_spec: non_relational_db.BaseNonRelationalDbSpec = (
+        self.config.non_relational_db
+    )
     if not db_spec:
       return
     # Initialization from restore spec
     if self._InitializeFromSpec('non_relational_db', db_spec):
       return
     # Initialization from benchmark config spec
-    logging.info('Constructing non_relational_db instance with spec: %s.',
-                 db_spec)
+    logging.info(
+        'Constructing non_relational_db instance with spec: %s.', db_spec
+    )
     service_type = db_spec.service_type
     non_relational_db_class = non_relational_db.GetNonRelationalDbClass(
-        service_type)
+        service_type
+    )
     self.non_relational_db = non_relational_db_class.FromSpec(db_spec)
 
   def ConstructKey(self) -> None:
@@ -346,7 +402,7 @@ class BenchmarkSpec(object):
     cloud = group_spec.cloud
     providers.LoadProvider(cloud)
     tpu_class = cloud_tpu.GetTpuClass(cloud)
-    return tpu_class(group_spec)
+    return tpu_class(group_spec)  # pytype: disable=not-instantiable
 
   def ConstructTpu(self):
     """Constructs the BenchmarkSpec's cloud TPU objects."""
@@ -366,11 +422,13 @@ class BenchmarkSpec(object):
     # TODO(saksena): Replace with
     # providers.LoadProvider(string.lower(FLAGS.cloud))
     providers.LoadProvider(
-        edw_service.TYPE_2_PROVIDER.get(self.config.edw_service.type))
+        edw_service.TYPE_2_PROVIDER.get(self.config.edw_service.type)
+    )
     # Load the module for the edw service based on type
     edw_service_type = self.config.edw_service.type
     edw_service_module = importlib.import_module(
-        edw_service.TYPE_2_MODULE.get(edw_service_type))
+        edw_service.TYPE_2_MODULE.get(edw_service_type)
+    )
     # The edw_service_type in certain cases may be qualified with a hosting
     # cloud eg. snowflake_aws,snowflake_gcp, etc.
     # However the edw_service_class_name in all cases will still be cloud
@@ -378,9 +436,10 @@ class BenchmarkSpec(object):
     edw_service_class_name = edw_service_type.split('_')[0]
     edw_service_class = getattr(
         edw_service_module,
-        edw_service_class_name[0].upper() + edw_service_class_name[1:])
+        edw_service_class_name[0].upper() + edw_service_class_name[1:],
+    )
     # Check if a new instance needs to be created or restored from snapshot
-    self.edw_service = edw_service_class(self.config.edw_service)
+    self.edw_service = edw_service_class(self.config.edw_service)  # pytype: disable=not-instantiable
 
   def ConstructEdwComputeResource(self):
     """Create an edw_compute_resource object."""
@@ -396,7 +455,7 @@ class BenchmarkSpec(object):
     )
     self.edw_compute_resource = edw_compute_resource_class(
         self.config.edw_compute_resource
-    )
+    )  # pytype: disable=not-instantiable
     self.resources.append(self.edw_compute_resource)
 
   def ConstructNfsService(self):
@@ -420,10 +479,11 @@ class BenchmarkSpec(object):
         cloud = group_spec.cloud
         providers.LoadProvider(cloud)
         nfs_class = nfs_service.GetNfsServiceClass(cloud)
-        self.nfs_service = nfs_class(disk_spec, group_spec.vm_spec.zone)
+        self.nfs_service = nfs_class(disk_spec, group_spec.vm_spec.zone)  # pytype: disable=not-instantiable
       else:
-        self.nfs_service = nfs_service.UnmanagedNfsService(disk_spec,
-                                                           self.vms[0])
+        self.nfs_service = nfs_service.UnmanagedNfsService(
+            disk_spec, self.vms[0]
+        )
       logging.debug('NFS service %s', self.nfs_service)
       break
 
@@ -445,26 +505,28 @@ class BenchmarkSpec(object):
       cloud = group_spec.cloud
       providers.LoadProvider(cloud)
       smb_class = smb_service.GetSmbServiceClass(cloud)
-      self.smb_service = smb_class(disk_spec, group_spec.vm_spec.zone)
+      self.smb_service = smb_class(disk_spec, group_spec.vm_spec.zone)  # pytype: disable=not-instantiable
       logging.debug('SMB service %s', self.smb_service)
       break
 
-  def ConstructVirtualMachineGroup(self, group_name, group_spec):
+  def ConstructVirtualMachineGroup(
+      self, group_name, group_spec
+  ) -> list[virtual_machine.VirtualMachine]:
     """Construct the virtual machine(s) needed for a group."""
     vms = []
 
     vm_count = group_spec.vm_count
-    disk_count = group_spec.disk_count
 
     # First create the Static VM objects.
     if group_spec.static_vms:
       specs = [
-          spec for spec in group_spec.static_vms
+          spec
+          for spec in group_spec.static_vms
           if (FLAGS.static_vm_tags is None or spec.tag in FLAGS.static_vm_tags)
       ][:vm_count]
       for vm_spec in specs:
         static_vm_class = static_vm.GetStaticVmClass(vm_spec.os_type)
-        vms.append(static_vm_class(vm_spec))
+        vms.append(static_vm_class(vm_spec))  # pytype: disable=not-instantiable
 
     os_type = group_spec.os_type
     cloud = group_spec.cloud
@@ -477,41 +539,28 @@ class BenchmarkSpec(object):
 
     if group_spec.disk_spec:
       disk_spec = group_spec.disk_spec
-      # disk_spec.disk_type may contain legacy values that were
-      # copied from FLAGS.scratch_disk_type into
-      # FLAGS.data_disk_type at the beginning of the run. We
-      # translate them here, rather than earlier, because here is
-      # where we know what cloud we're using and therefore we're
-      # able to pick the right translation table.
-      disk_spec.disk_type = disk.WarnAndTranslateDiskTypes(
-          disk_spec.disk_type, cloud)
     else:
       disk_spec = None
 
     if group_spec.placement_group_name:
       group_spec.vm_spec.placement_group = self.placement_groups[
-          group_spec.placement_group_name]
+          group_spec.placement_group_name
+      ]
 
     for _ in range(vm_count - len(vms)):
       # Assign a zone to each VM sequentially from the --zones flag.
       if FLAGS.zone:
         zone_list = FLAGS.zone
         group_spec.vm_spec.zone = zone_list[self._zone_index]
-        self._zone_index = (self._zone_index + 1
-                            if self._zone_index < len(zone_list) - 1 else 0)
+        self._zone_index = (
+            self._zone_index + 1 if self._zone_index < len(zone_list) - 1 else 0
+        )
       if group_spec.cidr:  # apply cidr range to all vms in vm_group
         group_spec.vm_spec.cidr = group_spec.cidr
       vm = self._CreateVirtualMachine(group_spec.vm_spec, os_type, cloud)
-      if disk_spec and not vm.is_static:
-        if disk_spec.disk_type == disk.LOCAL and disk_count is None:
-          disk_count = vm.max_local_disks
-        vm.disk_specs = [copy.copy(disk_spec) for _ in range(disk_count)]
-        # In the event that we need to create multiple disks from the same
-        # DiskSpec, we need to ensure that they have different mount points.
-        if (disk_count > 1 and disk_spec.mount_point):
-          for i, vm_disk_spec in enumerate(vm.disk_specs):
-            vm_disk_spec.mount_point += str(i)
       vm.vm_group = group_name
+      if disk_spec and not vm.is_static:
+        vm.SetDiskSpec(disk_spec, group_spec.disk_count)
       vms.append(vm)
 
     return vms
@@ -523,10 +572,8 @@ class BenchmarkSpec(object):
     for vm_group in six.itervalues(self.vm_groups):
       cloud = vm_group[0].CLOUD
       providers.LoadProvider(cloud)
-      capacity_reservation_class = capacity_reservation.GetResourceClass(
-          cloud)
-      self.capacity_reservations.append(
-          capacity_reservation_class(vm_group))
+      capacity_reservation_class = capacity_reservation.GetResourceClass(cloud)
+      self.capacity_reservations.append(capacity_reservation_class(vm_group))  # pytype: disable=not-instantiable
 
   def _CheckBenchmarkSupport(self, cloud):
     """Throw an exception if the benchmark isn't supported."""
@@ -541,12 +588,15 @@ class BenchmarkSpec(object):
         benchmark_ok = True
 
     if not benchmark_ok:
-      raise ValueError('Provider {0} does not support {1}.  Use '
-                       '--benchmark_compatibility_checking=none '
-                       'to override this check.'.format(
-                           provider_info_class.CLOUD, self.name))
+      raise ValueError(
+          'Provider {0} does not support {1}.  Use '
+          '--benchmark_compatibility_checking=none '
+          'to override this check.'.format(provider_info_class.CLOUD, self.name)
+      )
 
-  def _ConstructJujuController(self, group_spec):
+  def _ConstructJujuController(
+      self, group_spec
+  ) -> virtual_machine.VirtualMachine:
     """Construct a VirtualMachine object for a Juju controller."""
     juju_spec = copy.copy(group_spec)
     juju_spec.vm_count = 1
@@ -555,7 +605,9 @@ class BenchmarkSpec(object):
       jujuvm = jujuvms.pop()
       jujuvm.is_controller = True
       return jujuvm
-    return None
+    raise errors.Config.ParseError(
+        'Attempted to construct Juju VM but none were created.'
+    )
 
   def ConstructVirtualMachines(self):
     """Constructs the BenchmarkSpec's VirtualMachine objects."""
@@ -587,19 +639,14 @@ class BenchmarkSpec(object):
 
       self.vm_groups[group_name] = vms
       self.vms.extend(vms)
-    # If we have a spark service, it needs to access the master_group and
-    # the worker group.
-    if (self.config.spark_service and
-        self.config.spark_service.service_type == spark_service.PKB_MANAGED):
-      for group_name in 'master_group', 'worker_group':
-        self.spark_service.vms[group_name] = self.vm_groups[group_name]
 
     # In the case of an un-managed yarn cluster, for hadoop software
     # installation, the dpb service instance needs access to constructed
     # master group and worker group.
-    if (self.config.dpb_service and self.config.dpb_service.service_type in [
-        dpb_service.UNMANAGED_DPB_SVC_YARN_CLUSTER,
-        dpb_service.UNMANAGED_SPARK_CLUSTER]):
+    if self.config.dpb_service and self.config.dpb_service.service_type in [
+        dpb_constants.UNMANAGED_DPB_SVC_YARN_CLUSTER,
+        dpb_constants.UNMANAGED_SPARK_CLUSTER,
+    ]:
       self.dpb_service.vms['master_group'] = self.vm_groups['master_group']
       if self.config.dpb_service.worker_count:
         self.dpb_service.vms['worker_group'] = self.vm_groups['worker_group']
@@ -608,33 +655,11 @@ class BenchmarkSpec(object):
 
   def ConstructPlacementGroups(self):
     for placement_group_name, placement_group_spec in six.iteritems(
-        self.placement_group_specs):
+        self.placement_group_specs
+    ):
       self.placement_groups[placement_group_name] = self._CreatePlacementGroup(
-          placement_group_spec, placement_group_spec.CLOUD)
-
-  def ConstructSparkService(self):
-    """Create the spark_service object and create groups for its vms."""
-    if self.config.spark_service is None:
-      return
-
-    spark_spec = self.config.spark_service
-    # Worker group is required, master group is optional
-    cloud = spark_spec.worker_group.cloud
-    if spark_spec.master_group:
-      cloud = spark_spec.master_group.cloud
-    providers.LoadProvider(cloud)
-    service_type = spark_spec.service_type
-    spark_service_class = spark_service.GetSparkServiceClass(
-        cloud, service_type)
-    self.spark_service = spark_service_class(spark_spec)
-    # If this is Pkb managed, the benchmark spec needs to adopt vms.
-    if service_type == spark_service.PKB_MANAGED:
-      for name, group_spec in [('master_group', spark_spec.master_group),
-                               ('worker_group', spark_spec.worker_group)]:
-        if name in self.vms_to_boot:
-          raise Exception('Cannot have a vm group {0} with a {1} spark '
-                          'service'.format(name, spark_service.PKB_MANAGED))
-        self.vms_to_boot[name] = group_spec
+          placement_group_spec, placement_group_spec.CLOUD
+      )
 
   def ConstructVPNService(self):
     """Create the VPNService object."""
@@ -656,7 +681,8 @@ class BenchmarkSpec(object):
         cloud, delivery
     )
     self.messaging_service = messaging_service_class.FromSpec(
-        self.config.messaging_service)
+        self.config.messaging_service
+    )
     self.messaging_service.setVms(self.vm_groups)
 
   def ConstructDataDiscoveryService(self):
@@ -670,7 +696,8 @@ class BenchmarkSpec(object):
         data_discovery_service.GetDataDiscoveryServiceClass(cloud, service_type)
     )
     self.data_discovery_service = data_discovery_service_class.FromSpec(
-        self.config.data_discovery_service)
+        self.config.data_discovery_service
+    )
 
   def Prepare(self):
     targets = [(vm.PrepareBackgroundWorkload, (), {}) for vm in self.vms]
@@ -678,8 +705,9 @@ class BenchmarkSpec(object):
 
   def Provision(self):
     """Prepares the VMs and networks necessary for the benchmark to run."""
-    should_restore = (hasattr(self, 'restore_spec')
-                      and self.restore_spec is not None)
+    should_restore = (
+        hasattr(self, 'restore_spec') and self.restore_spec is not None
+    )
     # Create capacity reservations if the cloud supports it. Note that the
     # capacity reservation class may update the VMs themselves. This is true
     # on AWS, because the VM needs to be aware of the capacity reservation id
@@ -709,8 +737,8 @@ class BenchmarkSpec(object):
     if self.vpc_peering:
       if len(networks) > 2:
         raise errors.Error(
-            'Networks of size %d are not currently supported.' %
-            (len(networks)))
+            'Networks of size %d are not currently supported.' % (len(networks))
+        )
       # Ignore Peering for one network
       elif len(networks) == 2:
         networks[0].Peer(networks[1])
@@ -721,7 +749,8 @@ class BenchmarkSpec(object):
         if container_spec.static_image:
           continue
         container_spec.image = self.container_registry.GetOrBuild(
-            container_spec.image)
+            container_spec.image
+        )
 
     if self.container_cluster:
       self.container_cluster.Create()
@@ -736,18 +765,17 @@ class BenchmarkSpec(object):
       placement_group_object.Create()
 
     if self.vms:
-
       # We separate out creating, booting, and preparing the VMs into two phases
       # so that we don't slow down the creation of all the VMs by running
       # commands on the VMs that booted.
       background_tasks.RunThreaded(
-          self.CreateAndBootVm,
+          lambda vm: vm.CreateAndBoot(),
           self.vms,
           post_task_delay=FLAGS.create_and_boot_post_task_delay,
       )
       if self.nfs_service and self.nfs_service.CLOUD == nfs_service.UNMANAGED:
         self.nfs_service.Create()
-      background_tasks.RunThreaded(self.PrepareVmAfterBoot, self.vms)
+      background_tasks.RunThreaded(lambda vm: vm.PrepareAfterBoot(), self.vms)
 
       sshable_vms = [
           vm for vm in self.vms if vm.OS_TYPE not in os_types.WINDOWS_OS_TYPES
@@ -755,12 +783,11 @@ class BenchmarkSpec(object):
       sshable_vm_groups = {}
       for group_name, group_vms in six.iteritems(self.vm_groups):
         sshable_vm_groups[group_name] = [
-            vm for vm in group_vms
+            vm
+            for vm in group_vms
             if vm.OS_TYPE not in os_types.WINDOWS_OS_TYPES
         ]
       vm_util.GenerateSSHConfig(sshable_vms, sshable_vm_groups)
-    if self.spark_service:
-      self.spark_service.Create()
     if self.dpb_service:
       self.dpb_service.Create()
     if hasattr(self, 'relational_db') and self.relational_db:
@@ -773,8 +800,10 @@ class BenchmarkSpec(object):
     if self.tpus:
       background_tasks.RunThreaded(lambda tpu: tpu.Create(), self.tpus)
     if self.edw_service:
-      if (not self.edw_service.user_managed and
-          self.edw_service.SERVICE_TYPE == 'redshift'):
+      if (
+          not self.edw_service.user_managed
+          and self.edw_service.SERVICE_TYPE == 'redshift'
+      ):
         # The benchmark creates the Redshift cluster's subnet group in the
         # already provisioned virtual private cloud (vpc).
         for network in networks:
@@ -794,15 +823,14 @@ class BenchmarkSpec(object):
     if self.deleted:
       return
 
-    should_freeze = (hasattr(self, 'freeze_path')
-                     and self.freeze_path is not None)
+    should_freeze = (
+        hasattr(self, 'freeze_path') and self.freeze_path is not None
+    )
     if should_freeze:
       self.Freeze()
 
     if self.container_registry:
       self.container_registry.Delete()
-    if self.spark_service:
-      self.spark_service.Delete()
     if self.dpb_service:
       self.dpb_service.Delete()
     if hasattr(self, 'relational_db') and self.relational_db:
@@ -834,15 +862,19 @@ class BenchmarkSpec(object):
             lambda reservation: reservation.Delete(), self.capacity_reservations
         )
       except Exception:  # pylint: disable=broad-except
-        logging.exception('Got an exception deleting CapacityReservations. '
-                          'Attempting to continue tearing down.')
+        logging.exception(
+            'Got an exception deleting CapacityReservations. '
+            'Attempting to continue tearing down.'
+        )
 
     if self.vms:
       try:
         background_tasks.RunThreaded(self.DeleteVm, self.vms)
       except Exception:
-        logging.exception('Got an exception deleting VMs. '
-                          'Attempting to continue tearing down.')
+        logging.exception(
+            'Got an exception deleting VMs. '
+            'Attempting to continue tearing down.'
+        )
     if hasattr(self, 'placement_groups'):
       for placement_group_object in self.placement_groups.values():
         placement_group_object.Delete()
@@ -851,8 +883,10 @@ class BenchmarkSpec(object):
       try:
         firewall.DisallowAllPorts()
       except Exception:
-        logging.exception('Got an exception disabling firewalls. '
-                          'Attempting to continue tearing down.')
+        logging.exception(
+            'Got an exception disabling firewalls. '
+            'Attempting to continue tearing down.'
+        )
 
     if self.container_cluster:
       self.container_cluster.DeleteServices()
@@ -863,8 +897,10 @@ class BenchmarkSpec(object):
       try:
         net.Delete()
       except Exception:
-        logging.exception('Got an exception deleting networks. '
-                          'Attempting to continue tearing down.')
+        logging.exception(
+            'Got an exception deleting networks. '
+            'Attempting to continue tearing down.'
+        )
 
     if hasattr(self, 'vpn_service') and self.vpn_service:
       self.vpn_service.Delete()
@@ -890,13 +926,15 @@ class BenchmarkSpec(object):
     return char.isalpha() or char.isnumeric() or char == '_'
 
   def _SafeLabelKeyOrValue(self, key):
-    result = ''.join(c if self._IsSafeKeyOrValueCharacter(c) else '_'
-                     for c in key.lower())
+    result = ''.join(
+        c if self._IsSafeKeyOrValueCharacter(c) else '_' for c in key.lower()
+    )
 
     # max length contraints on keys and values
     # https://cloud.google.com/resource-manager/docs/creating-managing-labels
     max_safe_length = 63
-    return result[:max_safe_length]
+    # GCP labels are not allowed to start or end with '_'
+    return result[:max_safe_length].strip('_')
 
   def _GetResourceDict(self, time_format, timeout_minutes=None):
     """Gets a list of tags to be used to tag resources."""
@@ -905,9 +943,7 @@ class BenchmarkSpec(object):
     if not timeout_minutes:
       timeout_minutes = FLAGS.timeout_minutes
 
-    timeout_utc = (
-        now_utc +
-        datetime.timedelta(minutes=timeout_minutes))
+    timeout_utc = now_utc + datetime.timedelta(minutes=timeout_minutes)
 
     tags = {
         'timeout_utc': timeout_utc.strftime(time_format),
@@ -919,8 +955,11 @@ class BenchmarkSpec(object):
     }
 
     # add metadata key value pairs
-    metadata_dict = (flag_util.ParseKeyValuePairs(FLAGS.metadata)
-                     if hasattr(FLAGS, 'metadata') else dict())
+    metadata_dict = (
+        flag_util.ParseKeyValuePairs(FLAGS.metadata)
+        if hasattr(FLAGS, 'metadata')
+        else dict()
+    )
     for key, value in metadata_dict.items():
       tags[self._SafeLabelKeyOrValue(key)] = self._SafeLabelKeyOrValue(value)
 
@@ -935,15 +974,16 @@ class BenchmarkSpec(object):
 
     Args:
       placement_group_spec: A placement_group.BasePlacementGroupSpec object.
-      cloud: The cloud for the placement group.
-          See the flag of the same name for more information.
+      cloud: The cloud for the placement group. See the flag of the same name
+        for more information.
+
     Returns:
       A placement_group.BasePlacementGroup object.
     """
 
     placement_group_class = placement_group.GetPlacementGroupClass(cloud)
     if placement_group_class:
-      return placement_group_class(placement_group_spec)
+      return placement_group_class(placement_group_spec)  # pytype: disable=not-instantiable
     else:
       return None
 
@@ -952,10 +992,11 @@ class BenchmarkSpec(object):
 
     Args:
       vm_spec: A virtual_machine.BaseVmSpec object.
-      os_type: The type of operating system for the VM. See the flag of the
-          same name for more information.
+      os_type: The type of operating system for the VM. See the flag of the same
+        name for more information.
       cloud: The cloud for the VM. See the flag of the same name for more
-          information.
+        information.
+
     Returns:
       A virtual_machine.BaseVirtualMachine object.
     """
@@ -966,51 +1007,11 @@ class BenchmarkSpec(object):
     vm_class = virtual_machine.GetVmClass(cloud, os_type)
     if vm_class is None:
       raise errors.Error(
-          'VMs of type %s" are not currently supported on cloud "%s".' %
-          (os_type, cloud))
+          'VMs of type %s" are not currently supported on cloud "%s".'
+          % (os_type, cloud)
+      )
 
     return vm_class(vm_spec)
-
-  def CreateAndBootVm(self, vm):
-    """Creates a single VM and waits for boot to complete.
-
-    Args:
-        vm: The BaseVirtualMachine object representing the VM.
-    """
-    vm.Create()
-    logging.info('VM: %s (%s)', vm.ip_address, vm.internal_ip)
-    logging.info('Waiting for boot completion.')
-    vm.AllowRemoteAccessPorts()
-    vm.WaitForBootCompletion()
-
-  def PrepareVmAfterBoot(self, vm):
-    """Prepares a VM after it has booted.
-
-    This function will prepare a scratch disk if required.
-
-    Args:
-        vm: The BaseVirtualMachine object representing the VM.
-
-    Raises:
-        Exception: If --vm_metadata is malformed.
-    """
-    vm.AddMetadata()
-    vm.OnStartup()
-    # Prepare vm scratch disks:
-    if any((spec.disk_type == disk.LOCAL for spec in vm.disk_specs)):
-      vm.SetupLocalDisks()
-    for disk_spec_id, disk_spec in enumerate(vm.disk_specs):
-      if disk_spec.disk_type == disk.RAM:
-        vm.CreateRamDisk(disk_spec)
-      else:
-        vm.CreateScratchDisk(disk_spec_id, disk_spec)
-      # TODO(user): Simplify disk logic.
-      if disk_spec.num_striped_disks > 1:
-        # scratch disks has already been created and striped together.
-        break
-    # This must come after Scratch Disk creation to support the
-    # Containerized VM case
-    vm.PrepareVMEnvironment()
 
   def DeleteVm(self, vm):
     """Deletes a single vm and scratch disk if required.
@@ -1030,8 +1031,9 @@ class BenchmarkSpec(object):
 
   def Pickle(self, filename=None):
     """Pickles the spec so that it can be unpickled on a subsequent run."""
-    with open(filename or self._GetPickleFilename(self.uid),
-              'wb') as pickle_file:
+    with open(
+        filename or self._GetPickleFilename(self.uid), 'wb'
+    ) as pickle_file:
       pickle.dump(self, pickle_file, 2)
 
   def Freeze(self):
@@ -1043,8 +1045,11 @@ class BenchmarkSpec(object):
       self.Pickle(self.freeze_path)
     except FileNotFoundError:
       default_path = f'{vm_util.GetTempDir()}/restore_spec.pickle'
-      logging.exception('Could not find file path %s, defaulting freeze to %s.',
-                        self.freeze_path, default_path)
+      logging.exception(
+          'Could not find file path %s, defaulting freeze to %s.',
+          self.freeze_path,
+          default_path,
+      )
       self.Pickle(default_path)
 
   @classmethod
@@ -1055,7 +1060,7 @@ class BenchmarkSpec(object):
       benchmark_module: The benchmark module object.
       config: BenchmarkConfigSpec. The configuration for the benchmark.
       uid: An identifier unique to this run of the benchmark even if the same
-          benchmark is run multiple times with different configs.
+        benchmark is run multiple times with different configs.
 
     Returns:
       A BenchmarkSpec object.
@@ -1067,8 +1072,10 @@ class BenchmarkSpec(object):
       with open(cls._GetPickleFilename(uid), 'rb') as pickle_file:
         bm_spec = pickle.load(pickle_file)
     except Exception as e:  # pylint: disable=broad-except
-      logging.error('Unable to unpickle spec file for benchmark %s.',
-                    benchmark_module.BENCHMARK_NAME)
+      logging.error(
+          'Unable to unpickle spec file for benchmark %s.',
+          benchmark_module.BENCHMARK_NAME,
+      )
       raise e
     # Always let the spec be deleted after being unpickled so that
     # it's possible to run cleanup even if cleanup has already run.
@@ -1076,3 +1083,12 @@ class BenchmarkSpec(object):
     bm_spec.status = benchmark_status.SKIPPED
     context.SetThreadBenchmarkSpec(bm_spec)
     return bm_spec
+
+  def CheckPrerequisites(self) -> None:
+    """Checks preconditions for the benchmark_spec."""
+    for app_group in self.app_groups:
+      app_group.CheckPrerequisites()
+    if self.dpb_service:
+      self.dpb_service.CheckPrerequisites()
+    if self.messaging_service:
+      self.messaging_service.CheckPrerequisites()

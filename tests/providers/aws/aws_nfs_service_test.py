@@ -19,12 +19,11 @@ import json
 import unittest
 from absl import flags
 import mock
-
 from perfkitbenchmarker import context
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import vm_util
-from perfkitbenchmarker.providers.aws import aws_disk
+from perfkitbenchmarker.providers.aws import aws_disk_strategies
 from perfkitbenchmarker.providers.aws import aws_network
 from perfkitbenchmarker.providers.aws import aws_nfs_service
 from perfkitbenchmarker.providers.aws import aws_virtual_machine
@@ -58,51 +57,53 @@ _PROVISIONED_THROUGHPUT = 100.0
 
 AwsResponses = collections.namedtuple('Responses', 'create describe')
 
-_FILER = AwsResponses({
-    'SizeInBytes': {
-        'Value': 0
-    },
-    'CreationToken': _NFS_TOKEN,
-    'CreationTime': 1513322422.0,
-    'PerformanceMode': 'generalPurpose',
-    'FileSystemId': _FILE_ID,
-    'NumberOfMountTargets': 0,
-    'LifeCycleState': 'creating',
-    'OwnerId': '835761027970'
-}, {
-    'FileSystems': [{
-        'SizeInBytes': {
-            'Value': 6144
-        },
+_FILER = AwsResponses(
+    {
+        'SizeInBytes': {'Value': 0},
         'CreationToken': _NFS_TOKEN,
         'CreationTime': 1513322422.0,
         'PerformanceMode': 'generalPurpose',
         'FileSystemId': _FILE_ID,
         'NumberOfMountTargets': 0,
-        'LifeCycleState': 'available',
-        'OwnerId': '835761027970'
-    }]
-})
+        'LifeCycleState': 'creating',
+        'OwnerId': '835761027970',
+    },
+    {
+        'FileSystems': [{
+            'SizeInBytes': {'Value': 6144},
+            'CreationToken': _NFS_TOKEN,
+            'CreationTime': 1513322422.0,
+            'PerformanceMode': 'generalPurpose',
+            'FileSystemId': _FILE_ID,
+            'NumberOfMountTargets': 0,
+            'LifeCycleState': 'available',
+            'OwnerId': '835761027970',
+        }]
+    },
+)
 
-_MOUNT = AwsResponses({
-    'MountTargetId': _MOUNT_ID,
-    'NetworkInterfaceId': 'eni-9956273b',
-    'FileSystemId': _FILE_ID,
-    'LifeCycleState': 'creating',
-    'SubnetId': _SUBNET_ID,
-    'OwnerId': '835761027970',
-    'IpAddress': '10.0.0.182'
-}, {
-    'MountTargets': [{
+_MOUNT = AwsResponses(
+    {
         'MountTargetId': _MOUNT_ID,
         'NetworkInterfaceId': 'eni-9956273b',
         'FileSystemId': _FILE_ID,
-        'LifeCycleState': 'available',
+        'LifeCycleState': 'creating',
         'SubnetId': _SUBNET_ID,
         'OwnerId': '835761027970',
-        'IpAddress': '10.0.0.182'
-    }]
-})
+        'IpAddress': '10.0.0.182',
+    },
+    {
+        'MountTargets': [{
+            'MountTargetId': _MOUNT_ID,
+            'NetworkInterfaceId': 'eni-9956273b',
+            'FileSystemId': _FILE_ID,
+            'LifeCycleState': 'available',
+            'SubnetId': _SUBNET_ID,
+            'OwnerId': '835761027970',
+            'IpAddress': '10.0.0.182',
+        }]
+    },
+)
 
 
 class BaseTest(pkb_common_test_case.PkbCommonTestCase):
@@ -144,11 +145,13 @@ class BaseTest(pkb_common_test_case.PkbCommonTestCase):
     return mock_method
 
   def _CreateDiskSpec(self, fs_type):
-    return aws_disk.AwsDiskSpec(
+    disk_spec_class = disk.GetDiskSpecClass('AWS', fs_type)
+    return disk_spec_class(
         _COMPONENT,
         num_striped_disks=1,
         disk_type=fs_type if fs_type == disk.NFS else disk.LOCAL,
-        mount_point='/scratch')
+        mount_point='/scratch',
+    )
 
   def _CreateMockNetwork(self):
     mock_network = mock.Mock()
@@ -203,7 +206,8 @@ class AwsNfsServiceTest(BaseTest):
     nfs = self._CreateFiler()
     self.assertEqual(_FILE_ID, nfs.filer_id)
     self.issue_cmd.CreateFiler.assert_called_with(
-        _NFS_TOKEN, _TIER, _THROUGHPUT_MODE, _PROVISIONED_THROUGHPUT)
+        _NFS_TOKEN, _TIER, _THROUGHPUT_MODE, _PROVISIONED_THROUGHPUT
+    )
 
   def testDeleteFiler(self):
     nfs = self._CreateFiler()
@@ -222,8 +226,9 @@ class AwsNfsServiceTest(BaseTest):
   def testCreateMount(self):
     nfs = self._CreateMount()
     self.assertEqual(_MOUNT_ID, nfs.mount_id)
-    self.issue_cmd.CreateMount.assert_called_with(_FILE_ID, _SUBNET_ID,
-                                                  _SECURITY_GROUP_ID)
+    self.issue_cmd.CreateMount.assert_called_with(
+        _FILE_ID, _SUBNET_ID, _SECURITY_GROUP_ID
+    )
 
   def testCreateMountNoFiler(self):
     nfs = self._CreateNfsService()
@@ -246,11 +251,13 @@ class AwsNfsServiceTest(BaseTest):
     nfs.Create()
     nfs.Delete()
     self.issue_cmd.CreateFiler.assert_called_with(
-        _NFS_TOKEN, _TIER, _THROUGHPUT_MODE, _PROVISIONED_THROUGHPUT)
+        _NFS_TOKEN, _TIER, _THROUGHPUT_MODE, _PROVISIONED_THROUGHPUT
+    )
     self.issue_cmd.AddTagsToFiler.assert_called_with(_FILE_ID)
     self.issue_cmd.WaitUntilFilerAvailable.assert_called_with(_FILE_ID)
-    self.issue_cmd.CreateMount.assert_called_with(_FILE_ID, _SUBNET_ID,
-                                                  _SECURITY_GROUP_ID)
+    self.issue_cmd.CreateMount.assert_called_with(
+        _FILE_ID, _SUBNET_ID, _SECURITY_GROUP_ID
+    )
     self.issue_cmd.DeleteMount.assert_called_with(_MOUNT_ID)
     self.issue_cmd.DeleteFiler.assert_called_with(_FILE_ID)
 
@@ -261,7 +268,8 @@ class AwsVirtualMachineTest(BaseTest):
     self._CreatePatched(aws_network, 'AwsNetwork')
     self._CreatePatched(aws_network, 'AwsFirewall')
     vm_spec = aws_virtual_machine.AwsVmSpec(
-        _COMPONENT, zone=_AWS_ZONE, machine_type='m2.2xlarge')
+        _COMPONENT, zone=_AWS_ZONE, machine_type='m2.2xlarge'
+    )
     aws_machine = aws_virtual_machine.Rhel7BasedAwsVirtualMachine(vm_spec)
     aws_machine.RemoteCommand = mock.Mock()
     aws_machine.RemoteHostCommand = mock.Mock()
@@ -284,45 +292,66 @@ class AwsVirtualMachineTest(BaseTest):
     nfs.Create()
     self._SetBmSpec(nfs)
     aws_machine = self._CreateMockVm()
-    aws_machine.CreateScratchDisk(0, self._CreateDiskSpec(fs_type))
+    disk_spec = self._CreateDiskSpec(fs_type)
+    disk_spec.create_with_vm = False
+    aws_machine.SetDiskSpec(disk_spec, 1)
     return aws_machine
 
   def testCreateNfsDisk(self):
-    mount_opt = ('hard,nfsvers=4.1,retrans=2,rsize=1048576,timeo=600,'
-                 'wsize=1048576')
+    mount_opt = (
+        'hard,nfsvers=4.1,retrans=2,rsize=1048576,timeo=600,wsize=1048576'
+    )
     host = 'FSID.efs.us-east-1.amazonaws.com'
-    mount_cmd = ('sudo mkdir -p /scratch;'
-                 'sudo mount -t nfs -o {mount_opt} {host}:/ /scratch && '
-                 'sudo chown $USER:$USER /scratch;').format(
-                     mount_opt=mount_opt, host=host)
-    fstab_cmd = ('echo "{host}:/ /scratch nfs {mount_opt}"'
-                 ' | sudo tee -a /etc/fstab').format(
-                     mount_opt=mount_opt, host=host)
+    mount_cmd = (
+        'sudo mkdir -p /scratch;'
+        'sudo mount -t nfs -o {mount_opt} {host}:/ /scratch && '
+        'sudo chown $USER:$USER /scratch;'
+    ).format(mount_opt=mount_opt, host=host)
+    fstab_cmd = (
+        'echo "{host}:/ /scratch nfs {mount_opt}" | sudo tee -a /etc/fstab'
+    ).format(mount_opt=mount_opt, host=host)
     install_nfs = 'sudo yum install -y nfs-utils'
 
     aws_machine = self._CallCreateScratchDisk(disk.NFS)
+    aws_machine.SetupAllScratchDisks()
     aws_machine.RemoteCommand.assert_called_with(install_nfs)
     self.assertEqual(
         [mock.call(mount_cmd), mock.call(fstab_cmd)],
-        aws_machine.RemoteHostCommand.call_args_list)
+        aws_machine.RemoteHostCommand.call_args_list,
+    )
 
   def testCreateLocalDisk(self):
     # show that the non-NFS case formats the disk
     format_cmd = (
         '[[ -d /mnt ]] && sudo umount /mnt; '
         'sudo mke2fs -F -E lazy_itable_init=0,discard -O ^has_journal '
-        '-t ext4 -b 4096 /dev/xvdb')
-    mount_cmd = ('sudo mkdir -p /scratch;'
-                 'sudo mount -o discard /dev/xvdb /scratch && '
-                 'sudo chown $USER:$USER /scratch;')
-    fstab_cmd = ('echo "/dev/xvdb /scratch ext4 defaults" | sudo tee -a '
-                 '/etc/fstab')
+        '-t ext4 -b 4096 /dev/xvdb'
+    )
+    mount_cmd = (
+        'sudo mkdir -p /scratch;'
+        'sudo mount -o discard /dev/xvdb /scratch && '
+        'sudo chown $USER:$USER /scratch;'
+    )
+    fstab_cmd = (
+        'echo "/dev/xvdb /scratch ext4 defaults" | sudo tee -a /etc/fstab'
+    )
 
     aws_machine = self._CallCreateScratchDisk('ext4')
+    setup_local_disk_strategy = aws_disk_strategies.SetUpLocalDiskStrategy(
+        aws_machine, [aws_machine.create_disk_strategy.disk_spec]
+    )
+    setup_local_disk_strategy.GetPathByDevice = mock.Mock()
+    setup_local_disk_strategy.GetPathByDevice.return_value = '/dev/xvdb'
+    aws_machine.create_disk_strategy.GetSetupDiskStrategy = mock.Mock()
+    aws_machine.create_disk_strategy.GetSetupDiskStrategy.return_value = (
+        setup_local_disk_strategy
+    )
+
+    aws_machine.SetupAllScratchDisks()
     self.assertEqual(
-        [mock.call(format_cmd),
-         mock.call(mount_cmd),
-         mock.call(fstab_cmd)], aws_machine.RemoteHostCommand.call_args_list)
+        [mock.call(format_cmd), mock.call(mount_cmd), mock.call(fstab_cmd)],
+        aws_machine.RemoteHostCommand.call_args_list,
+    )
 
 
 class AwsEfsCommandsTest(BaseTest):
@@ -338,24 +367,33 @@ class AwsEfsCommandsTest(BaseTest):
     self.issue_cmd.return_value = (txt, '', 0)
 
   def assertCalled(self, *args):
-    cmd = ['aws', '--output', 'json', '--region', _AWS_REGION,
-           'efs'] + list(args)
+    cmd = ['aws', '--output', 'json', '--region', _AWS_REGION, 'efs'] + list(
+        args
+    )
     self.issue_cmd.assert_called_with(cmd, raise_on_failure=False)
 
   def testCreateFiler(self):
     self._SetResponse(_FILER.create)
-    self.aws.CreateFiler(_NFS_TOKEN, _TIER, _THROUGHPUT_MODE,
-                         _PROVISIONED_THROUGHPUT)
-    self.assertCalled('create-file-system', '--creation-token', _NFS_TOKEN,
-                      '--performance-mode', _TIER, '--throughput-mode',
-                      _THROUGHPUT_MODE)
+    self.aws.CreateFiler(
+        _NFS_TOKEN, _TIER, _THROUGHPUT_MODE, _PROVISIONED_THROUGHPUT
+    )
+    self.assertCalled(
+        'create-file-system',
+        '--creation-token',
+        _NFS_TOKEN,
+        '--performance-mode',
+        _TIER,
+        '--throughput-mode',
+        _THROUGHPUT_MODE,
+    )
 
   def testAddTags(self):
     self._SetResponse()
     self.aws.AddTagsToFiler(_FILE_ID)
     tags = util.MakeFormattedDefaultTags()
-    self.assertCalled('create-tags', '--file-system-id', _FILE_ID, '--tags',
-                      *tags)
+    self.assertCalled(
+        'create-tags', '--file-system-id', _FILE_ID, '--tags', *tags
+    )
 
   def testFilerAvailable(self):
     self._SetResponse(_FILER.describe)
@@ -370,9 +408,15 @@ class AwsEfsCommandsTest(BaseTest):
   def testCreateMount(self):
     self._SetResponse(_MOUNT.create)
     self.aws.CreateMount(_FILE_ID, _SUBNET_ID, _SECURITY_GROUP_ID)
-    self.assertCalled('create-mount-target', '--file-system-id', _FILE_ID,
-                      '--subnet-id', _SUBNET_ID, '--security-groups',
-                      _SECURITY_GROUP_ID)
+    self.assertCalled(
+        'create-mount-target',
+        '--file-system-id',
+        _FILE_ID,
+        '--subnet-id',
+        _SUBNET_ID,
+        '--security-groups',
+        _SECURITY_GROUP_ID,
+    )
 
   def testDeleteFiler(self):
     self._SetResponse()

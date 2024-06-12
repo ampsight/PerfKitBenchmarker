@@ -15,6 +15,14 @@
 
 """Module containing mongodb installation and cleanup functions."""
 
+from absl import flags
+
+FLAGS = flags.FLAGS
+
+VERSION = flags.DEFINE_string(
+    'mongodb_version', '7.0', 'Version of mongodb package.'
+)
+
 
 def _GetServiceName():
   """Returns the name of the mongodb service."""
@@ -28,44 +36,71 @@ def _GetConfigPath():
 
 def _Setup(vm):
   """Setup mongodb."""
+  config_path = _GetConfigPath()
   vm.RemoteCommand(
-      'sudo sed -i "s|bindIp|# bindIp|" {}'.format(_GetConfigPath()))
+      f'sudo sed -i "s|bindIp: 127.0.0.1|bindIp: ::,0.0.0.0|" {config_path}'
+  )
+  vm.RemoteCommand(
+      f'echo "replication:\n  replSetName: rs0" | sudo tee -a {config_path}'
+  )
+
+
+def YumSetup(vm):
+  """Performs common pre-install setup for mongodb .rpm packages."""
+  vm.RemoteCommand('sudo setenforce 0')
+  releasever, _ = vm.RemoteCommand(
+      "distro=$(sed -n 's/^distroverpkg=//p' /etc/yum.conf);"
+      'echo $(rpm -q --qf "%{version}" -f /etc/$distro)'
+  )
+  mongodb_repo = (
+      f'[mongodb-org-{VERSION.value}]\nname=MongoDB Repository\nbaseurl='
+      f'https://repo.mongodb.org/yum/redhat/{releasever.strip()}/mongodb-org/{VERSION.value}/x86_64/'
+      '\ngpgcheck=0\nenabled=1'
+  )
+  vm.RemoteCommand(
+      f'echo "{mongodb_repo}" | sudo tee'
+      f' /etc/yum.repos.d/mongodb-org-{VERSION.value}.repo'
+  )
 
 
 def YumInstall(vm):
   """Installs the mongodb package on the VM."""
-  vm.RemoteCommand('sudo setenforce 0')
-  releasever, _ = vm.RemoteCommand(
-      'distro=$(sed -n \'s/^distroverpkg=//p\' /etc/yum.conf);'
-      'echo $(rpm -q --qf "%{version}" -f /etc/$distro)')
-  mongodb_repo = (
-      '[mongodb-org-3.0]\nname=MongoDB Repository\nbaseurl='
-      'https://repo.mongodb.org/yum/redhat/{0}/mongodb-org/3.0/x86_64/'
-      '\ngpgcheck=0\nenabled=1').format(releasever.strip())
-  vm.RemoteCommand(
-      'echo "%s" | sudo tee /etc/yum.repos.d/mongodb-org-3.0.repo' %
-      mongodb_repo)
+  YumSetup(vm)
   vm.InstallPackages('mongodb-org')
   _Setup(vm)
 
 
+def AptSetup(vm):
+  """Performs common pre-install setup for mongodb .deb packages."""
+  vm.InstallPackages('gnupg curl')
+  vm.RemoteCommand(
+      f'sudo rm -rf /usr/share/keyrings/mongodb-server-{VERSION.value}.gpg'
+  )
+  vm.RemoteCommand(
+      f'curl -fsSL https://pgp.mongodb.com/server-{VERSION.value}.asc | sudo'
+      f' gpg -o /usr/share/keyrings/mongodb-server-{VERSION.value}.gpg'
+      ' --dearmor'
+  )
+  vm.RemoteCommand(
+      'echo "deb [ arch=amd64,arm64'
+      f' signed-by=/usr/share/keyrings/mongodb-server-{VERSION.value}.gpg ]'
+      ' https://repo.mongodb.org/apt/ubuntu'
+      f' jammy/mongodb-org/{VERSION.value} multiverse" | sudo tee'
+      f' /etc/apt/sources.list.d/mongodb-org-{VERSION.value}.list'
+  )
+  vm.AptUpdate()
+
+
 def AptInstall(vm):
   """Installs the mongodb package on the VM."""
-  vm.RemoteCommand(
-      'wget -qO - https://www.mongodb.org/static/pgp/server-3.0.asc'
-      ' | sudo apt-key add -')
-  vm.RemoteCommand(
-      'echo "deb https://repo.mongodb.org/apt/ubuntu '
-      '$(lsb_release -c -s)/mongodb-org/3.0 multiverse" | '
-      'sudo tee /etc/apt/sources.list.d/mongodb-org-3.0.list')
-  vm.AptUpdate()
-  vm.RemoteCommand('sudo apt-get install mongodb-org -y --force-yes')
+  AptSetup(vm)
+  vm.InstallPackages('mongodb-org')
   _Setup(vm)
 
 
 def YumUninstall(vm):
   """Uninstalls the mongodb package on the VM."""
-  vm.RemoteCommand('sudo rm /etc/yum.repos.d/mongodb-org-3.0.repo')
+  vm.RemoteCommand(f'sudo rm /etc/yum.repos.d/mongodb-org-{VERSION.value}.repo')
 
 
 def YumGetServiceName(vm):

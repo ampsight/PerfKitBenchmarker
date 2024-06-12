@@ -31,6 +31,7 @@ from absl import flags
 from google.cloud import monitoring_v3
 from google.cloud.monitoring_v3 import types
 from perfkitbenchmarker import beam_benchmark_helper
+from perfkitbenchmarker import dpb_constants
 from perfkitbenchmarker import dpb_service
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import provider_info
@@ -40,35 +41,56 @@ from perfkitbenchmarker.providers.gcp import gcs
 from perfkitbenchmarker.providers.gcp import util
 
 flags.DEFINE_string(
-    'dpb_dataflow_temp_location', None,
+    'dpb_dataflow_temp_location',
+    None,
     'Cloud Storage path for Dataflow to stage most temporary files. If unset, '
-    'PKB will create a bucket and put them under the "temp/" directory.')
+    'PKB will create a bucket and put them under the "temp/" directory.',
+)
 flags.DEFINE_string(
-    'dpb_dataflow_staging_location', None,
+    'dpb_dataflow_staging_location',
+    None,
     'Google Cloud Storage bucket for Dataflow to stage the binary files. If '
     'unset PKB will create a bucket and stage the files under the "staging/" '
-    'directory.')
-flags.DEFINE_string('dpb_dataflow_runner', 'DataflowRunner',
-                    'Flag to specify the pipeline runner at runtime.')
-flags.DEFINE_string('dpb_dataflow_sdk', None,
-                    'SDK used to build the Dataflow executable. The latest sdk '
-                    'will be used by default.')
-flags.DEFINE_multi_string('dpb_dataflow_additional_args', [], 'Additional '
-                          'arguments which should be passed to Dataflow job.')
-flags.DEFINE_integer('dpb_dataflow_timeout', None,
-                     'The default timeout for Dataflow job. Set to None to run'
-                     'indefinitely.')
+    'directory.',
+)
 flags.DEFINE_string(
-    'dpb_dataflow_service_account_key', None,
-    'GCS path to service account to run Dataflow jobs.')
-flags.DEFINE_bool('dpb_dataflow_enable_prime', False,
-                  'Enable Prime for Dataflow jobs. Disabled by default.')
+    'dpb_dataflow_runner',
+    'DataflowRunner',
+    'Flag to specify the pipeline runner at runtime.',
+)
+flags.DEFINE_string(
+    'dpb_dataflow_sdk',
+    None,
+    'SDK used to build the Dataflow executable. The latest sdk '
+    'will be used by default.',
+)
+flags.DEFINE_multi_string(
+    'dpb_dataflow_additional_args',
+    [],
+    'Additional arguments which should be passed to Dataflow job.',
+)
+flags.DEFINE_integer(
+    'dpb_dataflow_timeout',
+    None,
+    'The default timeout for Dataflow job. Set to None to runindefinitely.',
+)
+flags.DEFINE_string(
+    'dpb_dataflow_service_account_key',
+    None,
+    'GCS path to service account to run Dataflow jobs.',
+)
+flags.DEFINE_bool(
+    'dpb_dataflow_enable_prime',
+    False,
+    'Enable Prime for Dataflow jobs. Disabled by default.',
+)
 
 
 flags.register_validator(
     'dpb_dataflow_service_account_key',
     lambda value: value is None or value.startswith('gs://'),
-    message='--dpb_dataflow_service_account_key must be a GCS path.')
+    message='--dpb_dataflow_service_account_key must be a GCS path.',
+)
 
 FLAGS = flags.FLAGS
 
@@ -116,7 +138,8 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     self.job_metrics = None
     if not self.dpb_service_zone:
       raise errors.Setup.InvalidSetupError(
-          'dpb_service_zone must be provided, for provisioning.')
+          'dpb_service_zone must be provided, for provisioning.'
+      )
     self.region = util.GetRegionFromZone(self.dpb_service_zone)
     self.storage_service = gcs.GoogleCloudStorageService()
     self.storage_service.PrepareService(location=self.region)
@@ -133,25 +156,26 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
       return f'gs://{self.bucket}/staging/'
     return FLAGS.dpb_dataflow_staging_location
 
-  @staticmethod
-  def CheckPrerequisites(benchmark_config):
-    del benchmark_config  # Unused
+  def CheckPrerequisites(self):
     if FLAGS.dpb_job_jarfile and FLAGS.dpb_job_jarfile.startswith('gs://'):
       return
     if not FLAGS.dpb_job_jarfile or not os.path.exists(FLAGS.dpb_job_jarfile):
       raise errors.Config.InvalidValue('Job jar missing.')
     if not vm_util.ExecutableOnPath(DATAFLOW_EXECUTABLE):
       raise errors.Setup.MissingExecutableError(
-          'Could not find required executable "%s"' % DATAFLOW_EXECUTABLE)
+          'Could not find required executable "%s"' % DATAFLOW_EXECUTABLE
+      )
 
   def _Create(self):
     """See base class."""
     if FLAGS.dpb_dataflow_service_account_key:
       self._local_service_account_path = os.path.join(
-          temp_dir.GetRunDirPath(), 'sak.json')
+          temp_dir.GetRunDirPath(), 'sak.json'
+      )
       self.storage_service.Copy(
           FLAGS.dpb_dataflow_service_account_key,
-          self._local_service_account_path)
+          self._local_service_account_path,
+      )
 
   def _Delete(self):
     """See base class."""
@@ -166,25 +190,30 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
       job_poll_interval=None,
       job_arguments=None,
       job_stdout_file=None,
-      job_type=None):
+      job_type=None,
+  ):
     """See base class."""
 
-    if job_type == self.BEAM_JOB_TYPE:
+    if job_type == dpb_constants.BEAM_JOB_TYPE:
       full_cmd, base_dir = beam_benchmark_helper.BuildBeamCommand(
-          self.spec, classname, job_arguments)
+          self.spec, classname, job_arguments
+      )
       _, _, retcode = vm_util.IssueCommand(
           full_cmd,
           cwd=base_dir,
           timeout=FLAGS.beam_it_timeout,
-          raise_on_failure=False)
+          raise_on_failure=False,
+      )
       assert retcode == 0, 'Integration Test Failed.'
       return
 
     worker_machine_type = self.spec.worker_group.vm_spec.machine_type
     num_workers = self.spec.worker_count
     max_num_workers = self.spec.dataflow_max_worker_count
-    if (self.spec.worker_group.disk_spec and
-        self.spec.worker_group.disk_spec.disk_size is not None):
+    if (
+        self.spec.worker_group.disk_spec
+        and self.spec.worker_group.disk_spec.disk_size is not None
+    ):
       disk_size_gb = self.spec.worker_group.disk_spec.disk_size
     elif self.spec.worker_group.vm_spec.boot_disk_size is not None:
       disk_size_gb = self.spec.worker_group.vm_spec.boot_disk_size
@@ -227,14 +256,16 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
       env['GOOGLE_APPLICATION_CREDENTIALS'] = self._local_service_account_path
 
     _, stderr, _ = vm_util.IssueCommand(
-        cmd, timeout=FLAGS.dpb_dataflow_timeout, env=env)
+        cmd, timeout=FLAGS.dpb_dataflow_timeout, env=env
+    )
 
     # Parse output to retrieve submitted job ID
     match = re.search(r'Submitted job: (.\S*)', stderr)
     if not match:
       logging.warning(
           'Dataflow output in unexpected format. Failed to parse Dataflow job '
-          'ID.')
+          'ID.'
+      )
       return
 
     self.job_id = match.group(1)
@@ -261,18 +292,21 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     # vCPU-hr
     stats['total_vcpu_time'] = self.GetMetricValue('TotalVcpuTime') / 3600
     # GB-hr
-    stats['total_mem_usage'] = self.GetMetricValue(
-        'TotalMemoryUsage') / 1024 / 3600
+    stats['total_mem_usage'] = (
+        self.GetMetricValue('TotalMemoryUsage') / 1024 / 3600
+    )
     # GB-hr
     stats['total_pd_usage'] = self.GetMetricValue('TotalPdUsage') / 3600
     # TODO(user): retrieve BillableShuffleDataProcessed
     # and/or BillableStreamingDataProcessed when applicable
     return stats
 
-  def CalculateLastJobCost(self, pricing_type=DATAFLOW_TYPE_BATCH):
+  def CalculateLastJobCosts(
+      self, pricing_type=DATAFLOW_TYPE_BATCH
+  ) -> dpb_service.JobCosts:
     if pricing_type not in (DATAFLOW_TYPE_BATCH, DATAFLOW_TYPE_STREAMING):
       raise ValueError(
-          f'Invalid type provided to CalculateLastJobCost(): {pricing_type}'
+          f'Invalid type provided to CalculateLastJobCosts(): {pricing_type}'
       )
 
     # For some reason, pytype doesn't play well with functools.cached_property
@@ -282,18 +316,34 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     total_pd_usage = self.job_stats['total_pd_usage']
     # pytype: enable=unsupported-operands
 
-    cost = 0
     if pricing_type == DATAFLOW_TYPE_BATCH:
-      cost += total_vcpu_time * VCPU_PER_HR_BATCH
-      cost += total_mem_usage * MEM_PER_GB_HR_BATCH
+      vcpu_hr = total_vcpu_time * VCPU_PER_HR_BATCH
+      memory_hr = total_mem_usage * MEM_PER_GB_HR_BATCH
     else:
-      cost += total_vcpu_time * VCPU_PER_HR_STREAMING
-      cost += total_mem_usage * MEM_PER_GB_HR_STREAMING
+      vcpu_hr = total_vcpu_time * VCPU_PER_HR_STREAMING
+      memory_hr = total_mem_usage * MEM_PER_GB_HR_STREAMING
 
-    cost += total_pd_usage * PD_PER_GB_HR
+    vcpu_cost = total_vcpu_time * vcpu_hr
+    memory_cost = total_mem_usage * memory_hr
+
+    storage_cost = total_pd_usage * PD_PER_GB_HR
     # TODO(user): Add cost related to per-GB data processed by Dataflow
     #  Shuffle (for batch) or Streaming Engine (for streaming) when applicable
-    return cost
+    return dpb_service.JobCosts(
+        total_cost=vcpu_cost + memory_cost + storage_cost,
+        compute_cost=vcpu_cost,
+        memory_cost=memory_cost,
+        storage_cost=storage_cost,
+        compute_units_used=total_vcpu_time,
+        memory_units_used=total_mem_usage,
+        storage_units_used=total_pd_usage,
+        compute_unit_cost=vcpu_cost,
+        memory_unit_cost=memory_cost,
+        storage_unit_cost=storage_cost,
+        compute_unit_name='vCPU*hr',
+        memory_unit_name='GB*hr',
+        storage_unit_name='GB*hr',
+    )
 
   def _PullJobMetrics(self, force_refresh=False):
     """Retrieve and cache all job metrics from Dataflow API."""
@@ -304,8 +354,7 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     if self.job_id is None:
       raise Exception('Unable to pull job metrics. Job ID not available')
 
-    cmd = util.GcloudCommand(self, 'dataflow', 'metrics',
-                             'list', self.job_id)
+    cmd = util.GcloudCommand(self, 'dataflow', 'metrics', 'list', self.job_id)
     cmd.use_alpha_gcloud = True
     cmd.flags = {
         'project': self.project,
@@ -344,7 +393,8 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     """
     if metric_type not in (METRIC_TYPE_COUNTER, METRIC_TYPE_DISTRIBUTION):
       raise ValueError(
-          f'Invalid type provided to GetMetricValue(): {metric_type}')
+          f'Invalid type provided to GetMetricValue(): {metric_type}'
+      )
 
     if self.job_metrics is None:
       self._PullJobMetrics()
@@ -352,7 +402,8 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     return self.job_metrics[metric_type][name]
 
   def GetAvgCpuUtilization(
-      self, start_time: datetime.datetime, end_time: datetime.datetime):
+      self, start_time: datetime.datetime, end_time: datetime.datetime
+  ):
     """Get average cpu utilization across all pipeline workers.
 
     Args:
@@ -370,22 +421,22 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     # Cpu metrics data can take up to 240 seconds to appear
     if (now_seconds - end_time_seconds) < CPU_API_DELAY_SECONDS:
       logging.info(
-          'Waiting for CPU metrics to be available (up to 4 minutes)...')
+          'Waiting for CPU metrics to be available (up to 4 minutes)...'
+      )
       time.sleep(CPU_API_DELAY_SECONDS - (now_seconds - end_time_seconds))
 
     interval = types.TimeInterval()
     # Shift TZ of datetime arguments since FromDatetime() assumes UTC
     # See
     # https://googleapis.dev/python/protobuf/latest/google/protobuf/timestamp_pb2.html#google.protobuf.timestamp_pb2.Timestamp.FromDatetime
-    interval.start_time.FromDatetime(
-        start_time.astimezone(datetime.timezone.utc))
-    interval.end_time.FromDatetime(
-        end_time.astimezone(datetime.timezone.utc))
+    interval.start_time = start_time.astimezone(datetime.timezone.utc)
+    interval.end_time = end_time.astimezone(datetime.timezone.utc)
 
     api_filter = (
         'metric.type = "compute.googleapis.com/instance/cpu/utilization" '
         f'AND resource.labels.project_id = "{self.project}" '
-        f'AND metadata.user_labels.dataflow_job_id = "{self.job_id}" ')
+        f'AND metadata.user_labels.dataflow_job_id = "{self.job_id}" '
+    )
 
     aggregation = types.Aggregation(
         alignment_period={'seconds': 60},  # 1 minute
@@ -394,17 +445,20 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
         group_by_fields=['resource.instance_id'],
     )
 
-    results = client.list_time_series(
+    req = types.ListTimeSeriesRequest(
         name=project_name,
-        filter_=api_filter,
+        filter=api_filter,
         interval=interval,
-        view=monitoring_v3.enums.ListTimeSeriesRequest.TimeSeriesView.FULL,
+        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
         aggregation=aggregation,
     )
 
+    results = client.list_time_series(req)
+
     if not results:
       logging.warning(
-          'No monitoring data found. Unable to calculate avg CPU utilization.')
+          'No monitoring data found. Unable to calculate avg CPU utilization.'
+      )
       return None
 
     # Multiply fractional cpu util by 100 to display a percentage usage
@@ -413,8 +467,11 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     return round(self._GetAvgValueFromTimeSeries(results) * 100, 2)
 
   def GetMaxOutputThroughput(
-      self, ptransform: str,
-      start_time: datetime.datetime, end_time: datetime.datetime):
+      self,
+      ptransform: str,
+      start_time: datetime.datetime,
+      end_time: datetime.datetime,
+  ):
     """Get max throughput from a particular pTransform during job run interval.
 
     Args:
@@ -433,41 +490,45 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     # Dataflow metrics data can take up to 180 seconds to appear
     if (now_seconds - end_time_seconds) < DATAFLOW_METRICS_DELAY_SECONDS:
       logging.info(
-          'Waiting for Dataflow metrics to be available (up to 3 minutes)...')
+          'Waiting for Dataflow metrics to be available (up to 3 minutes)...'
+      )
       time.sleep(
-          DATAFLOW_METRICS_DELAY_SECONDS - (now_seconds - end_time_seconds))
+          DATAFLOW_METRICS_DELAY_SECONDS - (now_seconds - end_time_seconds)
+      )
 
     interval = types.TimeInterval()
     # Shift TZ of datetime arguments since FromDatetime() assumes UTC
     # See
     # https://googleapis.dev/python/protobuf/latest/google/protobuf/timestamp_pb2.html#google.protobuf.timestamp_pb2.Timestamp.FromDatetime
-    interval.start_time.FromDatetime(
-        start_time.astimezone(datetime.timezone.utc))
-    interval.end_time.FromDatetime(
-        end_time.astimezone(datetime.timezone.utc))
+    interval.start_time = start_time.astimezone(datetime.timezone.utc)
+    interval.end_time = end_time.astimezone(datetime.timezone.utc)
 
     api_filter = (
         'metric.type = "dataflow.googleapis.com/job/elements_produced_count" '
         f'AND resource.labels.project_id = "{self.project}" '
         f'AND metric.labels.job_id = "{self.job_id}" '
-        f'AND metric.labels.ptransform = "{ptransform}" ')
+        f'AND metric.labels.ptransform = "{ptransform}" '
+    )
 
     aggregation = types.Aggregation(
         alignment_period={'seconds': 60},  # 1 minute
         per_series_aligner=types.Aggregation.Aligner.ALIGN_RATE,
     )
 
-    results = client.list_time_series(
+    req = types.ListTimeSeriesRequest(
         name=project_name,
-        filter_=api_filter,
+        filter=api_filter,
         interval=interval,
-        view=monitoring_v3.enums.ListTimeSeriesRequest.TimeSeriesView.FULL,
+        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
         aggregation=aggregation,
     )
 
+    results = client.list_time_series(req)
+
     if not results:
       logging.warning(
-          'No monitoring data found. Unable to calculate max throughput.')
+          'No monitoring data found. Unable to calculate max throughput.'
+      )
       return None
 
     return self._GetMaxValueFromTimeSeries(results)
@@ -482,25 +543,27 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     delta = datetime.timedelta(minutes=interval_length)
 
     interval = types.TimeInterval()
-    interval.start_time.FromDatetime(now-delta)
-    interval.end_time.FromDatetime(now)
+    interval.start_time = now - delta
+    interval.end_time = now
 
     api_filter = (
         'metric.type = "pubsub.googleapis.com/subscription/'
         'num_undelivered_messages" '
-        f'AND resource.labels.subscription_id = "{subscription_name}" ')
+        f'AND resource.labels.subscription_id = "{subscription_name}" '
+    )
 
     results = client.list_time_series(
         name=project_name,
-        filter_=api_filter,
+        filter=api_filter,
         interval=interval,
-        view=monitoring_v3.enums.ListTimeSeriesRequest.TimeSeriesView.FULL,
+        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
     )
 
     return round(self._GetLastValueFromTimeSeries(results), 2)
 
   def _GetAvgValueFromTimeSeries(
-      self, time_series: types.ListTimeSeriesResponse):
+      self, time_series: types.ListTimeSeriesResponse
+  ):
     """Parses time series data and returns average across intervals.
 
     Args:
@@ -522,7 +585,8 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     return None
 
   def _GetMaxValueFromTimeSeries(
-      self, time_series: types.ListTimeSeriesResponse):
+      self, time_series: types.ListTimeSeriesResponse
+  ):
     """Parses time series data and returns maximum across intervals.
 
     Args:
@@ -544,7 +608,8 @@ class GcpDpbDataflow(dpb_service.BaseDpbService):
     return None
 
   def _GetLastValueFromTimeSeries(
-      self, time_series: types.ListTimeSeriesResponse):
+      self, time_series: types.ListTimeSeriesResponse
+  ):
     """Parses time series data and returns last value in last interval.
 
     Args:

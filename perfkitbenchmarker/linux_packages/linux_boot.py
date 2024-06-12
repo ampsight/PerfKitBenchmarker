@@ -7,10 +7,9 @@ import logging
 import os
 import re
 import time
-from typing import Optional, Tuple, List, Callable
+from typing import Callable, List, Optional, Tuple
 
 from absl import flags
-import datetime_tz
 import jinja2
 from perfkitbenchmarker import data
 from perfkitbenchmarker import sample
@@ -41,7 +40,8 @@ def PrepareBootScriptVM(aux_vm_ips: str, aux_vm_port: int) -> str:
 
 @vm_util.Retry(log_errors=False, poll_interval=1, timeout=300)
 def GetStartupScriptOutput(
-    vm: virtual_machine.BaseVirtualMachine, output_file: str) -> str:
+    vm: virtual_machine.BaseVirtualMachine, output_file: str
+) -> str:
   """return fastboot script log."""
   return vm.RemoteCommand(f'cat {output_file}')[0]
 
@@ -67,15 +67,16 @@ def CollectBootSamples(
     vm: virtual_machine.VirtualMachine,
     runner_ip: Tuple[str, str],
     create_time: datetime.datetime,
-    include_networking_samples: bool = False) -> List[sample.Sample]:
+    include_networking_samples: bool = False,
+) -> List[sample.Sample]:
   """Collect boot samples.
 
   Args:
     vm: The boot vm.
     runner_ip: Runner ip addresses to collect VM-to-VM metrics.
     create_time: VM creation time.
-    include_networking_samples: Boolean, whether to include samples such as
-      time to first egress/ingress packet.
+    include_networking_samples: Boolean, whether to include samples such as time
+      to first egress/ingress packet.
 
   Returns:
     A list of sample.Sample objects.
@@ -98,7 +99,9 @@ def CollectBootSamples(
 
 
 def UtcTimestampToDatetime(timestamp_str: str) -> datetime.datetime:
-  return datetime_tz.datetime_tz.utcfromtimestamp(float(timestamp_str))
+  return datetime.datetime.fromtimestamp(
+      float(timestamp_str), datetime.timezone.utc
+  )
 
 
 _DMESG_TIME_PREFIX = r'\[\s*(\d*.\d*)\]\s*'
@@ -152,7 +155,8 @@ CONSOLE_FIRST_START_MATCHERS = [
 def ScrapeConsoleLogLines(
     log_lines: List[str],
     start_time: datetime.datetime,
-    matchers: List[RegexMatcher]) -> List[sample.Sample]:
+    matchers: List[RegexMatcher],
+) -> List[sample.Sample]:
   """Extract timings from the guest console log lines.
 
   Args:
@@ -180,16 +184,15 @@ def ScrapeConsoleLogLines(
 
   for key, val in times.items():
     samples.append(
-        sample.Sample(
-            key, (val - start_time).total_seconds(), 'second', {}
-        )
+        sample.Sample(key, (val - start_time).total_seconds(), 'second', {})
     )
 
   return samples
 
 
-def CollectGuestSamples(vm: virtual_machine.VirtualMachine,
-                        metric_start_time: float) -> List[sample.Sample]:
+def CollectGuestSamples(
+    vm: virtual_machine.VirtualMachine, metric_start_time: float
+) -> List[sample.Sample]:
   """Collect guest metrics.
 
   All metrics published are normalized against VM creation timestamp, including:
@@ -252,7 +255,8 @@ def CollectGuestSamples(vm: virtual_machine.VirtualMachine,
 
 
 def CollectKernelSamples(
-    vm: virtual_machine.VirtualMachine, offset: float) -> List[sample.Sample]:
+    vm: virtual_machine.VirtualMachine, offset: float
+) -> List[sample.Sample]:
   """Collect kernel metrics.
 
   Args:
@@ -345,9 +349,8 @@ def ParseUserTotalTimes(system_d_string: str) -> Tuple[float, float]:
   Args:
     system_d_string: the string output from systemd-analyze string output. i.e.
       "Startup finished in 2.2s (kernel) + 1min 12.5s (userspace) = 1min
-      14.774s"
-      "Startup finished in 448ms (firmware) + 1.913s (loader) +
-       1.182s (kernel) + 52.438s (initrd) + 30.413s (userspace) = 1min 26.397s"
+      14.774s" "Startup finished in 448ms (firmware) + 1.913s (loader) + 1.182s
+      (kernel) + 52.438s (initrd) + 30.413s (userspace) = 1min 26.397s"
 
   Returns:
     A tuple of user_start and total_time, both in seconds.
@@ -485,7 +488,8 @@ def ParseSystemDCriticalChainServiceTime(systemd_out: str) -> Optional[float]:
 
 
 def WaitForReady(
-    vm: virtual_machine.VirtualMachine, timeout: int) -> Tuple[float, float]:
+    vm: virtual_machine.VirtualMachine, timeout: int
+) -> Tuple[float, float]:
   """Ensure the system is ready for boot metrics inspection.
 
   Args:
@@ -533,8 +537,8 @@ def GetGuestScriptsStart(vm: virtual_machine.VirtualMachine) -> Optional[float]:
 
 
 def GetSystemDCriticalChainMetric(
-    vm: virtual_machine.VirtualMachine,
-    metric: str) -> Optional[float]:
+    vm: virtual_machine.VirtualMachine, metric: str
+) -> Optional[float]:
   stdout, _ = vm.RemoteCommand(f'sudo systemd-analyze critical-chain {metric}')
   return ParseSystemDCriticalChainOutput(stdout)
 
@@ -602,7 +606,8 @@ DMESG_METRICS = [
 def CollectVmToVmSamples(
     vm: virtual_machine.VirtualMachine,
     runner_ip: Tuple[str, str],
-    create_time: datetime.datetime) -> List[sample.Sample]:
+    create_time: datetime.datetime,
+) -> List[sample.Sample]:
   """Collect samples related to vm-to-vm networking."""
   samples = []
   vm_output = GetStartupScriptOutput(vm, BOOT_SCRIPT_OUTPUT)
@@ -614,7 +619,10 @@ def CollectVmToVmSamples(
   runner_internal_ip, runner_external_ip = runner_ip
 
   def DeltaSec(t):
-    delta = datetime_tz.datetime_tz.fromtimestamp(float(t)) - create_time
+    delta = (
+        datetime.datetime.fromtimestamp(float(t), tz=datetime.timezone.utc)
+        - create_time
+    )
     return delta.total_seconds()
 
   for group in re.findall('Connection refused by (.+) at ([0-9.]+)', vm_output):
@@ -631,17 +639,30 @@ def CollectVmToVmSamples(
   # Sample TCPDUMP output:
   # 1680653297.391525 IP 34.83.176.250.33216 > 10.240.0.9.8080: Flags [S]...
   # Extracts datetime, src, dest ip:  (datetime) IP (src) > (dest)
+  internal_egress_sample = None
+  external_egress_sample = None
   for group in re.findall(
       r'([0-9.:]+) IP ([0-9.]+)\.\d+ > [0-9.]+\.\d+.*', tcpdump_output
   ):
     t, src = group
-    if src == vm_internal_ip:
-      samples.append(
-          sample.Sample('internal_egress', DeltaSec(t), 'second', {})
+    delta = DeltaSec(t)
+    # Guard against recycled IPs causing negative deltas (captured during the
+    # period between tcpdump starting and VM creation)
+    if delta < 0:
+      continue
+    # Capture only the first positive egress delta for each IP.
+    if src == vm_internal_ip and not internal_egress_sample:
+      internal_egress_sample = sample.Sample(
+          'internal_egress', delta, 'second', {}
       )
-    elif src == vm_external_ip:
-      samples.append(
-          sample.Sample('external_egress', DeltaSec(t), 'second', {})
+    elif src == vm_external_ip and not external_egress_sample:
+      external_egress_sample = sample.Sample(
+          'external_egress', delta, 'second', {}
       )
-
+    if internal_egress_sample and external_egress_sample:
+      break
+  if internal_egress_sample:
+    samples.append(internal_egress_sample)
+  if external_egress_sample:
+    samples.append(external_egress_sample)
   return samples

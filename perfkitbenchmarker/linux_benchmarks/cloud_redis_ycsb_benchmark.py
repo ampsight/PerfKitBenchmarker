@@ -55,6 +55,7 @@ def CheckPrerequisites(benchmark_config):
 
   Args:
     benchmark_config: benchmark_config
+
   Raises:
     perfkitbenchmarker.data.ResourceNotFound: On missing resource.
   """
@@ -63,10 +64,9 @@ def CheckPrerequisites(benchmark_config):
   # Instead, BaseResource should check prerequisites as part of creation and
   # child resources can override CheckPrerequisites and benefit from it.
   # The attribute-error below can be removed when this is fixed.
-  cloud_redis_class = (
-      managed_memory_store.GetManagedMemoryStoreClass(
-          FLAGS.cloud,
-          managed_memory_store.REDIS))
+  cloud_redis_class = managed_memory_store.GetManagedMemoryStoreClass(
+      FLAGS.cloud, managed_memory_store.REDIS
+  )
   cloud_redis_class.CheckPrerequisites(benchmark_config)  # pytype: disable=attribute-error
 
 
@@ -75,18 +75,17 @@ def Prepare(benchmark_spec):
 
   Args:
     benchmark_spec: The benchmark specification. Contains all data that is
-        required to run the benchmark.
+      required to run the benchmark.
   """
   benchmark_spec.always_call_cleanup = True
 
   ycsb_vms = benchmark_spec.vm_groups['clients']
   background_tasks.RunThreaded(_Install, ycsb_vms)
 
-  cloud_redis_class = (
-      managed_memory_store.GetManagedMemoryStoreClass(
-          FLAGS.cloud,
-          managed_memory_store.REDIS))
-  benchmark_spec.cloud_redis_instance = (cloud_redis_class(benchmark_spec))
+  cloud_redis_class = managed_memory_store.GetManagedMemoryStoreClass(
+      FLAGS.cloud, managed_memory_store.REDIS
+  )
+  benchmark_spec.cloud_redis_instance = cloud_redis_class(benchmark_spec)  # pytype: disable=not-instantiable
   benchmark_spec.cloud_redis_instance.Create()
 
   redis_args = {
@@ -105,7 +104,7 @@ def Run(benchmark_spec):
 
   Args:
     benchmark_spec: The benchmark specification. Contains all data that is
-        required to run the benchmark.
+      required to run the benchmark.
 
   Returns:
     A list of sample.Sample instances.
@@ -115,7 +114,8 @@ def Run(benchmark_spec):
 
   for sample in samples:
     sample.metadata.update(
-        benchmark_spec.cloud_redis_instance.GetResourceMetadata())
+        benchmark_spec.cloud_redis_instance.GetResourceMetadata()
+    )
 
   return samples
 
@@ -125,11 +125,13 @@ def Cleanup(benchmark_spec):
 
   Args:
     benchmark_spec: The benchmark specification. Contains all data that is
-        required to run the benchmark.
+      required to run the benchmark.
   """
   benchmark_spec.cloud_redis_instance.Delete()
-  logging.info('Instance %s deleted successfully',
-               benchmark_spec.cloud_redis_instance.name)
+  logging.info(
+      'Instance %s deleted successfully',
+      benchmark_spec.cloud_redis_instance.name,
+  )
 
 
 def _Install(vm):

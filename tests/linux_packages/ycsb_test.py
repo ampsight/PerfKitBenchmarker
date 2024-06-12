@@ -21,6 +21,7 @@ from absl.testing import flagsaver
 from absl.testing import parameterized
 import mock
 from perfkitbenchmarker import errors
+from perfkitbenchmarker import sample
 from perfkitbenchmarker.linux_packages import ycsb
 from perfkitbenchmarker.linux_packages import ycsb_stats
 from tests import matchers
@@ -74,6 +75,15 @@ class RunTestCase(pkb_common_test_case.PkbCommonTestCase):
     self.test_vm = mock.Mock()
     self.test_cmd = self.test_vm.RobustRemoteCommand
     self.test_cmd.return_value = ['', '']
+    # Second test VM with mocked command
+    self.test_vm_2 = mock.Mock()
+    self.test_cmd_2 = self.test_vm_2.RobustRemoteCommand
+    self.test_cmd_2.return_value = ['', '']
+
+  @flagsaver.flagsaver(ycsb_target_qps=500)
+  def testMultipleTargetsRaises(self):
+    with self.assertRaises(errors.Benchmarks.RunError):
+      self.test_executor.Run([self.test_vm], run_kwargs={'target': 1000})
 
   @flagsaver.flagsaver
   def testRunCalledWithCorrectTarget(self):
@@ -83,7 +93,72 @@ class RunTestCase(pkb_common_test_case.PkbCommonTestCase):
     # Assert
     self.assertIn('-target 1000', self.test_cmd.call_args[0][0])
 
+  @flagsaver.flagsaver(ycsb_target_qps=250)
+  def testRunCalledWithCorrectTargetUsingFlag(self):
+    # Act
+    self.test_executor.Run([self.test_vm])
+
+    # Assert
+    self.assertIn('-target 250', self.test_cmd.call_args[0][0])
+
   @flagsaver.flagsaver
+  def testRunCalledWithCorrectTargetMultiVm(self):
+    self.enter_context(
+        mock.patch.object(
+            ycsb_stats, 'CombineResults', return_value=ycsb_stats.YcsbResult()
+        )
+    )
+
+    self.test_executor.Run(
+        [self.test_vm, self.test_vm_2], run_kwargs={'target': 1000}
+    )
+
+    self.assertIn('-target 500', self.test_cmd.call_args[0][0])
+    self.assertIn('-target 500', self.test_cmd_2.call_args[0][0])
+
+  @flagsaver.flagsaver(ycsb_run_parameters=['target=100'])
+  def testRunCalledWithCorrectTargetMultiVmRunParameters(self):
+    self.enter_context(
+        mock.patch.object(
+            ycsb_stats, 'CombineResults', return_value=ycsb_stats.YcsbResult()
+        )
+    )
+
+    self.test_executor.Run([self.test_vm, self.test_vm_2])
+
+    self.assertIn('-target 100', self.test_cmd.call_args[0][0])
+    self.assertIn('-target 100', self.test_cmd_2.call_args[0][0])
+
+  @flagsaver.flagsaver(ycsb_threads_per_client=['30'])
+  def testThreadCountLessThanOrEqualToTargetThroughput(self):
+    self.test_executor.Run([self.test_vm], run_kwargs={'target': 10})
+
+    self.assertSequenceEqual(
+        [mock.call(matchers.HAS('-target 10'))], self.test_cmd.mock_calls
+    )
+    self.assertSequenceEqual(
+        [mock.call(matchers.HAS('-threads 10'))], self.test_cmd.mock_calls
+    )
+
+  def testThreadCountLessThanOrEqualToTargetThroughputMultiVm(self):
+    self.enter_context(
+        mock.patch.object(
+            ycsb_stats, 'CombineResults', return_value=ycsb_stats.YcsbResult()
+        )
+    )
+
+    self.test_executor.Run(
+        [self.test_vm, self.test_vm_2], run_kwargs={'target': 10, 'threads': 20}
+    )
+
+    for command in [self.test_cmd, self.test_cmd_2]:
+      self.assertSequenceEqual(
+          [mock.call(matchers.HAS('-target 5'))], command.mock_calls
+      )
+      self.assertSequenceEqual(
+          [mock.call(matchers.HAS('-threads 5'))], command.mock_calls
+      )
+
   def testBurstLoadUnlimitedMultiplier(self):
     # Arrange
     FLAGS.ycsb_burst_load = -1
@@ -172,6 +247,181 @@ class RunTestCase(pkb_common_test_case.PkbCommonTestCase):
     self.assertSequenceEqual(
         [mock.call(matchers.HAS('-target 200'))], self.test_cmd.mock_calls
     )
+
+  @flagsaver.flagsaver(
+      ycsb_cpu_optimization=True,
+      ycsb_cpu_optimization_target_min=0.4,
+      ycsb_cpu_optimization_target=0.5,
+  )
+  def testCpuMode(self):
+    database = mock.Mock()
+    database.CalculateTheoreticalMaxThroughput = mock.Mock(return_value=1000)
+    database.GetAverageCpuUsage = mock.Mock(side_effect=[0.2, 0.7, 0.3, 0.45])
+    self.enter_context(
+        mock.patch.object(
+            self.test_executor,
+            'RunStaircaseLoads',
+            side_effect=[
+                [s]
+                for s in _GetMockThroughputSamples([200, 100, 300, 150, 250])
+            ],
+        )
+    )
+
+    results = self.test_executor.Run([self.test_vm], database=database)
+
+    self.assertEqual(results[0].metric, 'overall Throughput')
+    self.assertEqual(results[0].value, 250)
+    self.assertEqual(results[0].metadata['ycsb_cpu_utilization'], 0.45)
+
+  @parameterized.parameters((300, 2.5, 8), (300, 1, 12), (300, 5, 12))
+  @flagsaver.flagsaver(ycsb_lowest_latency_load=True)
+  def testLowestLatencyMode(self, qps, read_latency, update_latency):
+    self.enter_context(
+        mock.patch.object(
+            self.test_executor,
+            'RunStaircaseLoads',
+            side_effect=[
+                _GetMockThroughputLatencySamples(100, 3, 10),
+                _GetMockThroughputLatencySamples(150, 3, 9),
+                _GetMockThroughputLatencySamples(200, 1, 9),
+                _GetMockThroughputLatencySamples(
+                    qps, read_latency, update_latency
+                ),
+            ],
+        )
+    )
+
+    results = self.test_executor.Run([self.test_vm])
+
+    self.assertEqual(results[0].value, 200)
+    self.assertEqual(results[1].value, 1)
+    self.assertEqual(results[2].value, 9)
+
+  @flagsaver.flagsaver(
+      ycsb_lowest_latency_load=True, ycsb_lowest_latency_target_qps=250
+  )
+  def testLowestLatencyModeWithFixedThroughput(self):
+    self.enter_context(
+        mock.patch.object(
+            self.test_executor,
+            'RunStaircaseLoads',
+            side_effect=[
+                _GetMockThroughputLatencySamples(100, 3, 10),
+            ],
+        )
+    )
+    result = self.test_executor.Run([self.test_vm])
+    self.assertIn('ycsb_lowest_latency_fixed_qps', result[0].metadata)
+
+  @flagsaver.flagsaver(
+      ycsb_latency_threshold_mode=True,
+      ycsb_latency_threshold_target=80,
+      ycsb_latency_threshold_target_min=75,
+      ycsb_latency_threshold_sleep_mins=0,
+  )
+  def testLatencyThresholdMode(self):
+    self.enter_context(
+        mock.patch.object(
+            self.test_executor,
+            'RunStaircaseLoads',
+            side_effect=[
+                _GetMockThroughputLatencySamples(10, 100, 30, 'p99'),
+                _GetMockThroughputLatencySamples(5, 50, 15, 'p99'),
+                _GetMockThroughputLatencySamples(7, 76, 25, 'p99'),
+                _GetMockThroughputLatencySamples(9, 82, 20, 'p99'),
+                _GetMockThroughputLatencySamples(8, 81, 10, 'p99'),
+            ],
+        )
+    )
+
+    results = self.test_executor.Run([self.test_vm])
+
+    self.assertEqual(results[0].value, 7)
+    self.assertEqual(results[1].value, 76)
+    self.assertEqual(results[2].value, 25)
+
+  @flagsaver.flagsaver(
+      ycsb_latency_threshold_mode=True,
+      ycsb_latency_threshold_target=100,
+      ycsb_latency_threshold_target_min=10,
+      ycsb_latency_threshold_sleep_mins=0,
+  )
+  def testLatencyThresholdModeEndsWithLowestLatency(self):
+    self.enter_context(
+        mock.patch.object(
+            self.test_executor,
+            'RunStaircaseLoads',
+            side_effect=[
+                _GetMockThroughputLatencySamples(4852, 15.871, 30, 'p99'),
+                _GetMockThroughputLatencySamples(2664, 11.871, 30, 'p99'),
+                _GetMockThroughputLatencySamples(3996, 10.871, 15, 'p99'),
+                _GetMockThroughputLatencySamples(4662, 10.719, 25, 'p99'),
+                _GetMockThroughputLatencySamples(4995, 10.487, 20, 'p99'),
+                _GetMockThroughputLatencySamples(5161, 8.623, 10, 'p99'),
+                _GetMockThroughputLatencySamples(5244, 9.823, 10, 'p99'),
+                _GetMockThroughputLatencySamples(5286, 8.319, 10, 'p99'),
+            ],
+        )
+    )
+
+    results = self.test_executor.Run([self.test_vm])
+
+    self.assertEqual(results[0].value, 4995)
+    self.assertEqual(results[1].value, 10.487)
+    self.assertEqual(results[2].value, 20)
+
+  @flagsaver.flagsaver(
+      ycsb_latency_threshold_mode=True,
+      ycsb_latency_threshold_target=80,
+      ycsb_latency_threshold_target_min=75,
+      ycsb_latency_threshold_sleep_mins=0,
+  )
+  def testLatencyThresholdModeRaisesIfTargetNotFound(self):
+    self.enter_context(
+        mock.patch.object(
+            self.test_executor,
+            'RunStaircaseLoads',
+            side_effect=[
+                _GetMockThroughputLatencySamples(10, 100, 30, 'p99'),
+                _GetMockThroughputLatencySamples(5, 99, 15, 'p99'),
+                _GetMockThroughputLatencySamples(3, 98, 25, 'p99'),
+                _GetMockThroughputLatencySamples(2, 97, 20, 'p99'),
+                _GetMockThroughputLatencySamples(1, 96, 10, 'p99'),
+            ],
+        )
+    )
+    with self.assertRaises(ycsb.RetriableLatencySearchBoundsError):
+      self.test_executor.Run([self.test_vm])
+
+
+def _GetMockThroughputSamples(throughputs):
+  result = []
+  for throughput in throughputs:
+    result.append(
+        sample.Sample(
+            metric='overall Throughput', value=throughput, unit='ops/sec'
+        )
+    )
+  return result
+
+
+def _GetMockThroughputLatencySamples(
+    throughput, read_latency, update_latency, percentile='p95'
+):
+  return [
+      sample.Sample('overall Throughput', value=throughput, unit='ops/sec'),
+      sample.Sample(
+          f'read {percentile} latency',
+          value=read_latency,
+          unit='ms',
+      ),
+      sample.Sample(
+          f'update {percentile} latency',
+          value=update_latency,
+          unit='ms',
+      ),
+  ]
 
 
 if __name__ == '__main__':

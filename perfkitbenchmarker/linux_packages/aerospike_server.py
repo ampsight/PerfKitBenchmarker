@@ -84,12 +84,22 @@ _AEROSPIKE_ZEROIZE_DISK = flags.DEFINE_bool(
         ' to zeroize the header. If set to true, it will wipe the full disk.'
     ),
 )
-flags.DEFINE_integer('aerospike_replication_factor', 1,
-                     'Replication factor for aerospike server.')
-flags.DEFINE_integer('aerospike_service_threads', 4,
-                     'Number of threads per transaction queue.')
-flags.DEFINE_integer('aerospike_vms', 1,
-                     'Number of vms (nodes) for aerospike server.')
+flags.DEFINE_integer(
+    'aerospike_replication_factor',
+    1,
+    'Replication factor for aerospike server.',
+)
+flags.DEFINE_integer(
+    'aerospike_service_threads', 4, 'Number of threads per transaction queue.'
+)
+flags.DEFINE_integer(
+    'aerospike_vms', 1, 'Number of vms (nodes) for aerospike server.'
+)
+flags.DEFINE_integer(
+    'aerospike_proto_fd_max',
+    1024,
+    'Maximum number of allowed client connections by Aerospike server.'
+)
 
 MIN_FREE_KBYTES = 1160000
 
@@ -125,10 +135,13 @@ def _InstallFromGit(vm):
       'cd {0} && git checkout {1} && git submodule update --init '
       '&& sed -i "s/COMMON_CFLAGS += -Werror/# $COMMON_CFLAGS += -Werror/" '
       '{0}/make_in/Makefile.in '
-      '&& make'.format(_GetAerospikeDir(), GIT_TAG))
+      '&& make'.format(_GetAerospikeDir(), GIT_TAG)
+  )
   for idx in range(FLAGS.aerospike_instances):
-    vm.RemoteCommand(f'mkdir {linux_packages.INSTALL_DIR}/{idx}; '
-                     f'cp -rf {_GetAerospikeDir()} {_GetAerospikeDir(idx)}')
+    vm.RemoteCommand(
+        f'mkdir {linux_packages.INSTALL_DIR}/{idx}; '
+        f'cp -rf {_GetAerospikeDir()} {_GetAerospikeDir(idx)}'
+    )
 
 
 def _InstallFromPackage(vm):
@@ -181,8 +194,11 @@ def AptInstall(vm):
   _Install(vm)
 
 
-@vm_util.Retry(poll_interval=5, timeout=300,
-               retryable_exceptions=(errors.Resource.RetryableCreationError))
+@vm_util.Retry(
+    poll_interval=5,
+    timeout=300,
+    retryable_exceptions=(errors.Resource.RetryableCreationError),
+)
 def _WaitForServerUp(server, idx=None):
   """Block until the Aerospike server is up and responsive.
 
@@ -209,6 +225,7 @@ def _WaitForServerUp(server, idx=None):
 
   logging.info('Trying to connect to Aerospike at %s:%s', server, port)
   try:
+
     def _NetcatPrefix():
       _, stderr = server.RemoteCommand('nc -h', ignore_failure=True)
       if '-q' in stderr:
@@ -217,17 +234,22 @@ def _WaitForServerUp(server, idx=None):
         return 'nc -i 1'
 
     out, _ = server.RemoteCommand(
-        '(echo -e "status\n" ; sleep 1)| %s %s %s' % (
-            _NetcatPrefix(), address, port))
+        '(echo -e "status\n" ; sleep 1)| %s %s %s'
+        % (_NetcatPrefix(), address, port)
+    )
     if out.startswith('ok'):
       logging.info('Aerospike server status is OK. Server up and running.')
       return
   except errors.VirtualMachine.RemoteCommandError as e:
     raise errors.Resource.RetryableCreationError(
-        'Aerospike server not up yet: %s.' % str(e))
+        'Aerospike server not up yet: %s.' % str(e)
+    )
   else:
     raise errors.Resource.RetryableCreationError(
-        "Aerospike server not up yet. Expected 'ok' but got '%s'." % out)
+        "Aerospike server not up yet. Expected 'ok' but got '%s'." % out
+    )
+  finally:
+    server.RemoteCommand('sudo systemctl status aerospike')
 
 
 def WipeDisk(server, devices):
@@ -311,15 +333,19 @@ def ConfigureAndStart(server, seed_node_ips=None):
 
   # Linux best practice based on:
   # https://docs.aerospike.com/server/operations/install/linux/bestpractices#linux-best-practices
-  server.RemoteCommand(f'echo {MIN_FREE_KBYTES * FLAGS.aerospike_instances} '
-                       '| sudo tee /proc/sys/vm/min_free_kbytes')
+  server.RemoteCommand(
+      f'echo {MIN_FREE_KBYTES * FLAGS.aerospike_instances} '
+      '| sudo tee /proc/sys/vm/min_free_kbytes'
+  )
   server.RemoteCommand('echo 0 | sudo tee /proc/sys/vm/swappiness')
+  server.RemoteCommand('ulimit -n %d' % FLAGS.aerospike_proto_fd_max)
   for idx in range(FLAGS.aerospike_instances):
     current_devices = []
     if devices:
       num_device_per_instance = int(len(devices) / FLAGS.aerospike_instances)
-      current_devices = devices[idx * num_device_per_instance:(idx + 1) *
-                                num_device_per_instance]
+      current_devices = devices[
+          idx * num_device_per_instance : (idx + 1) * num_device_per_instance
+      ]
     server.RenderTemplate(
         data.ResourcePath(_AEROSPIKE_CONFIGS[_AEROSPIKE_EDITION.value]),
         _GetAerospikeConfig(idx),
@@ -332,6 +358,7 @@ def ConfigureAndStart(server, seed_node_ips=None):
             'seed_addresses': seed_node_ips,
             'service_threads': FLAGS.aerospike_service_threads,
             'replication_factor': FLAGS.aerospike_replication_factor,
+            'proto_fd_max': FLAGS.aerospike_proto_fd_max,
         },
     )
     if _AEROSPIKE_EDITION.value == AerospikeEdition.COMNUNITY:

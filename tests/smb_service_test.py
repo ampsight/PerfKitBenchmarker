@@ -15,7 +15,6 @@
 
 import unittest
 from absl import flags
-
 from perfkitbenchmarker import disk
 from perfkitbenchmarker import smb_service
 from tests import pkb_common_test_case
@@ -57,7 +56,7 @@ class SmbServiceTest(pkb_common_test_case.PkbCommonTestCase):
     FLAGS['default_timeout'].parse(10)
 
   def _NewSmbResource(self):
-    return _FakeSmbService(disk.BaseDiskSpec('test_component'), 'us-west1-a')
+    return _FakeSmbService(disk.BaseSMBDiskSpec('test_component'), 'us-west1-a')
 
   def testNewSmbResource(self):
     smb = self._NewSmbResource()
@@ -71,14 +70,16 @@ class SmbServiceTest(pkb_common_test_case.PkbCommonTestCase):
     smb = self._NewSmbResource()
     smb_disk = smb.CreateSmbDisk()
     self.assertEqual('//remote1', smb_disk.device_path)
-    self.assertEqual({'user': 'hello', 'pw': 'world'},
-                     smb_disk.storage_account_and_key)
+    self.assertEqual(
+        {'user': 'hello', 'pw': 'world'}, smb_disk.storage_account_and_key
+    )
     self.assertEqual('3.0', smb_disk.smb_version)
 
   def testDefaultSmbVersion(self):
     self._SetFlags()
     smb = _FakeSmbServiceWithDefaultSmbVersion(
-        disk.BaseDiskSpec('test_component'), 'us-west1-a')
+        disk.BaseSMBDiskSpec('test_component'), 'us-west1-a'
+    )
     smb_disk = smb.CreateSmbDisk()
     self.assertEqual('3.0', smb_disk.smb_version)
 

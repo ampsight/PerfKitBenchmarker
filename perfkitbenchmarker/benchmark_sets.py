@@ -31,20 +31,25 @@ from six.moves import zip
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('flag_matrix', None,
-                    'The name of the flag matrix to run.')
-flags.DEFINE_string('flag_zip', None,
-                    'The name of the flag zip to run.')
-flags.DEFINE_integer('num_benchmark_copies', 1,
-                     'The number of copies of each benchmark config to run.')
+flags.DEFINE_string('flag_matrix', None, 'The name of the flag matrix to run.')
+flags.DEFINE_string('flag_zip', None, 'The name of the flag zip to run.')
+flags.DEFINE_integer(
+    'num_benchmark_copies',
+    1,
+    'The number of copies of each benchmark config to run.',
+)
 LINUX = 'linux'
 WINDOWS = 'windows'
 CONTAINER = 'container'
-flags.DEFINE_enum('benchmark_os_type', None, [LINUX, WINDOWS, CONTAINER],
-                  'The benchmark os type, decides if pkb searches for a '
-                  'benchmark from linux_benchmarks directory or '
-                  'windows_benchmarks directory. If not set, defaults to that '
-                  'of the os_type flag.')
+flags.DEFINE_enum(
+    'benchmark_os_type',
+    None,
+    [LINUX, WINDOWS, CONTAINER],
+    'The benchmark os type, decides if pkb searches for a '
+    'benchmark from linux_benchmarks directory or '
+    'windows_benchmarks directory. If not set, defaults to that '
+    'of the os_type flag.',
+)
 
 MESSAGE = 'message'
 BENCHMARK_LIST = 'benchmark_list'
@@ -53,8 +58,10 @@ COMBO_SET = 'combo_set'
 
 BENCHMARK_SETS = {
     STANDARD_SET: {
-        MESSAGE: ('The standard_set is a community agreed upon set of '
-                  'benchmarks to measure Cloud performance.'),
+        MESSAGE: (
+            'The standard_set is a community agreed upon set of '
+            'benchmarks to measure Cloud performance.'
+        ),
         BENCHMARK_LIST: [
             'aerospike',
             'block_storage_workload',
@@ -63,7 +70,6 @@ BENCHMARK_SETS = {
             'copy_throughput',
             'coremark',
             'fio',
-            'hadoop_terasort',
             'hpcc',
             'iperf',
             'mesh_network',
@@ -75,34 +81,33 @@ BENCHMARK_SETS = {
             'speccpu2006',
             'sysbench',
             'unixbench',
-        ]
+        ],
     },
     COMBO_SET: {
-        MESSAGE: ('The combo_set is a set of benchmarks that run multiple '
-                  'benchmarks in parallel to measure Cloud performance.'),
+        MESSAGE: (
+            'The combo_set is a set of benchmarks that run multiple '
+            'benchmarks in parallel to measure Cloud performance.'
+        ),
         BENCHMARK_LIST: [
             'fio_netperf',
-        ]
+            'netperf_hammerdbcli',
+        ],
     },
-    'arm_set': {
-        MESSAGE: 'ARM benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
-    },
+    'arm_set': {MESSAGE: 'ARM benchmark set.', BENCHMARK_LIST: [STANDARD_SET]},
     'alicloud_set': {
         MESSAGE: 'AliCloud benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'broadcom_set': {
         MESSAGE: 'Broadcom benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'canonical_set': {
         MESSAGE: 'Canonical benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'centurylinkcloud_set': {
-        MESSAGE:
-            'This benchmark set is supported on CenturyLink Cloud.',
+        MESSAGE: 'This benchmark set is supported on CenturyLink Cloud.',
         BENCHMARK_LIST: [
             'cassandra_stress',
             'copy_throughput',
@@ -114,26 +119,28 @@ BENCHMARK_SETS = {
             'redis_memtier',
             'sysbench',
             'unixbench',
-        ]
+        ],
     },
     'cisco_set': {
         MESSAGE: 'Cisco benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'cloudharmony_set': {
         MESSAGE: 'CloudHarmony benchmark set.',
         BENCHMARK_LIST: [
             'speccpu2006',
             'unixbench',
-        ]
+        ],
     },
     'cloudspectator_set': {
         MESSAGE: 'CloudSpectator benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'google_set': {
-        MESSAGE: ('This benchmark set is maintained by Google Cloud Platform '
-                  'Performance Team.'),
+        MESSAGE: (
+            'This benchmark set is maintained by Google Cloud Platform '
+            'Performance Team.'
+        ),
         BENCHMARK_LIST: [
             'bidirectional_network',
             'block_storage_workload',
@@ -143,8 +150,8 @@ BENCHMARK_SETS = {
             'copy_throughput',
             'dpdk',
             'fio',
+            'fio_netperf',
             'gpu_pcie_bandwidth',
-            'hadoop_terasort',
             'horovod',
             'hpcc',
             'hpcg',
@@ -158,9 +165,9 @@ BENCHMARK_SETS = {
             'multichase',
             'mxnet',
             'netperf',
+            'netperf_hammerdbcli',
             'object_storage_service',
             'oldisim',
-            'fio_netperf',
             'pgbench',
             'ping',
             'redis_ycsb',
@@ -172,11 +179,10 @@ BENCHMARK_SETS = {
             'tensorflow_serving',
             'tomcat_wrk',
             'unixbench',
-        ]
+        ],
     },
     'intel_set': {
-        MESSAGE:
-            'Intel benchmark set.',
+        MESSAGE: 'Intel benchmark set.',
         BENCHMARK_LIST: [
             'fio',
             'iperf',
@@ -187,11 +193,10 @@ BENCHMARK_SETS = {
             'cassandra_stress',
             'object_storage_service',
             'sysbench',
-        ]
+        ],
     },
     'kubernetes_set': {
-        MESSAGE:
-            'Kubernetes benchmark set.',
+        MESSAGE: 'Kubernetes benchmark set.',
         BENCHMARK_LIST: [
             'block_storage_workload',
             'cassandra_ycsb',
@@ -204,23 +209,22 @@ BENCHMARK_SETS = {
             'netperf',
             'redis_memtier',
             'sysbench',
-        ]
+        ],
     },
     'mellanox_set': {
         MESSAGE: 'Mellanox benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'microsoft_set': {
         MESSAGE: 'Microsoft benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'qualcomm_technologies_set': {
         MESSAGE: 'Qualcomm Technologies, Inc. benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'rackspace_set': {
-        MESSAGE:
-            'Rackspace benchmark set.',
+        MESSAGE: 'Rackspace benchmark set.',
         BENCHMARK_LIST: [
             'aerospike',
             'block_storage_workload',
@@ -239,31 +243,30 @@ BENCHMARK_SETS = {
             'silo',
             'sysbench',
             'unixbench',
-        ]
+        ],
     },
     'red_hat_set': {
         MESSAGE: 'Red Hat benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'tradeworx_set': {
         MESSAGE: 'Tradeworx Inc. benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'thesys_technologies_set': {
         MESSAGE: 'Thesys Technologies LLC. benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET]
+        BENCHMARK_LIST: [STANDARD_SET],
     },
     'stanford_set': {
         MESSAGE: 'Stanford University benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET, 'oldisim']
+        BENCHMARK_LIST: [STANDARD_SET, 'oldisim'],
     },
     'mit_set': {
         MESSAGE: 'Massachusetts Institute of Technology benchmark set.',
-        BENCHMARK_LIST: [STANDARD_SET, 'silo']
+        BENCHMARK_LIST: [STANDARD_SET, 'silo'],
     },
     'cloudsuite_set': {
-        MESSAGE:
-            'CloudSuite benchmark set.',
+        MESSAGE: 'CloudSuite benchmark set.',
         BENCHMARK_LIST: [
             'cloudsuite_data_analytics',
             'cloudsuite_data_caching',
@@ -272,8 +275,8 @@ BENCHMARK_SETS = {
             'cloudsuite_media_streaming',
             'cloudsuite_web_search',
             'cloudsuite_web_serving',
-        ]
-    }
+        ],
+    },
 }
 
 
@@ -357,12 +360,19 @@ def _GetBenchmarksFromUserConfig(user_config):
       benchmark_module = valid_benchmarks[name]
     except KeyError as exc:
       benchmark_os_type = _GetBenchmarkOsType()
-      raise ValueError('Benchmark_os_type flag is %s and os_type flag is %s. '
-                       'This resulting benchmark type is %s. '
-                       'However, benchmark of name %s is not found within the '
-                       'list of %s benchmarks. ' %
-                       (FLAGS.benchmark_os_type, FLAGS.os_type,
-                        benchmark_os_type, name, benchmark_os_type)) from exc
+      raise ValueError(
+          'Benchmark_os_type flag is %s and os_type flag is %s. '
+          'This resulting benchmark type is %s. '
+          'However, benchmark of name %s is not found within the '
+          'list of %s benchmarks. '
+          % (
+              FLAGS.benchmark_os_type,
+              FLAGS.os_type,
+              benchmark_os_type,
+              name,
+              benchmark_os_type,
+          )
+      ) from exc
     benchmark_config_list.append((benchmark_module, user_config))
 
   return benchmark_config_list
@@ -385,9 +395,9 @@ def _AssertZipAxesHaveSameLength(axes):
       raise ValueError('flag_zip axes must all be the same length')
 
 
-def _AssertFlagMatrixAndZipDefsExist(benchmark_config,
-                                     flag_matrix_name,
-                                     flag_zip_name):
+def _AssertFlagMatrixAndZipDefsExist(
+    benchmark_config, flag_matrix_name, flag_zip_name
+):
   """Asserts that specified flag_matrix and flag_zip exist.
 
   Both flag_matrix_name and flag_zip_name can be None, meaning that the user
@@ -406,16 +416,18 @@ def _AssertFlagMatrixAndZipDefsExist(benchmark_config,
     FlagZipNotFoundException: if flag_zip_name is not None, and is not
       found in the flag_zip_defs section of the benchmark_config.
   """
-  if (flag_matrix_name and
-      flag_matrix_name not in
-      benchmark_config.get('flag_matrix_defs', {})):
-    raise FlagMatrixNotFoundException('No flag_matrix with name {0}'
-                                      .format(flag_matrix_name))
-  if (flag_zip_name and
-      flag_zip_name not in
-      benchmark_config.get('flag_zip_defs', {})):
-    raise FlagZipNotFoundException('No flag_zip with name {0}'
-                                   .format(flag_zip_name))
+  if flag_matrix_name and flag_matrix_name not in benchmark_config.get(
+      'flag_matrix_defs', {}
+  ):
+    raise FlagMatrixNotFoundException(
+        'No flag_matrix with name {0}'.format(flag_matrix_name)
+    )
+  if flag_zip_name and flag_zip_name not in benchmark_config.get(
+      'flag_zip_defs', {}
+  ):
+    raise FlagZipNotFoundException(
+        'No flag_zip with name {0}'.format(flag_zip_name)
+    )
 
 
 def GetBenchmarksFromFlags():
@@ -428,7 +440,7 @@ def GetBenchmarksFromFlags():
   Raises:
     ValueError: when benchmark_name is not valid for os_type supplied
   """
-  user_config = configs.GetUserConfig()
+  user_config = configs.GetDefaultAndUserConfig()
   benchmark_config_list = _GetBenchmarksFromUserConfig(user_config)
   if benchmark_config_list and not FLAGS['benchmarks'].present:
     return benchmark_config_list
@@ -458,23 +470,27 @@ def GetBenchmarksFromFlags():
 
     if benchmark_module is None:
       benchmark_os_type = _GetBenchmarkOsType()
-      raise ValueError('Benchmark_os_type flag is %s and os_type flag is %s. '
-                       'This resulting benchmark type is %s. '
-                       'However, benchmark of name %s is not found within the '
-                       'list of %s benchmarks. ' %
-                       (FLAGS.benchmark_os_type, FLAGS.os_type,
-                        benchmark_os_type, benchmark_name,
-                        benchmark_os_type))
+      raise ValueError(
+          'Benchmark_os_type flag is %s and os_type flag is %s. '
+          'This resulting benchmark type is %s. '
+          'However, benchmark of name %s is not found within the '
+          'list of %s benchmarks. '
+          % (
+              FLAGS.benchmark_os_type,
+              FLAGS.os_type,
+              benchmark_os_type,
+              benchmark_name,
+              benchmark_os_type,
+          )
+      )
 
-    flag_matrix_name = (
-        FLAGS.flag_matrix or benchmark_config.get('flag_matrix', None)
+    flag_matrix_name = FLAGS.flag_matrix or benchmark_config.get(
+        'flag_matrix', None
     )
-    flag_zip_name = (
-        FLAGS.flag_zip or benchmark_config.get('flag_zip', None)
+    flag_zip_name = FLAGS.flag_zip or benchmark_config.get('flag_zip', None)
+    _AssertFlagMatrixAndZipDefsExist(
+        benchmark_config, flag_matrix_name, flag_zip_name
     )
-    _AssertFlagMatrixAndZipDefsExist(benchmark_config,
-                                     flag_matrix_name,
-                                     flag_zip_name)
 
     # We need to remove the 'flag_matrix', 'flag_matrix_defs', 'flag_zip',
     # 'flag_zip_defs', and 'flag_matrix_filters' keys from the config
@@ -483,12 +499,13 @@ def GetBenchmarksFromFlags():
     benchmark_config.pop('flag_matrix', None)
     benchmark_config.pop('flag_zip', None)
 
-    flag_matrix = benchmark_config.pop(
-        'flag_matrix_defs', {}).get(flag_matrix_name, {})
-    flag_matrix_filter = benchmark_config.pop(
-        'flag_matrix_filters', {}).get(flag_matrix_name, {})
-    flag_zip = benchmark_config.pop(
-        'flag_zip_defs', {}).get(flag_zip_name, {})
+    flag_matrix = benchmark_config.pop('flag_matrix_defs', {}).get(
+        flag_matrix_name, {}
+    )
+    flag_matrix_filter = benchmark_config.pop('flag_matrix_filters', {}).get(
+        flag_matrix_name, {}
+    )
+    flag_zip = benchmark_config.pop('flag_zip_defs', {}).get(flag_zip_name, {})
 
     zipped_axes = []
     crossed_axes = []
@@ -503,19 +520,22 @@ def GetBenchmarksFromFlags():
         config = _GetConfigForAxis(benchmark_config, flag_config)
         zipped_axes.append((benchmark_module, config))
 
-      crossed_axes.append([benchmark_tuple[1]['flags'] for
-                           benchmark_tuple in zipped_axes])
+      crossed_axes.append(
+          [benchmark_tuple[1]['flags'] for benchmark_tuple in zipped_axes]
+      )
 
     for flag, values in sorted(six.iteritems(flag_matrix)):
       crossed_axes.append([{flag: v} for v in values])
 
     for flag_config in itertools.product(*crossed_axes):
       config = _GetConfigForAxis(benchmark_config, flag_config)
-      if (flag_matrix_filter and not eval(
-          flag_matrix_filter, {}, config['flags'])):
+      if flag_matrix_filter and not eval(
+          flag_matrix_filter, {}, config['flags']
+      ):
         continue
 
-      benchmark_config_list.extend([(benchmark_module, config)] *
-                                   FLAGS.num_benchmark_copies)
+      benchmark_config_list.extend(
+          [(benchmark_module, config)] * FLAGS.num_benchmark_copies
+      )
 
   return benchmark_config_list

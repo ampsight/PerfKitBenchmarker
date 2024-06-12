@@ -17,7 +17,7 @@ import collections
 import copy
 import logging
 import statistics
-from typing import Any, List, Dict
+from typing import Any, Dict, List
 
 from absl import flags
 from perfkitbenchmarker import benchmark_spec as bm_spec
@@ -109,25 +109,42 @@ class MaintenanceEventTrigger(base_time_trigger.BaseTimeTrigger):
       samples: List[sample.Sample],
   ):
     """Append samples related to Live Migration."""
-    if self.capture_live_migration_timestamps:
-      # Block test exit until LM ended.
-      lm_ends = 0
-      for vm in self.vms:
-        vm.WaitLMNotificationRelease()
-        lm_events_dict = vm.CollectLMNotificationsTime()
-        # Host maintenance is in s
-        lm_ends = max(
-            lm_ends, float(lm_events_dict['Host_maintenance_end']) * 1000
-        )
-        samples.append(
-            sample.Sample(
-                'LM Total Time',
-                lm_events_dict['LM_total_time'],
-                'seconds',
-                lm_events_dict,
-            )
-        )
-      self.lm_ends = lm_ends
+
+    def generate_lm_total_time_samples() -> List[sample.Sample]:
+      lm_event_dicts = []
+      if self.capture_live_migration_timestamps:
+        # Block test exit until LM ended.
+        for vm in self.vms:
+          vm.WaitLMNotificationRelease()
+          lm_event_dicts.append(vm.CollectLMNotificationsTime())
+      else:
+        return []
+
+      # Host maintenance is in s
+      self.lm_ends = max(
+          [float(d['Host_maintenance_end']) * 1000 for d in lm_event_dicts],
+          default=0,
+      )
+
+      # Populate the run_number "LM Total Time" by copying the metadata from
+      # (one of) the existing samples. Ideally pkb.DoRunPhase() would have sole
+      # responsibility for populating run_number for all samples, but making
+      # that change might be risky.
+      sample_metadata = (
+          copy.deepcopy(samples[0].metadata) if len(samples) > 0 else {}
+      )
+
+      return [
+          sample.Sample(
+              'LM Total Time',
+              d['LM_total_time'],
+              'seconds',
+              sample_metadata | d,
+          )
+          for d in lm_event_dicts
+      ]
+
+    samples.extend(generate_lm_total_time_samples())
     self._AppendAggregatedMetrics(samples)
 
   def _AppendAggregatedMetrics(self, samples: List[sample.Sample]):
@@ -174,7 +191,7 @@ class MaintenanceEventTrigger(base_time_trigger.BaseTimeTrigger):
     base_line_values = []
     values_after_lm_starts = []
     values_after_lm_ends = []
-
+    total_missing_seconds = 0
     for i in range(len(values)):
       time = time_series[i]
       if time >= ramp_up_ends and time <= ramp_down_starts:
@@ -182,9 +199,10 @@ class MaintenanceEventTrigger(base_time_trigger.BaseTimeTrigger):
         # If more than 1 sequential value is missing from the time series.
         # Distrubute the ops throughout the time series
         if i > 0:
-          time_gap_in_seconds = ((time - time_series[i - 1]) / 1000)
+          time_gap_in_seconds = (time - time_series[i - 1]) / 1000
           missing_entry_count = int((time_gap_in_seconds / interval) - 1)
           if missing_entry_count > 1:
+            total_missing_seconds += missing_entry_count * interval
             interval_values.extend(
                 [int(values[i] / float(missing_entry_count + 1))]
                 * (missing_entry_count + 1)
@@ -224,6 +242,16 @@ class MaintenanceEventTrigger(base_time_trigger.BaseTimeTrigger):
       logging.info(
           'Number of samples after LM ends: %s', len(values_after_lm_ends)
       )
+
+    # Seconds that are missing i.e without throughput.
+    samples.append(
+        sample.Sample(
+            'total_missing_seconds',
+            total_missing_seconds,
+            's',
+            metadata=metadata,
+        )
+    )
     return samples
 
   def _ComputeLossPercentile(

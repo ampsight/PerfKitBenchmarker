@@ -27,6 +27,7 @@ _COL_SEPARATOR = '  '
 
 class FailedSubstatus(object):
   """Failure modes for benchmarks."""
+
   # Failure due to insufficient quota, user preventable
   QUOTA = 'QUOTA_EXCEEDED'
 
@@ -48,6 +49,13 @@ class FailedSubstatus(object):
   # the chance of success.
   UNSUPPORTED = 'UNSUPPORTED'
 
+  # Failure as process received a SIGINT or SIGTERM signal. This can be caused
+  # by manual Ctrl-C or a few forms of timeout - blaze sends it when
+  # its test_timeout flag is reached, as does artemis for timeout_sec. The
+  # reaper may (possibly, unproven) also kill VMs which have an artemis process
+  # running on them, which may also send this signal.
+  PROCESS_KILLED = 'PROCESS_KILLED'
+
   # General failure that don't fit in the above categories.
   UNCATEGORIZED = 'UNCATEGORIZED'
 
@@ -57,6 +65,12 @@ class FailedSubstatus(object):
   # Failure when freezing resource.
   FREEZE_FAILED = 'FREEZE_FAILED'
 
+  # Failure when a retryable command execution times out.
+  COMMAND_TIMEOUT = 'COMMAND_TIMEOUT'
+
+  # Failure when a retryable command execution exceeds the retry limit.
+  RETRIES_EXCEEDED = 'RETRIES_EXCEEDED'
+
   # List of valid substatuses for use with --retries.
   # UNCATEGORIZED failures are not retryable. To make a specific UNCATEGORIZED
   # failure retryable, please raise an errors.Benchmarks.KnownIntermittentError.
@@ -64,7 +78,13 @@ class FailedSubstatus(object):
   # logic for freeze/restore is already retried in the BaseResource
   # Create()/Delete().
   RETRYABLE_SUBSTATUSES = [
-      QUOTA, INSUFFICIENT_CAPACITY, KNOWN_INTERMITTENT, INTERRUPTED, UNSUPPORTED
+      QUOTA,
+      INSUFFICIENT_CAPACITY,
+      KNOWN_INTERMITTENT,
+      INTERRUPTED,
+      UNSUPPORTED,
+      COMMAND_TIMEOUT,
+      RETRIES_EXCEEDED,
   ]
 
 
@@ -85,25 +105,35 @@ def _CreateSummaryTable(benchmark_specs):
         cluster_boot  cluster_boot0  SKIPPED
         --------------------------------------------------------
   """
-  run_status_tuples = [(spec.name, spec.uid, spec.status,
-                        spec.failed_substatus if spec.failed_substatus else '')
-                       for spec in benchmark_specs]
-  assert run_status_tuples, ('run_status_tuples must contain at least one '
-                             'element.')
+  run_status_tuples = [
+      (
+          spec.name,
+          spec.uid,
+          spec.status,
+          spec.failed_substatus if spec.failed_substatus else '',
+      )
+      for spec in benchmark_specs
+  ]
+  assert (
+      run_status_tuples
+  ), 'run_status_tuples must contain at least one element.'
   col_headers = 'Name', 'UID', 'Status', 'Failed Substatus'
   col_lengths = []
-  for col_header, col_entries in zip(col_headers,
-                                     list(zip(*run_status_tuples))):
+  for col_header, col_entries in zip(
+      col_headers, list(zip(*run_status_tuples))
+  ):
     max_col_content_length = max(len(entry) for entry in col_entries)
     col_lengths.append(max(len(col_header), max_col_content_length))
   line_length = (len(col_headers) - 1) * len(_COL_SEPARATOR) + sum(col_lengths)
   dash_line = '-' * line_length
   line_format = _COL_SEPARATOR.join(
       '{{{0}:<{1}s}}'.format(col_index, col_length)
-      for col_index, col_length in enumerate(col_lengths))
+      for col_index, col_length in enumerate(col_lengths)
+  )
   msg = [dash_line, line_format.format(*col_headers), dash_line]
-  msg.extend(line_format.format(*row_entries)
-             for row_entries in run_status_tuples)
+  msg.extend(
+      line_format.format(*row_entries) for row_entries in run_status_tuples
+  )
   msg.append(dash_line)
   return os.linesep.join(msg)
 
@@ -127,16 +157,22 @@ def CreateSummary(benchmark_specs):
         --------------------------------------------------------
         Success rate: 25.00% (1/4)
   """
-  run_status_tuples = [(spec.name, spec.uid, spec.status)
-                       for spec in benchmark_specs]
-  assert run_status_tuples, ('run_status_tuples must contain at least one '
-                             'element.')
+  run_status_tuples = [
+      (spec.name, spec.uid, spec.status) for spec in benchmark_specs
+  ]
+  assert (
+      run_status_tuples
+  ), 'run_status_tuples must contain at least one element.'
   benchmark_count = len(run_status_tuples)
-  successful_benchmark_count = sum(1 for _, _, status in run_status_tuples
-                                   if status == SUCCEEDED)
+  successful_benchmark_count = sum(
+      1 for _, _, status in run_status_tuples if status == SUCCEEDED
+  )
   return os.linesep.join((
       'Benchmark run statuses:',
       _CreateSummaryTable(benchmark_specs),
       'Success rate: {0:.2f}% ({1}/{2})'.format(
-          100. * successful_benchmark_count / benchmark_count,
-          successful_benchmark_count, benchmark_count)))
+          100.0 * successful_benchmark_count / benchmark_count,
+          successful_benchmark_count,
+          benchmark_count,
+      ),
+  ))

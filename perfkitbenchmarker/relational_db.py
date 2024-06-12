@@ -22,117 +22,210 @@ import re
 from absl import flags
 from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import errors
+from perfkitbenchmarker import os_types
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import sql_engine_utils
 import six
 
 # TODO(chunla): Move IAAS flag to file
-flags.DEFINE_string('db_engine', None,
-                    'Managed database flavor to use (mysql, postgres)')
-flags.DEFINE_string('db_engine_version', None,
-                    'Version of the database flavor selected, e.g. 5.7')
-flags.DEFINE_string('database_name', None,
-                    'Name of the database to create. Defaults to '
-                    'pkb-db-[run-uri]')
-flags.DEFINE_string('database_username', None,
-                    'Database username. Defaults to '
-                    'pkb-db-user-[run-uri]')
-flags.DEFINE_string('database_password', None,
-                    'Database password. Defaults to '
-                    'a random 10-character alpha-numeric string')
-flags.DEFINE_boolean('db_high_availability', False,
-                     'Specifies if the database should be high availability')
-flags.DEFINE_boolean('db_backup_enabled', True,
-                     'Whether or not to enable automated backups')
-flags.DEFINE_string('db_backup_start_time', '07:00',
-                    'Time in UTC that automated backups (if enabled) '
-                    'will be scheduled. In the form HH:MM UTC. '
-                    'Defaults to 07:00 UTC')
-flags.DEFINE_list('db_zone', None,
-                  'zone or region to launch the database in. '
-                  'Defaults to the client vm\'s zone.')
-flags.DEFINE_string('client_vm_zone', None,
-                    'zone or region to launch the client in. ')
-flags.DEFINE_string('db_machine_type', None,
-                    'Machine type of the database.')
-flags.DEFINE_integer('db_cpus', None,
-                     'Number of Cpus in the database.')
-flags.DEFINE_string('db_memory', None,
-                    'Amount of Memory in the database.  Uses the same format '
-                    'string as custom machine memory type.')
-flags.DEFINE_integer('db_disk_size', None,
-                     'Size of the database disk in GB.')
-flags.DEFINE_integer('db_num_striped_disks', None,
-                     'The number of data disks to stripe together to form one.')
-flags.DEFINE_string('db_disk_type', None, 'Disk type of the database.')
-flags.DEFINE_integer('managed_db_disk_iops', None,
-                     'Disk iops of the database on AWS io1 disks.')
+flags.DEFINE_string(
+    'db_engine', None, 'Managed database flavor to use (mysql, postgres)'
+)
+flags.DEFINE_string(
+    'db_engine_version',
+    None,
+    'Version of the database flavor selected, e.g. 5.7',
+)
+flags.DEFINE_string(
+    'database_name',
+    None,
+    'Name of the database to create. Defaults to pkb-db-[run-uri]',
+)
+flags.DEFINE_string(
+    'database_username',
+    None,
+    'Database username. Defaults to pkb-db-user-[run-uri]',
+)
+flags.DEFINE_string(
+    'database_password',
+    None,
+    'Database password. Defaults to a random 10-character alpha-numeric string',
+)
+flags.DEFINE_boolean(
+    'db_high_availability',
+    False,
+    'Specifies if the database should be high availability',
+)
+flags.DEFINE_string(
+    'db_high_availability_type',
+    None,
+    'Specifies high availableity type. (AOAG, FCIS2D, FCIMW)',
+)
+flags.DEFINE_boolean(
+    'db_backup_enabled', True, 'Whether or not to enable automated backups'
+)
+flags.DEFINE_string(
+    'db_backup_start_time',
+    '07:00',
+    'Time in UTC that automated backups (if enabled) '
+    'will be scheduled. In the form HH:MM UTC. '
+    'Defaults to 07:00 UTC',
+)
+flags.DEFINE_list(
+    'db_zone',
+    None,
+    'zone or region to launch the database in. '
+    "Defaults to the client vm's zone.",
+)
+flags.DEFINE_string(
+    'client_vm_zone', None, 'zone or region to launch the client in. '
+)
 
-flags.DEFINE_integer('managed_db_azure_compute_units', None,
-                     'Number of Dtus in the database.')
-flags.DEFINE_string('managed_db_tier', None,
-                    'Tier in azure. (Basic, Standard, Premium).')
-flags.DEFINE_string('server_vm_os_type', None,
-                    'OS type of the client vm.')
-flags.DEFINE_string('client_vm_os_type', None,
-                    'OS type of the client vm.')
-flags.DEFINE_string('server_gcp_min_cpu_platform', None,
-                    'Cpu platform of the server vm.')
-flags.DEFINE_string('client_gcp_min_cpu_platform', None,
-                    'CPU platform of the client vm.')
-flags.DEFINE_string('client_vm_machine_type', None,
-                    'Machine type of the client vm.')
+flags.DEFINE_integer(
+    'client_vm_count', None, 'Number of client vms to provision '
+)
+flags.DEFINE_string('db_machine_type', None, 'Machine type of the database.')
+flags.DEFINE_integer('db_cpus', None, 'Number of Cpus in the database.')
+flags.DEFINE_string(
+    'db_memory',
+    None,
+    'Amount of Memory in the database.  Uses the same format '
+    'string as custom machine memory type.',
+)
+flags.DEFINE_integer('db_disk_size', None, 'Size of the database disk in GB.')
+flags.DEFINE_integer(
+    'db_num_striped_disks',
+    None,
+    'The number of data disks to stripe together to form one.',
+)
+flags.DEFINE_string('db_disk_type', None, 'Disk type of the database.')
+flags.DEFINE_integer(
+    'db_disk_iops',
+    None,
+    'Disk IOPs to provision for database disks, if provisioning is applicable'
+    ' or required. IOPs applies to each disk.',
+)
+flags.DEFINE_integer(
+    'db_disk_throughput',
+    None,
+    'Disk throughput to provision for database disks, if provisioning is'
+    'applicable or required. Throughput applies to each disk.',
+)
+
+flags.DEFINE_integer(
+    'managed_db_azure_compute_units', None, 'Number of Dtus in the database.'
+)
+flags.DEFINE_string(
+    'managed_db_tier', None, 'Tier in azure. (Basic, Standard, Premium).'
+)
+flags.DEFINE_string('server_vm_os_type', None, 'OS type of the client vm.')
+flags.DEFINE_string('client_vm_os_type', None, 'OS type of the client vm.')
+flags.DEFINE_string(
+    'server_gcp_min_cpu_platform', None, 'Cpu platform of the server vm.'
+)
+flags.DEFINE_string(
+    'client_gcp_min_cpu_platform', None, 'CPU platform of the client vm.'
+)
+flags.DEFINE_string(
+    'client_vm_machine_type', None, 'Machine type of the client vm.'
+)
 flags.DEFINE_integer('client_vm_cpus', None, 'Number of Cpus in the client vm.')
 flags.DEFINE_string(
-    'client_vm_memory', None,
+    'client_vm_memory',
+    None,
     'Amount of Memory in the vm.  Uses the same format '
-    'string as custom machine memory type.')
-flags.DEFINE_integer('client_vm_disk_size', None,
-                     'Size of the client vm disk in GB.')
-flags.DEFINE_string('client_vm_disk_type', None, 'Disk type of the client vm.')
-flags.DEFINE_integer('client_vm_disk_iops', None,
-                     'Disk iops of the database on AWS for client vm.')
-flags.DEFINE_boolean(
-    'use_managed_db', True, 'If true, uses the managed MySql '
-    'service for the requested cloud provider. If false, uses '
-    'MySql installed on a VM.')
-flags.DEFINE_list(
-    'db_flags', '', 'Flags to apply to the managed relational database '
-    'on the cloud that\'s being used. Example: '
-    'binlog_cache_size=4096,innodb_log_buffer_size=4294967295')
+    'string as custom machine memory type.',
+)
 flags.DEFINE_integer(
-    'innodb_buffer_pool_size', None,
+    'client_vm_disk_size', None, 'Size of the client vm disk in GB.'
+)
+flags.DEFINE_string('client_vm_disk_type', None, 'Disk type of the client vm.')
+flags.DEFINE_integer(
+    'client_vm_disk_iops',
+    None,
+    'Disk iops of the database on AWS for client vm.',
+)
+flags.DEFINE_boolean(
+    'use_managed_db',
+    True,
+    'If true, uses the managed MySql '
+    'service for the requested cloud provider. If false, uses '
+    'MySql installed on a VM.',
+)
+flags.DEFINE_list(
+    'db_flags',
+    '',
+    'Flags to apply to the managed relational database '
+    "on the cloud that's being used. Example: "
+    'binlog_cache_size=4096,innodb_log_buffer_size=4294967295',
+)
+flags.DEFINE_integer(
+    'innodb_buffer_pool_size',
+    None,
     'Size of the innodb buffer pool size in GB. '
-    'Defaults to 25% of VM memory if unset')
+    'If unset, innodb_buffer_pool_ratio is used.',
+)
+
+flags.DEFINE_float(
+    'innodb_buffer_pool_ratio',
+    0.25,
+    'Ratio of the innodb buffer pool size to VM memory. '
+    'Ignored if innodb_buffer_pool_size is set.',
+    lower_bound=0,
+    upper_bound=1
+)
 
 flags.DEFINE_bool(
-    'mysql_bin_log', False,
-    'Flag to turn binary logging on. '
-    'Defaults to False')
-flags.DEFINE_integer('innodb_log_file_size', 1000,
-                     'Size of the log file in MB. Defaults to 1000M.')
+    'mysql_bin_log', False, 'Flag to turn binary logging on. Defaults to False'
+)
 flags.DEFINE_integer(
-    'postgres_shared_buffer_size', None,
+    'innodb_log_file_size',
+    1000,
+    'Size of the log file in MB. Defaults to 1000M.',
+)
+flags.DEFINE_integer(
+    'postgres_shared_buffer_size',
+    None,
     'Size of the shared buffer size in GB. '
-    'Defaults to 25% of VM memory if unset')
+    'If unset, postgres_shared_buffer_ratio is used.',
+)
+
+flags.DEFINE_float(
+    'postgres_shared_buffer_ratio',
+    0.25,
+    'Ratio of the shared buffer size to VM memory. '
+    'Ignored if postgres_shared_buffer_size is set.',
+    lower_bound=0,
+    upper_bound=1
+)
 
 OPTIMIZE_DB_SYSCTL_CONFIG = flags.DEFINE_bool(
-    'optimize_db_sysctl_config', True,
-    'Flag to run sysctl optimization for IAAS relational database.')
+    'optimize_db_sysctl_config',
+    True,
+    'Flag to run sysctl optimization for IAAS relational database.',
+)
 
 SERVER_GCE_NUM_LOCAL_SSDS = flags.DEFINE_integer(
-    'server_gce_num_local_ssds', 0,
-    'The number of ssds that should be added to the Server.')
+    'server_gce_num_local_ssds',
+    0,
+    'The number of ssds that should be added to the Server. Note '
+    'that the flag only applies for vms that can have a variable '
+    'number of local SSDs.',
+)
 SERVER_GCE_SSD_INTERFACE = flags.DEFINE_enum(
-    'server_gce_ssd_interface', 'SCSI', ['SCSI', 'NVME'],
-    'The ssd interface for GCE local SSD.')
+    'server_gce_ssd_interface',
+    'SCSI',
+    ['SCSI', 'NVME'],
+    'The ssd interface for GCE local SSD.',
+)
 
 
 BACKUP_TIME_REGULAR_EXPRESSION = r'^\d\d\:\d\d$'
 flags.register_validator(
     'db_backup_start_time',
     lambda value: re.search(BACKUP_TIME_REGULAR_EXPRESSION, value) is not None,
-    message=('--database_backup_start_time must be in the form HH:MM'))
+    message='--database_backup_start_time must be in the form HH:MM',
+)
 
 
 FLAGS = flags.FLAGS
@@ -174,12 +267,14 @@ def GetRelationalDbClass(cloud, is_managed_db, engine):
   """
   try:
     return resource.GetResourceClass(
-        BaseRelationalDb, CLOUD=cloud, IS_MANAGED=is_managed_db, ENGINE=engine)
+        BaseRelationalDb, CLOUD=cloud, IS_MANAGED=is_managed_db, ENGINE=engine
+    )
   except errors.Resource.SubclassNotFoundError:
     pass
 
   return resource.GetResourceClass(
-      BaseRelationalDb, CLOUD=cloud, IS_MANAGED=is_managed_db)
+      BaseRelationalDb, CLOUD=cloud, IS_MANAGED=is_managed_db
+  )
 
 
 def VmsToBoot(vm_groups):
@@ -187,13 +282,16 @@ def VmsToBoot(vm_groups):
   return {
       name: spec  # pylint: disable=g-complex-comprehension
       for name, spec in six.iteritems(vm_groups)
-      if name == 'clients' or name == 'default' or
-      (not FLAGS.use_managed_db and name == 'servers')
+      if name == 'clients'
+      or name == 'default'
+      or name == 'controller'
+      or (not FLAGS.use_managed_db and name == 'servers')
   }
 
 
 class BaseRelationalDb(resource.BaseResource):
   """Object representing a relational database Service."""
+
   IS_MANAGED = True
   RESOURCE_TYPE = 'BaseRelationalDb'
   REQUIRED_ATTRS = ['CLOUD', 'IS_MANAGED']
@@ -207,7 +305,8 @@ class BaseRelationalDb(resource.BaseResource):
     super(BaseRelationalDb, self).__init__(
         enable_freeze_restore=relational_db_spec.enable_freeze_restore,
         create_on_restore_error=relational_db_spec.create_on_restore_error,
-        delete_on_freeze_error=relational_db_spec.delete_on_freeze_error)
+        delete_on_freeze_error=relational_db_spec.delete_on_freeze_error,
+    )
     self.spec = relational_db_spec
     self.engine = self.spec.engine
     self.engine_type = sql_engine_utils.GetDbEngineType(self.engine)
@@ -322,19 +421,24 @@ class BaseRelationalDb(resource.BaseResource):
         'client_vm_zone': self.spec.vm_groups['clients'].vm_spec.zone,
         'use_managed_db': self.is_managed_db,
         'instance_id': self.instance_id,
-        'client_vm_disk_type':
-            self.spec.vm_groups['clients'].disk_spec.disk_type,
-        'client_vm_disk_size':
-            self.spec.vm_groups['clients'].disk_spec.disk_size,
+        'client_vm_disk_type': self.spec.vm_groups[
+            'clients'
+        ].disk_spec.disk_type,
+        'client_vm_disk_size': self.spec.vm_groups[
+            'clients'
+        ].disk_spec.disk_size,
     }
 
-    if (hasattr(self.spec.db_spec, 'machine_type') and
-        self.spec.db_spec.machine_type):
+    if (
+        hasattr(self.spec.db_spec, 'machine_type')
+        and self.spec.db_spec.machine_type
+    ):
       metadata.update({
           'machine_type': self.spec.db_spec.machine_type,
       })
-    elif hasattr(self.spec.db_spec, 'cpus') and (hasattr(
-        self.spec.db_spec, 'memory')):
+    elif hasattr(self.spec.db_spec, 'cpus') and (
+        hasattr(self.spec.db_spec, 'memory')
+    ):
       metadata.update({
           'cpus': self.spec.db_spec.cpus,
       })
@@ -352,16 +456,21 @@ class BaseRelationalDb(resource.BaseResource):
       })
     else:
       raise RelationalDbPropertyNotSetError(
-          'Machine type of the database must be set.')
+          'Machine type of the database must be set.'
+      )
 
-    if (hasattr(self.spec.vm_groups['clients'].vm_spec, 'machine_type') and
-        self.spec.vm_groups['clients'].vm_spec.machine_type):
+    if (
+        hasattr(self.spec.vm_groups['clients'].vm_spec, 'machine_type')
+        and self.spec.vm_groups['clients'].vm_spec.machine_type
+    ):
       metadata.update({
-          'client_vm_machine_type':
-              self.spec.vm_groups['clients'].vm_spec.machine_type,
+          'client_vm_machine_type': self.spec.vm_groups[
+              'clients'
+          ].vm_spec.machine_type,
       })
-    elif hasattr(self.spec.vm_groups['clients'].vm_spec, 'cpus') and (hasattr(
-        self.spec.vm_groups['clients'].vm_spec, 'memory')):
+    elif hasattr(self.spec.vm_groups['clients'].vm_spec, 'cpus') and (
+        hasattr(self.spec.vm_groups['clients'].vm_spec, 'memory')
+    ):
       metadata.update({
           'client_vm_cpus': self.spec.vm_groups['clients'].vm_spec.cpus,
       })
@@ -370,7 +479,8 @@ class BaseRelationalDb(resource.BaseResource):
       })
     else:
       raise RelationalDbPropertyNotSetError(
-          'Machine type of the client VM must be set.')
+          'Machine type of the client VM must be set.'
+      )
 
     if FLAGS.db_flags:
       metadata.update({
@@ -407,6 +517,16 @@ class BaseRelationalDb(resource.BaseResource):
         self.client_vms_query_tools,
     )
 
+    # Add a traceroute command to the client VM to ensure that the database is
+    # accessible. This also informs the baseline latency of the network.
+    if self.client_vm.OS_TYPE in os_types.LINUX_OS_TYPES and self.endpoint:
+      self.client_vm.RemoteCommand(
+          'sudo apt-get install -y tcptraceroute', ignore_failure=True
+      )
+      self.client_vm.RemoteCommand(
+          f'tcptraceroute {self.endpoint} {self.port}', ignore_failure=True
+      )
+
   def UpdateCapacityForLoad(self) -> None:
     """Updates infrastructure to the correct capacity for loading."""
     pass
@@ -417,15 +537,17 @@ class BaseRelationalDb(resource.BaseResource):
 
   def _ApplyDbFlags(self):
     """Apply Flags on the database."""
-    raise NotImplementedError('Managed Db flags is not supported for %s' %
-                              type(self).__name__)
+    raise NotImplementedError(
+        'Managed Db flags is not supported for %s' % type(self).__name__
+    )
 
   def GetDefaultPort(self):
     """Returns default port for the db engine from the spec."""
     engine = sql_engine_utils.GetDbEngineType(self.spec.engine)
     if engine not in DEFAULT_PORTS:
-      raise NotImplementedError('Default port not specified for '
-                                'engine {0}'.format(engine))
+      raise NotImplementedError(
+          'Default port not specified for engine {0}'.format(engine)
+      )
     return DEFAULT_PORTS[engine]
 
   def CreateDatabase(self, database_name: str) -> tuple[str, str]:
@@ -447,3 +569,13 @@ class BaseRelationalDb(resource.BaseResource):
   def _FailoverHA(self):
     """Fail over from master to replica."""
     raise NotImplementedError('Failover is not implemented.')
+
+  def RestartDatabase(self):
+    """Restarts all the database services in the benchmark.
+
+    Args:
+      None
+
+    Returns: none
+    """
+    raise NotImplementedError('Restart database is not implemented.')
