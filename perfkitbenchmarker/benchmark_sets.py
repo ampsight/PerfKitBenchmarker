@@ -24,8 +24,6 @@ from perfkitbenchmarker import configs
 from perfkitbenchmarker import linux_benchmarks
 from perfkitbenchmarker import linux_packages
 from perfkitbenchmarker import os_types
-from perfkitbenchmarker import windows_benchmarks
-from perfkitbenchmarker import windows_packages
 import six
 from six.moves import zip
 
@@ -39,12 +37,11 @@ flags.DEFINE_integer(
     'The number of copies of each benchmark config to run.',
 )
 LINUX = 'linux'
-WINDOWS = 'windows'
 CONTAINER = 'container'
 flags.DEFINE_enum(
     'benchmark_os_type',
     None,
-    [LINUX, WINDOWS, CONTAINER],
+    [LINUX, CONTAINER],
     'The benchmark os type, decides if pkb searches for a '
     'benchmark from linux_benchmarks directory or '
     'windows_benchmarks directory. If not set, defaults to that '
@@ -292,15 +289,11 @@ def _GetBenchmarkOsType():
   """Returns the benchmark os type."""
   if FLAGS.benchmark_os_type == CONTAINER:
     return CONTAINER
-  elif FLAGS.benchmark_os_type == WINDOWS:
-    return WINDOWS
   elif FLAGS.benchmark_os_type == LINUX:
     return LINUX
   # benchmark_os_type is not set, falling back to looking at the os_type flag.
   elif FLAGS.os_type in os_types.CONTAINER_OS_TYPES:
     return CONTAINER
-  elif FLAGS.os_type in os_types.WINDOWS_OS_TYPES:
-    return WINDOWS
   return LINUX
 
 
@@ -308,8 +301,6 @@ def _GetValidBenchmarks():
   """Returns a dict mapping valid benchmark names to their modules."""
   if _GetBenchmarkOsType() == CONTAINER:
     return {'cluster_boot': linux_benchmarks.VALID_BENCHMARKS['cluster_boot']}
-  elif _GetBenchmarkOsType() == WINDOWS:
-    return windows_benchmarks.VALID_BENCHMARKS
   return linux_benchmarks.VALID_BENCHMARKS
 
 
@@ -317,8 +308,6 @@ def _GetValidPackages():
   """Returns a dict mapping valid package names to their modules."""
   if _GetBenchmarkOsType() == CONTAINER:
     return {}
-  elif _GetBenchmarkOsType() == WINDOWS:
-    return windows_packages.PACKAGES
   return linux_packages.PACKAGES
 
 
