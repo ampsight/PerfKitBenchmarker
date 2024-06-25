@@ -26,14 +26,6 @@ GCP = 'GCP'
 AZURE = 'Azure'
 AWS = 'AWS'
 IBMCLOUD = 'IBMCloud'
-ALICLOUD = 'AliCloud'
-KUBERNETES = 'Kubernetes'
-DIGITALOCEAN = 'DigitalOcean'
-OPENSTACK = 'OpenStack'
-CLOUDSTACK = 'CloudStack'
-RACKSPACE = 'Rackspace'
-MESOS = 'Mesos'
-PROFITBRICKS = 'ProfitBricks'
 # Though Docker is not a cloud provider, it's inclusion is useful
 # for performing on premise to cloud benchmarks
 DOCKER = 'Docker'
@@ -43,13 +35,6 @@ PROVIDER_DIRECTORY_NAMES = (
     AZURE,
     AWS,
     IBMCLOUD,
-    DIGITALOCEAN,
-    OPENSTACK,
-    RACKSPACE,
-    CLOUDSTACK,
-    ALICLOUD,
-    MESOS,
-    PROFITBRICKS,
     DOCKER,
 )
 # TODO(user): Remove Kubernetes from VALID_CLOUDS.
