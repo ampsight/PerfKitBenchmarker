@@ -28,17 +28,18 @@ IPERF_DIR = '%s/iperf-2.0.13' % linux_packages.INSTALL_DIR
 
 def _Install(vm):
   """Installs the iperf package on the VM."""
-  vm.Install('build_tools')
-  vm.Install('wget')
+  #vm.Install('build_tools')
+  #vm.Install('wget')
 
-  vm.RemoteCommand(
-      'wget -O %s/%s %s' % (linux_packages.INSTALL_DIR, IPERF_TAR, IPERF_URL)
-  )
+  #vm.RemoteCommand(
+      #'wget -O %s/%s %s' % (linux_packages.INSTALL_DIR, IPERF_TAR, IPERF_URL)
+  #)
 
-  vm.RemoteCommand(
-      'cd %s; tar xvf %s; cd %s; ./configure; make; sudo make install'
-      % (linux_packages.INSTALL_DIR, IPERF_TAR, IPERF_DIR)
-  )
+  #vm.RemoteCommand(
+  #    'cd %s; tar xvf %s; cd %s; ./configure; make; sudo make install'
+  #    % (linux_packages.INSTALL_DIR, IPERF_TAR, IPERF_DIR)
+  #)
+  pass
 
 
 def YumInstall(vm):
