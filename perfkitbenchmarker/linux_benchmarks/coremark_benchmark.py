@@ -188,8 +188,9 @@ def CleanupCoremark(remote_command):
   Args:
     remote_command: Function to run a remote command on the VM.
   """
-  remote_command('rm -rf %s' % COREMARK_DIR)
-  remote_command('rm -f %s' % coremark.COREMARK_TAR)
+  pass
+  #remote_command('rm -rf %s' % COREMARK_DIR)
+  #remote_command('rm -f %s' % coremark.COREMARK_TAR)
 
 
 def Cleanup(benchmark_spec):

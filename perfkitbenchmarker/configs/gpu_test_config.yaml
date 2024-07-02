@@ -1,0 +1,53 @@
+static_vms:
+  - &no_gpu_aws
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/jad_key.pem
+    ip_address: 3.83.135.104 
+    zone: us-east-1a
+    internal_ip: 10.0.4.96
+
+  - &gpu_gcp
+    user_name: jad_beidas
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 34.42.0.50
+    zone: us-central1-f
+    internal_ip: 10.128.0.8
+
+  - &gpu_azure
+    user_name: azureuser
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 48.217.83.158
+    zone: eastus
+    internal_ip: 10.0.0.19
+
+  - &gpu_oci
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 158.101.113.17
+    zone: AD-1
+    internal_ip: 10.0.0.164
+
+gpu_pcie_bandwidth: &gpu_pcie_bandwidth
+  vm_groups:
+    default:
+      static_vms:
+        - *gpu_gcp
+
+coremark: &coremark
+  vm_groups:
+    default:
+      static_vms:
+        - *no_gpu_aws
+
+iperf: &iperf
+  vm_groups:
+    default:
+      static_vms:
+        - *no_gpu_aws
+
+fio: &fio
+  vm_groups:
+    default:
+      static_vms:
+        - *no_gpu_aws
+
