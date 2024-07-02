@@ -2632,7 +2632,8 @@ class BaseDebianMixin(BaseLinuxMixin):
       # setting the timeout on the apt-get to 10 minutes because
       # it is known to get stuck.  In a normal update this
       # takes less than 30 seconds, but far flung regions can be slower.
-      self.RemoteCommand('sudo apt-get update', timeout=600)
+      ############ self.RemoteCommand('sudo apt-get update', timeout=600)
+      pass
     except errors.VirtualMachine.RemoteCommandError as e:
       # If there is a problem, remove the lists in order to get rid of
       # "Hash Sum mismatch" errors (the files will be restored when
