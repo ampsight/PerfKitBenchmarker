@@ -44,9 +44,11 @@ def _Install(vm):
 
 def YumInstall(vm):
   """Installs the iperf package on the VM."""
-  _Install(vm)
+  #_Install(vm)
+  pass
 
 
 def AptInstall(vm):
   """Installs the iperf package on the VM."""
-  _Install(vm)
+  #_Install(vm)
+  pass

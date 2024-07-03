@@ -612,11 +612,16 @@ class NewlineDelimitedJSONPublisher(SamplePublisher):
     logging.info('Publishing %d samples to %s', len(samples), self.file_path)
     with open(self.file_path, self.mode) as fp:
       fcntl.flock(fp, fcntl.LOCK_EX)
-      for sample in samples:
+      fp.write('[\n')
+      for i, sample in enumerate(samples):
         sample = sample.copy()
         if self.collapse_labels:
           sample['labels'] = GetLabelsFromDict(sample.pop('metadata', {}))
-        fp.write(json.dumps(sample) + '\n')
+        if i < len(samples)-1:
+          fp.write(json.dumps(sample) +',\n')
+        else:
+          fp.write(json.dumps(sample)+ '\n')
+      fp.write(']')
 
 
 class BigQueryPublisher(SamplePublisher):

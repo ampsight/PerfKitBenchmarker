@@ -2,9 +2,16 @@ static_vms:
   - &no_gpu_aws
     user_name: ubuntu
     ssh_private_key: /home/jad_beidas/jad_key.pem
-    ip_address: 3.83.135.104 
+    ip_address: 3.92.189.44
     zone: us-east-1a
-    internal_ip: 10.0.4.96
+    internal_ip: 10.0.14.4
+
+  - &iperf2
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/jad_key.pem
+    ip_address: 52.87.238.6
+    zone: us-east-1a
+    internal_ip: 10.0.9.149
 
   - &gpu_gcp
     user_name: jad_beidas
@@ -39,15 +46,29 @@ coremark: &coremark
       static_vms:
         - *no_gpu_aws
 
-iperf: &iperf
-  vm_groups:
-    default:
-      static_vms:
-        - *no_gpu_aws
-
 fio: &fio
   vm_groups:
-    default:
-      static_vms:
-        - *no_gpu_aws
+    vm_1:
+      cloud: AWS
+      vm_spec:
+        AWS:
+          machine_type: m5.large
+          zone: us-east-1a
+          image: ami-0b46f85a83437ed1b
 
+iperf: &iperf
+  vm_groups:
+    vm_1:
+      cloud: AWS
+      vm_spec:
+        AWS:
+          machine_type: m5.large
+          zone: us-east-1a
+          image: ami-0aa5bd617bfb43ccb
+    vm_2:
+      cloud: AWS
+      vm_spec:
+        AWS:
+          machine_type: m5.large
+          zone: us-east-1a
+          image: ami-0aa5bd617bfb43ccb
