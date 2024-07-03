@@ -5,6 +5,8 @@ static_vms:
     ip_address: 3.92.189.44
     zone: us-east-1a
     internal_ip: 10.0.14.4
+    disk_specs:
+        - mount_point: /home/ubuntu/scratch
 
   - &iperf2
     user_name: ubuntu
@@ -42,19 +44,21 @@ gpu_pcie_bandwidth: &gpu_pcie_bandwidth
 
 coremark: &coremark
   vm_groups:
-    default:
-      static_vms:
-        - *no_gpu_aws
-
-fio: &fio
-  vm_groups:
     vm_1:
       cloud: AWS
       vm_spec:
         AWS:
           machine_type: m5.large
           zone: us-east-1a
-          image: ami-0b46f85a83437ed1b
+          image: ami-0bfca93a83b5effce
+
+fio: &fio
+  vm_groups:
+    default:
+      static_vms:
+        - *no_gpu_aws
+    
+      
 
 iperf: &iperf
   vm_groups:
@@ -64,11 +68,11 @@ iperf: &iperf
         AWS:
           machine_type: m5.large
           zone: us-east-1a
-          image: ami-0aa5bd617bfb43ccb
+          image: ami-0bfca93a83b5effce
     vm_2:
       cloud: AWS
       vm_spec:
         AWS:
           machine_type: m5.large
           zone: us-east-1a
-          image: ami-0aa5bd617bfb43ccb
+          image: ami-0bfca93a83b5effce

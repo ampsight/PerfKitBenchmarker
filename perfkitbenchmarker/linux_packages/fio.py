@@ -61,7 +61,7 @@ def GetFioExec():
 
 def _Install(vm):
   """Installs the fio package on the VM."""
-  # TODO(user): Upgrade to python3.
+  """# TODO(user): Upgrade to python3.
   for p in ['build_tools', 'python', 'pip3', 'python_dev']:
     vm.Install(p)
   for package in ('numpy', 'pandas'):
@@ -83,20 +83,22 @@ def _Install(vm):
             log_parser=FIO_HIST_LOG_PARSER,
             patch=FIO_HIST_LOG_PARSER_PATCH,
         )
-    )
+    )"""
+  pass
 
 
 def YumInstall(vm):
   """Installs the fio package on the VM."""
-  vm.InstallPackages('libaio-devel numactl-devel libaio bc zlib-devel')
-  _Install(vm)
-
+  ##vm.InstallPackages('libaio-devel numactl-devel libaio bc zlib-devel')
+  ##_Install(vm)
+  pass
 
 def AptInstall(vm):
   """Installs the fio package on the VM."""
-  vm.InstallPackages('libaio-dev libnuma-dev libaio1 bc zlib1g-dev')
-  vm.InstallPackages('numactl')
-  _Install(vm)
+  #vm.InstallPackages('libaio-dev libnuma-dev libaio1 bc zlib1g-dev')
+  #vm.InstallPackages('numactl')
+  #_Install(vm)
+  pass
 
 
 def ParseJobFile(job_file):

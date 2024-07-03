@@ -45,7 +45,7 @@ PKB_FIO_LOG_FILE_NAME = 'pkb_fio_avg'
 LOCAL_JOB_FILE_SUFFIX = '_fio.job'  # used with vm_util.PrependTempDir()
 REMOTE_JOB_FILE_PATH = posixpath.join(vm_util.VM_TMP_DIR, 'fio.job')
 DEFAULT_TEMP_FILE_NAME = 'fio-temp-file'
-MOUNT_POINT = '/scratch'
+MOUNT_POINT = '/home/ubuntu/scratch'
 
 
 # This dictionary maps scenario names to dictionaries of fio settings.
