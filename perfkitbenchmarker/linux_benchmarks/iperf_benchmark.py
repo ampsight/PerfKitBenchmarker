@@ -137,7 +137,7 @@ def Prepare(benchmark_spec):
     )
 
   for vm in vms:
-    vm.Install('iperf')
+    #vm.Install('iperf')
     # TODO(user): maybe indent this block one
     if vm_util.ShouldRunOnExternalIpAddress():
       if TCP in FLAGS.iperf_benchmarks:

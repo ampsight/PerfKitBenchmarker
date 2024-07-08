@@ -8,12 +8,14 @@ static_vms:
     disk_specs:
         - mount_point: /home/ubuntu/scratch
 
-  - &iperf2
-    user_name: ubuntu
-    ssh_private_key: /home/jad_beidas/jad_key.pem
-    ip_address: 52.87.238.6
-    zone: us-east-1a
-    internal_ip: 10.0.9.149
+  - &no_gpu_gcp
+    user_name: jad_beidas
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 35.226.87.165
+    zone: us-central1-c
+    internal_ip: 10.128.0.9
+    disk_specs:
+        - mount_point: /home/jad_beidas/scratch
 
   - &gpu_gcp
     user_name: jad_beidas
@@ -21,6 +23,15 @@ static_vms:
     ip_address: 34.42.0.50
     zone: us-central1-f
     internal_ip: 10.128.0.8
+
+  - &no_gpu_azure
+    user_name: azureuser
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 4.227.190.159
+    zone: eastus
+    internal_ip: 10.0.0.23
+    disk_specs:
+        - mount_point: /mnt
 
   - &gpu_azure
     user_name: azureuser
@@ -44,35 +55,29 @@ gpu_pcie_bandwidth: &gpu_pcie_bandwidth
 
 coremark: &coremark
   vm_groups:
-    vm_1:
-      cloud: AWS
-      vm_spec:
-        AWS:
-          machine_type: m5.large
-          zone: us-east-1a
-          image: ami-0bfca93a83b5effce
+    default:
+      static_vms:
+        - *no_gpu_azure
 
 fio: &fio
   vm_groups:
     default:
       static_vms:
-        - *no_gpu_aws
-    
-      
-
+        - *no_gpu_azure
+  
 iperf: &iperf
   vm_groups:
     vm_1:
-      cloud: AWS
+      cloud: Azure
       vm_spec:
-        AWS:
-          machine_type: m5.large
-          zone: us-east-1a
-          image: ami-0bfca93a83b5effce
+        Azure:
+          machine_type: Standard_D2s_v3
+          zone: eastus
+          image: /subscriptions/4d97e0d0-c153-4052-a84b-bb5318d1044c/resourceGroups/pkb-resource-group-user-created/providers/Microsoft.Compute/galleries/pkb_images/images/pkb-non-gpu-image
     vm_2:
-      cloud: AWS
+      cloud: Azure
       vm_spec:
-        AWS:
-          machine_type: m5.large
-          zone: us-east-1a
-          image: ami-0bfca93a83b5effce
+        Azure:
+          machine_type: Standard_D2s_v3
+          zone: eastus
+          image: /subscriptions/4d97e0d0-c153-4052-a84b-bb5318d1044c/resourceGroups/pkb-resource-group-user-created/providers/Microsoft.Compute/galleries/pkb_images/images/pkb-non-gpu-image
