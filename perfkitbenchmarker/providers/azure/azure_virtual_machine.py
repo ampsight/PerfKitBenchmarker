@@ -841,6 +841,8 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
             self.user_name,
             '--name',
             self.name,
+            '--security-type',
+            "TrustedLaunch"
         ]
         + os_disk_args
         + confidential_args
@@ -851,7 +853,7 @@ class AzureVirtualMachine(virtual_machine.BaseVirtualMachine):
     if self.SupportsNVMe() and self.image_supports_nvme:
       create_cmd.extend(['--disk-controller-type', 'NVMe'])
     if self.trusted_launch_unsupported_type:
-      create_cmd.extend(['--security-type', 'Standard'])
+      create_cmd.extend(['--security-type', 'TrustedLaunch'])
     if self.boot_startup_script:
       create_cmd.extend(['--custom-data', self.boot_startup_script])
 
