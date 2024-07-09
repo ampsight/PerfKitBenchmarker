@@ -14,4 +14,6 @@ RUN pip install -r requirements-testing.txt
 
 #CMD python -m unittest discover -s tests -p '*test.py' -v
 
-RUN pip install -r providers/aws/requirements.txt
+RUN pip install -r perfkitbenchmarker/providers/aws/requirements.txt
+
+RUN pip install -r perfkitbenchmarker/providers/ibmcloud/requirements.txt
