@@ -1,0 +1,23 @@
+AWS non-gpu:
+ami-0bfca93a83b5effce
+
+AWS gpu:
+ami-0dc4c5b82ad272bf6
+
+Google non-gpu:
+pkb-intern-coremark-fio-working
+
+Google gpu:
+pkb-gpu-pcie-bandwidth-mi
+
+Azure non-gpu:
+/subscriptions/4d97e0d0-c153-4052-a84b-bb5318d1044c/resourceGroups/pkb-resource-group-user-created/providers/Microsoft.Compute/galleries/pkb_images/images/pkb-non-gpu-image
+
+Azure gpu:
+(WIP)
+
+OCI non-gpu:
+ocid1.image.oc1.iad.aaaaaaaaa2zpbwjlinn63w36ytwvns4tke2g2b5zexfpfpwwx3zoczl3q5wq
+
+OCI gpu:
+(WIP)
