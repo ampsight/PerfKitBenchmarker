@@ -17,3 +17,5 @@ RUN pip install -r requirements-testing.txt
 RUN pip install -r perfkitbenchmarker/providers/aws/requirements.txt
 
 RUN pip install -r perfkitbenchmarker/providers/ibmcloud/requirements.txt
+
+CMD tail -f /dev/null
