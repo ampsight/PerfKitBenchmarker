@@ -51,6 +51,7 @@ from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import providers
 from perfkitbenchmarker import relational_db
 from perfkitbenchmarker import resource as resource_type
+from perfkitbenchmarker import resources  # pylint:disable=unused-import  # Load the __init__.py
 from perfkitbenchmarker import smb_service
 from perfkitbenchmarker import stages
 from perfkitbenchmarker import static_virtual_machine as static_vm
@@ -59,6 +60,7 @@ from perfkitbenchmarker import vm_util
 from perfkitbenchmarker import vpn_service
 from perfkitbenchmarker.configs import benchmark_config_spec
 from perfkitbenchmarker.configs import freeze_restore_spec
+from perfkitbenchmarker.resources import example_resource
 import six
 from six.moves import range
 import six.moves._thread
@@ -83,10 +85,6 @@ six.moves.copyreg.pickle(six.moves._thread.LockType, PickleLock)
 SUPPORTED = 'strict'
 NOT_EXCLUDED = 'permissive'
 SKIP_CHECK = 'none'
-# GCP labels only allow hyphens (-), underscores (_), lowercase characters, and
-# numbers and International characters.
-# metadata allow all characters and numbers.
-METADATA_TIME_FORMAT = '%Y%m%dt%H%M%Sz'
 FLAGS = flags.FLAGS
 
 flags.DEFINE_enum(
@@ -181,6 +179,7 @@ class BenchmarkSpec:
     self.tpu_groups = {}
     self.edw_service = None
     self.edw_compute_resource = None
+    self.example_resource = None
     self.nfs_service = None
     self.smb_service = None
     self.messaging_service = None
@@ -457,6 +456,21 @@ class BenchmarkSpec:
         self.config.edw_compute_resource
     )  # pytype: disable=not-instantiable
     self.resources.append(self.edw_compute_resource)
+
+  def ConstructExampleResource(self):
+    """Create an example_resource object. Also call this from pkb.py."""
+    if self.config.example_resource is None:
+      return
+    example_resource_type = self.config.example_resource.example_type
+    example_resource_class = (
+        example_resource.GetExampleResourceClass(
+            example_resource_type
+        )
+    )
+    self.example_resource = example_resource_class(
+        self.config.example_resource
+    )  # pytype: disable=not-instantiable
+    self.resources.append(self.example_resource)
 
   def ConstructNfsService(self):
     """Construct the NFS service object.
@@ -812,6 +826,8 @@ class BenchmarkSpec:
       self.edw_service.Create()
     if self.edw_compute_resource:
       self.edw_compute_resource.Create()
+    if self.example_resource:
+      self.example_resource.Create()
     if self.vpn_service:
       self.vpn_service.Create()
     if hasattr(self, 'messaging_service') and self.messaging_service:
@@ -845,6 +861,8 @@ class BenchmarkSpec:
       self.edw_service.Delete()
     if hasattr(self, 'edw_compute_resource') and self.edw_compute_resource:
       self.edw_compute_resource.Delete()
+    if self.example_resource:
+      self.example_resource.Delete()
     if self.nfs_service:
       self.nfs_service.Delete()
     if self.smb_service:
@@ -930,7 +948,7 @@ class BenchmarkSpec:
         c if self._IsSafeKeyOrValueCharacter(c) else '_' for c in key.lower()
     )
 
-    # max length contraints on keys and values
+    # max length constraints on keys and values
     # https://cloud.google.com/resource-manager/docs/creating-managing-labels
     max_safe_length = 63
     # GCP labels are not allowed to start or end with '_'
@@ -946,7 +964,7 @@ class BenchmarkSpec:
     timeout_utc = now_utc + datetime.timedelta(minutes=timeout_minutes)
 
     tags = {
-        'timeout_utc': timeout_utc.strftime(time_format),
+        resource_type.TIMEOUT_METADATA_KEY: timeout_utc.strftime(time_format),
         'create_time_utc': now_utc.strftime(time_format),
         'benchmark': self.name,
         'perfkit_uuid': self.uuid,
@@ -967,7 +985,8 @@ class BenchmarkSpec:
 
   def GetResourceTags(self, timeout_minutes=None):
     """Gets a list of tags to be used to tag resources."""
-    return self._GetResourceDict(METADATA_TIME_FORMAT, timeout_minutes)
+    return self._GetResourceDict(resource_type.METADATA_TIME_FORMAT,
+                                 timeout_minutes)
 
   def _CreatePlacementGroup(self, placement_group_spec, cloud):
     """Create a placement group in zone.

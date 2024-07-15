@@ -385,6 +385,7 @@ class SQLServerIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
     self.PushAndRunPowershellScript(
         replica_vms[0], "uninstall_sql_server.ps1")
     replica_vms[0].Reboot()
+    server_vm.Reboot()
 
     if self.spec.high_availability_type == "FCIMW":
       # Configure MW cluster disks.
@@ -433,6 +434,8 @@ class SQLServerIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
               sql_srv_vm, "update_sql_server.ps1", [kb_number]
           )
           sql_srv_vm.Reboot()
+    self.PushAndRunPowershellScript(
+        server_vm, "check_sql_role_status_after_upgrade.ps1")
 
     # Update variables user for connection to SQL server.
     self.spec.database_password = win_password

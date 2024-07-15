@@ -126,6 +126,7 @@ _MACHINE_TYPE_PREFIX_TO_ARM_ARCH = {
     'm7g': 'graviton3',
     'r6g': 'graviton2',
     'r7g': 'graviton3',
+    'r8g': 'graviton4',
     't4g': 'graviton2',
     'im4g': 'graviton2',
     'is4ge': 'graviton2',
@@ -1888,30 +1889,6 @@ class CentOs7BasedAwsVirtualMachine(
     self.InstallPackages('kernel-devel')
     self.Reboot()
     super()._InstallEfa()
-
-
-class CentOs8BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.CentOs8Mixin
-):
-  """Class with configuration for AWS CentOS 8 virtual machines."""
-
-  # This describes the official AMIs listed here:
-  # https://wiki.centos.org/Cloud/AWS#Official_CentOS_Linux_:_Public_Images
-  IMAGE_OWNER = CENTOS_IMAGE_PROJECT
-  IMAGE_NAME_FILTER_PATTERN = 'CentOS 8*'
-  DEFAULT_USER_NAME = 'centos'
-
-
-class CentOsStream8BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.CentOsStream8Mixin
-):
-  """Class with configuration for AWS CentOS Stream 8 virtual machines."""
-
-  # This describes the official AMIs listed here:
-  # https://wiki.centos.org/Cloud/AWS#Official_CentOS_Linux_:_Public_Images
-  IMAGE_OWNER = CENTOS_IMAGE_PROJECT
-  IMAGE_NAME_FILTER_PATTERN = 'CentOS Stream 8*'
-  DEFAULT_USER_NAME = 'centos'
 
 
 class RockyLinux8BasedAwsVirtualMachine(

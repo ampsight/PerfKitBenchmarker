@@ -26,7 +26,7 @@ from perfkitbenchmarker import linux_packages
 SERVER_VCPU_RATIO = 0.75
 
 _KEYDB_RELEASE = flags.DEFINE_string(
-    'keydb_release', 'RELEASE_6', 'Git Release of KeyDB to use.'
+    'keydb_release', 'RELEASE_6_3_4', 'Git Release of KeyDB to use.'
 )
 _KEYDB_SERVER_THREADS = flags.DEFINE_integer(
     'keydb_server_threads',
@@ -39,8 +39,7 @@ _KEYDB_SERVER_THREADS = flags.DEFINE_integer(
 # Default port for KeyDB
 DEFAULT_PORT = 6379
 FLAGS = flags.FLAGS
-# TODO(user): Move to Snapchat repro
-KEYDB_GIT = 'https://github.com/EQ-Alpha/KeyDB.git'
+KEYDB_GIT = 'https://github.com/Snapchat/KeyDB.git'
 
 
 def GetKeydbDir() -> str:
@@ -50,7 +49,7 @@ def GetKeydbDir() -> str:
 def _GetNumServerThreads(vm) -> int:
   num_server_threads = _KEYDB_SERVER_THREADS.value
   if num_server_threads == 0 and vm is not None:
-    num_server_threads = vm.NumCpusForBenchmark() * SERVER_VCPU_RATIO
+    num_server_threads = int(vm.NumCpusForBenchmark() * SERVER_VCPU_RATIO)
   assert num_server_threads >= 0, 'num_server_threads must be >=0.'
   return num_server_threads
 
@@ -66,12 +65,12 @@ def _Install(vm) -> None:
       f'git checkout {_KEYDB_RELEASE.value} && '
       'git pull'
   )
-  vm.RemoteCommand(
-      f'cd {GetKeydbDir()} && '
-      # 'make BUILD_TLS=yes && '
-      'make && '
-      'sudo make install'
-  )
+  # See https://docs.keydb.dev/docs/build/#build-flags
+  # and https://docs.keydb.dev/blog/2020/09/29/blog-post/#find-out-more
+  if FLAGS.memtier_tls:
+    vm.RemoteCommand(f'cd {GetKeydbDir()} && ./utils/gen-test-certs.sh')
+  make_cmd = 'make BUILD_TLS=yes' if FLAGS.memtier_tls else 'make'
+  vm.RemoteCommand(f'cd {GetKeydbDir()} && {make_cmd} && sudo make install')
 
 
 def YumInstall(_) -> None:
@@ -110,13 +109,21 @@ def _BuildStartCommand(vm) -> str:
       f'--server-threads {_GetNumServerThreads(vm)}',
       '--save',
   ]
-  # TODO(spencerkim): Add TLS support
+  tls_args = []
+  if FLAGS.memtier_tls:
+    tls_args = [
+        f'--tls-port {DEFAULT_PORT}',
+        '--port 0',
+        f'--tls-cert-file {keydb_dir}/tests/tls/keydb.crt',
+        f'--tls-key-file {keydb_dir}/tests/tls/keydb.key',
+        f'--tls-ca-cert-file {keydb_dir}/tests/tls/ca.crt',
+    ]
   # TODO(spencerkim): Add --server-thread-affinity argument.
   # TODO(spencerkim): Add --maxmemory and eviction arguments.
   # TODO(user): Consider adding persistence support
   # https://docs.keydb.dev/docs/persistence/
 
-  return cmd.format(keydb_dir=keydb_dir, args=' '.join(cmd_args))
+  return cmd.format(keydb_dir=keydb_dir, args=' '.join(cmd_args + tls_args))
 
 
 def Start(vm) -> None:

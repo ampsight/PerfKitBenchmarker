@@ -33,7 +33,7 @@ REDIS_VERSION_MAPPING = {
     'redis_4_0': '4.0.10',
     'redis_5_0': '5.0.6',
     'redis_6_x': '6.x',
-    'redis_7_x': '7.0',
+    'redis_7_x': '7.1',
 }
 
 
@@ -54,7 +54,6 @@ class ElastiCacheRedis(managed_memory_store.BaseManagedMemoryStore):
     self.redis_region = FLAGS.cloud_redis_region
     self.failover_zone = FLAGS.elasticache_failover_zone
     self.failover_subnet = None
-    self.failover_style = FLAGS.redis_failover_style
 
     self.subnets = []
 

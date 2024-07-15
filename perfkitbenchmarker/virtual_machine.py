@@ -144,6 +144,16 @@ flags.DEFINE_string(
         'on GCP, AWS, Azure for now.'
     ),
 )
+_VM_INSTANCE_NAME_SUFFIX = flags.DEFINE_string(
+    'vm_instance_name_suffix',
+    None,
+    (
+        'Optional, a suffix to add after the VM instance name. Without this,'
+        ' instance is named as pkb-{run_uri}-{instance_number}. With this'
+        ' option, the instance name will be'
+        ' pkb-{run_uri}-{instance_number}-{vm_instance_name_suffix}'
+    ),
+)
 _REQUIRED_CPU_VERSION = flags.DEFINE_string(
     'required_cpu_version',
     None,
@@ -974,6 +984,16 @@ class BaseOsMixin(six.with_metaclass(abc.ABCMeta, object)):
     """
     raise NotImplementedError()
 
+  def _SetNumCpus(self):
+    """Sets the number of CPUs on the VM.
+
+    Returns:
+      The number of CPUs on the VM.
+    """
+    if self.num_cpus is None:
+      self.num_cpus = self._GetNumCpus()
+    return self.num_cpus
+
   def NumCpusForBenchmark(self, report_only_physical_cpus=False):
     """Gets the number of CPUs for benchmark configuration purposes.
 
@@ -1185,8 +1205,8 @@ class DeprecatedOsMixin(BaseOsMixin):
   # Optional alternative to use instead.
   ALTERNATIVE_OS = None
 
-  def __init__(self):
-    super(DeprecatedOsMixin, self).__init__()
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
     assert self.OS_TYPE
     assert self.END_OF_LIFE
     warning = "os_type '%s' is deprecated and will be removed after %s." % (
@@ -1256,7 +1276,14 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
     super(BaseVirtualMachine, self).__init__()
     with self._instance_counter_lock:
       self.instance_number = self._instance_counter
-      self.name = 'pkb-%s-%d' % (FLAGS.run_uri, self.instance_number)
+      if _VM_INSTANCE_NAME_SUFFIX.value:
+        self.name = 'pkb-%s-%d-%s' % (
+            FLAGS.run_uri,
+            self.instance_number,
+            _VM_INSTANCE_NAME_SUFFIX.value,
+        )
+      else:
+        self.name = 'pkb-%s-%d' % (FLAGS.run_uri, self.instance_number)
       BaseVirtualMachine._instance_counter += 1
     self.disable_interrupt_moderation = vm_spec.disable_interrupt_moderation
     self.disable_rss = vm_spec.disable_rss
@@ -1872,6 +1899,12 @@ class BaseVirtualMachine(BaseOsMixin, resource.BaseResource):
   def _PreDelete(self):
     """See base class."""
     self.LogVmDebugInfo()
+
+  def UpdateTimeoutMetadata(self):
+    """Updates the timeout tag for the VM."""
+
+  def GetNumTeardownSkippedVms(self) -> int | None:
+    """Returns the number of lingering VMs in this VM's zone."""
 
 
 VirtualMachine = typing.TypeVar('VirtualMachine', bound=BaseVirtualMachine)

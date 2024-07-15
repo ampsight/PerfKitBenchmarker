@@ -31,7 +31,7 @@ from perfkitbenchmarker.providers.gcp import util as gcp_util
 
 FLAGS = flags.FLAGS
 
-BQ_CLIENT_FILE = 'bq-java-client-2.16.jar'
+BQ_CLIENT_FILE = 'bq-jdbc-simba-client-1.2.jar'
 DEFAULT_TABLE_EXPIRATION = 3600 * 24 * 365  # seconds
 
 BQ_JDBC_INTERFACES = [
@@ -303,7 +303,7 @@ class JavaClientInterface(GenericClientInterface):
       key_file_name = FLAGS.gcp_service_account_key_file.split('/')[-1]
 
     query_command = (
-        'java -cp {} '
+        'java -Xmx6g -cp {} '
         'com.google.cloud.performance.edw.Single --project {} '
         '--credentials_file {} --dataset {} '
         '--query_file {}'
@@ -338,7 +338,7 @@ class JavaClientInterface(GenericClientInterface):
     if '/' in FLAGS.gcp_service_account_key_file:
       key_file_name = os.path.basename(FLAGS.gcp_service_account_key_file)
     cmd = (
-        'java -cp {} '
+        'java -Xmx6g -cp {} '
         'com.google.cloud.performance.edw.Simultaneous --project {} '
         '--credentials_file {} --dataset {} --submission_interval {} '
         '--query_files {}'.format(
@@ -367,7 +367,7 @@ class JavaClientInterface(GenericClientInterface):
     if '/' in FLAGS.gcp_service_account_key_file:
       key_file_name = os.path.basename(FLAGS.gcp_service_account_key_file)
     cmd = (
-        'java -cp {} '
+        'java -Xmx6g -cp {} '
         'com.google.cloud.performance.edw.Throughput --project {} '
         '--credentials_file {} --dataset {} --query_streams {}'.format(
             BQ_CLIENT_FILE,
@@ -702,7 +702,8 @@ class Bqfederated(Bigquery):
       A dictionary set to underlying data's details (format, etc.)
     """
     data_details = {}
-    dataset_id = re.split(r'\.', self.cluster_identifier)[1]
+    project_id, dataset_id = re.split(r'\.', self.cluster_identifier)
+    data_details['metadata_caching'] = str('metadata-caching' in project_id)
     parsed_id = re.split(r'_', dataset_id)
     data_details['format'] = parsed_id[1]
     data_details['compression'] = parsed_id[2]

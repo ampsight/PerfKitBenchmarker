@@ -68,16 +68,18 @@
     installing local AWS CLI credentials via aws_credentials.py. This must be
     set up by the user beforehand. See
     [AWS documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2_instance-profiles.html)
-    - Alternatively for EKS benchmarking, clusters require
-    --aws_eks_pod_identity_role for Kubernetes VMs inside the cluster calling
-    APIs. The role must be set up by the user beforehand. See
-    [AWS documentation](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-association.html)
+    -   Alternatively for EKS benchmarking, clusters require
+        --aws_eks_pod_identity_role for Kubernetes VMs inside the cluster
+        calling APIs. The role must be set up by the user beforehand. See
+        [AWS documentation](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-association.html)
 -   Split `--azure_preprovisioned_data_bucket` into
     `--azure_preprovisioned_data_account` and
     `--azure_preprovisioned_data_subscription`, which allows cross-subscription
     access.
 -   Remove Rocky Linux on Azure.
 -   Changed supported Python version to 3.11.
+-   Deprecate CentOS Linux 7 as it is EOL on 2024-06-30.
+-   Remove EOL CentOS 8 and CentOS Stream 8.
 
 ### New features:
 
@@ -182,9 +184,15 @@
 -   HammerDB enables "Use All Warehouses" by default for increased I/O.
 -   Add Ubuntu 24.04 support for GCP, AWS, and Azure Providers.
 -   Add keydb_memtier_benchmark (KeyDB is a fork of Redis).
+-   Add `--skip_teardown_conditions` flag, offering the option to keep resources
+    alive if any metrics satisfy the criteria passed into the flag.
+-   Add unmanaged_mysql_sysbench benchmark.
+-   Refactor nginx_benchmark to use reverse_proxy or api_gateway configurations.
 
 ### Enhancements:
 
+-   Updated `sar` switch to efficiently collect all sar metrics during the run,
+    and download the file for hands-on analysis (no parsing).
 -   Added delay_time support for delete operations in object storage service.
 -   Added horovod_synthetic option for synthetic input data in ResNet/ReXtNet
     models.
@@ -320,6 +328,14 @@
 -   Add retryable failure sub-statuses for runs that fail on a `vm_util.Retry()`
     command timing out or exceeding its retry limit.
 -   Local disks not included in striping are now available as scratch disks.
+-   Add supportability of running Hadoop DFSIO on unmanaged Hadoop Yarn cluster.
+-   Enable log aggregation in Hadoop YARN job history server to enable finished
+    application info and log retrieval.
+-   Add unmanaged Hadoop bin path to the environment PATH so that
+    hadoop/yarn/hdfs commands can be ran without specifying the full path.
+-   Set dfs.datanode.data.dir and mapreduce.cluster.local.dir dynamically to use
+    all attached scratch disks on each HDFS data node.
+-   Add a flag to allow users to specify a suffix for the GCP VM instance name.
 
 ### Bug fixes and maintenance updates:
 
@@ -469,4 +485,5 @@
 -   Set `--always_call_cleanup=True` flag as the default for `cluster_boot`.
     This prevents leaking `tcpdump` processes from runs that fail in the
     Provision phase.
--   Test change.
+-   Added `example_benchmark` & `example_resource` which showcase the simplest
+    possible spec, resource, & benchmark that can be written.

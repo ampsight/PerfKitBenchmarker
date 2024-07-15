@@ -246,6 +246,9 @@ flags.DEFINE_boolean(
     'to extract the total available memory capacity in the container.',
 )
 
+flags.DEFINE_integer('visible_core_count', None,
+                     'To customize the number of visible CPU cores.')
+
 _DISABLE_YUM_CRON = flags.DEFINE_boolean(
     'disable_yum_cron', True, 'Whether to disable the cron-run yum service.'
 )
@@ -689,6 +692,7 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
 
   def PrepareVMEnvironment(self):
     super(BaseLinuxMixin, self).PrepareVMEnvironment()
+    self._SetNumCpus()
     self.SetupProxy()
     self._CreateVmTmpDir()
     self._SetTransparentHugepages()
@@ -1751,10 +1755,10 @@ class BaseLinuxMixin(virtual_machine.BaseOsMixin):
         /MemFree:/ {total += $2}
         /Cached:/  {total += $2}
         /Buffers:/ {total += $2}
-        END        {printf "%d",total}
+        END        {printf "%d",total/1024}
         ' /proc/meminfo
         """)
-    return int(stdout)
+    return int(stdout) * 1024
 
   def _GetTotalMemoryKbFromCgroup(self):
     """Extracts the memory space in kibibyte (KiB) for containers.
@@ -2516,11 +2520,14 @@ class Fedora37Mixin(BaseRhelMixin):
     """Fedora does not need epel."""
 
 
-class CentOs7Mixin(BaseRhelMixin):
+class CentOs7Mixin(BaseRhelMixin, virtual_machine.DeprecatedOsMixin):
   """Class holding CentOS 7 specific VM methods and attributes."""
 
   OS_TYPE = os_types.CENTOS7
   PACKAGE_MANAGER = YUM
+
+  END_OF_LIFE = '2024-06-30'
+  ALTERNATIVE_OS = os_types.ROCKY_LINUX8
 
   def SetupPackageManager(self):
     """Install EPEL."""
@@ -2528,36 +2535,6 @@ class CentOs7Mixin(BaseRhelMixin):
     # yum exits 1 if the program is installed so check first
     self.RemoteCommand(
         'rpm -q epel-release || sudo yum install -y epel-release'
-    )
-
-
-class CentOs8Mixin(BaseRhelMixin, virtual_machine.DeprecatedOsMixin):
-  """Class holding CentOS 8 specific VM methods and attributes."""
-
-  OS_TYPE = os_types.CENTOS8
-  END_OF_LIFE = '2021-12-31'
-  ALTERNATIVE_OS = f'{os_types.ROCKY_LINUX8} or {os_types.CENTOS_STREAM8}'
-
-  def SetupPackageManager(self):
-    """Install EPEL."""
-    # https://docs.fedoraproject.org/en-US/epel/#almalinux_8_rocky_linux_8
-    self.RemoteCommand(
-        'sudo dnf config-manager --set-enabled powertools && '
-        'sudo dnf install -y epel-release'
-    )
-
-
-class CentOsStream8Mixin(BaseRhelMixin):
-  """Class holding CentOS Stream 8 specific VM methods and attributes."""
-
-  OS_TYPE = os_types.CENTOS_STREAM8
-
-  def SetupPackageManager(self):
-    """Install EPEL."""
-    # https://docs.fedoraproject.org/en-US/epel/#_centos_stream_8
-    self.RemoteCommand(
-        'sudo dnf config-manager --set-enabled powertools && '
-        'sudo dnf install -y epel-release epel-next-release'
     )
 
 

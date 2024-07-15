@@ -24,7 +24,6 @@ All VM specifics are self-contained and the class provides methods to
 operate on the VM: boot, shutdown, etc.
 """
 
-
 import collections
 import copy
 import datetime
@@ -42,6 +41,7 @@ from perfkitbenchmarker import boot_disk
 from perfkitbenchmarker import custom_virtual_machine_spec
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import flag_util
+from perfkitbenchmarker import flags as pkb_flags
 from perfkitbenchmarker import linux_virtual_machine as linux_vm
 from perfkitbenchmarker import os_types
 from perfkitbenchmarker import placement_group
@@ -58,6 +58,7 @@ from perfkitbenchmarker.providers.gcp import gcs
 from perfkitbenchmarker.providers.gcp import util
 import six
 import yaml
+
 
 FLAGS = flags.FLAGS
 
@@ -142,6 +143,8 @@ _FIXED_GPU_MACHINE_TYPES = {
     'g2-standard-96': (virtual_machine.GPU_L4, 8),
 }
 
+PKB_SKIPPED_TEARDOWN_METADATA_KEY = 'pkb_skipped_teardown'
+
 
 class GceRetryDescribeOperationsError(Exception):
   """Exception for retrying Exists().
@@ -190,6 +193,7 @@ class GceVmSpec(virtual_machine.BaseVmSpec):
     self.node_type: str = None
     self.min_cpu_platform: str = None
     self.threads_per_core: int = None
+    self.visible_core_count: int = None
     self.gce_tags: List[str] = None
     self.min_node_cpus: int = None
     self.subnet_name: str = None
@@ -270,6 +274,8 @@ class GceVmSpec(virtual_machine.BaseVmSpec):
         config_values.pop('min_cpu_platform', None)
     if flag_values['disable_smt'].present and flag_values.disable_smt:
       config_values['threads_per_core'] = 1
+    if flag_values['visible_core_count'].present:
+      config_values['visible_core_count'] = flag_values.visible_core_count
     # Convert YAML to correct type even if only one element.
     if 'gce_tags' in config_values and isinstance(
         config_values['gce_tags'], str
@@ -324,6 +330,9 @@ class GceVmSpec(virtual_machine.BaseVmSpec):
             {'default': None},
         ),
         'threads_per_core': (option_decoders.IntDecoder, {'default': None}),
+        'visible_core_count': (option_decoders.IntDecoder, {
+            'default': None
+        }),
         'gce_tags': (
             option_decoders.ListDecoder,
             {
@@ -553,6 +562,7 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     self.num_vms_per_host = vm_spec.num_vms_per_host
     self.min_cpu_platform = vm_spec.min_cpu_platform
     self.threads_per_core = vm_spec.threads_per_core
+    self.visible_core_count = vm_spec.visible_core_count
     self.gce_remote_access_firewall_rule = FLAGS.gce_remote_access_firewall_rule
     self.gce_accelerator_type_override = FLAGS.gce_accelerator_type_override
     self.gce_tags = vm_spec.gce_tags
@@ -704,6 +714,10 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     if self.threads_per_core:
       cmd.flags['threads-per-core'] = self.threads_per_core
       self.metadata['threads_per_core'] = self.threads_per_core
+
+    if self.visible_core_count:
+      cmd.flags['visible-core-count'] = self.visible_core_count
+      self.metadata['visible_core_count'] = self.visible_core_count
 
     if self.gpu_count and (
         self.cpus
@@ -1207,6 +1221,8 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
     result['gce_network_tier'] = self.gce_network_tier
     result['gce_nic_type'] = self.gce_nic_type
     result['gce_shielded_secure_boot'] = self.gce_shielded_secure_boot
+    if self.visible_core_count:
+      result['visible_core_count'] = self.visible_core_count
     if self.network.mtu:
       result['mtu'] = self.network.mtu
     if gcp_flags.GCE_CONFIDENTIAL_COMPUTE.value:
@@ -1483,6 +1499,43 @@ class GceVirtualMachine(virtual_machine.BaseVirtualMachine):
   def GetDefaultImageProject(self) -> Optional[str]:
     return None
 
+  def GetNumTeardownSkippedVms(self) -> int:
+    """Returns the number of lingering VMs in this VM's project and zone."""
+    # compute instances list doesn't accept a --zone flag, so we need to drop
+    # the zone from the VM object and pass in --zones instead.
+    vm_without_zone = copy.copy(self)
+    vm_without_zone.zone = None
+    args = ['compute', 'instances', 'list']
+    cmd = util.GcloudCommand(vm_without_zone, *args)
+    cmd.flags['format'] = 'json'
+    cmd.flags['zones'] = self.zone
+    stdout, _, _ = cmd.Issue()
+    all_vms = json.loads(stdout)
+    num_teardown_skipped_vms = 0
+    for vm_json in all_vms:
+      for item in vm_json['metadata']['items']:
+        if (
+            item['key'] == PKB_SKIPPED_TEARDOWN_METADATA_KEY
+            and item['value'] == 'true'
+        ):
+          num_teardown_skipped_vms += 1
+          continue
+    return num_teardown_skipped_vms
+
+  def UpdateTimeoutMetadata(self):
+    """Updates the timeout metadata for the VM."""
+    new_timeout = datetime.datetime.now(datetime.UTC) + datetime.timedelta(
+        minutes=pkb_flags.SKIP_TEARDOWN_KEEP_UP_MINUTES.value
+    )
+    new_timeout = new_timeout.strftime(resource.METADATA_TIME_FORMAT)
+    args = ['compute', 'instances', 'add-metadata', self.name]
+    cmd = util.GcloudCommand(self, *args)
+    cmd.flags['metadata'] = (
+        f'{resource.TIMEOUT_METADATA_KEY}={new_timeout},'
+        f'{PKB_SKIPPED_TEARDOWN_METADATA_KEY}=true'
+    )
+    cmd.Issue()
+
 
 class BaseLinuxGceVirtualMachine(GceVirtualMachine, linux_vm.BaseLinuxMixin):
   """Class supporting Linux GCE virtual machines.
@@ -1656,13 +1709,6 @@ class CentOs7BasedGceVirtualMachine(
     BaseLinuxGceVirtualMachine, linux_vm.CentOs7Mixin
 ):
   DEFAULT_X86_IMAGE_FAMILY = 'centos-7'
-  DEFAULT_IMAGE_PROJECT = 'centos-cloud'
-
-
-class CentOsStream8BasedGceVirtualMachine(
-    BaseLinuxGceVirtualMachine, linux_vm.CentOsStream8Mixin
-):
-  DEFAULT_X86_IMAGE_FAMILY = 'centos-stream-8'
   DEFAULT_IMAGE_PROJECT = 'centos-cloud'
 
 
