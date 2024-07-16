@@ -1,0 +1,212 @@
+static_vms:
+  - &vm1
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/aws-ssh-2
+    ip_address: 44.201.116.146
+    zone: us-east-1a
+    internal_ip: 10.0.10.2
+    disk_specs:
+      - mount_point: /home/ubuntu/newmount
+      - name: nvme1n1
+  - &vm2
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/azure-ssh.pem
+    ip_address: 172.178.105.227
+    zone: eastus
+    internal_ip: 10.0.0.12
+    disk_specs:
+      - mount_point: /home/ubuntu/newmount
+      - name: sda
+  - &vm3
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/gcp-ssh
+    ip_address: 34.85.191.35
+    zone: us-east4-c
+    internal_ip: 10.150.0.23
+    disk_specs:
+      - mount_point: /home/ubuntu/newmount
+      - name: sdb
+  - &vm4
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/oci-ssh.key
+    ip_address: 132.226.42.128
+    zone: eastus
+    internal_ip: 10.0.0.102
+    disk_specs:
+      - mount_point: /home/ubuntu/newmount
+      - name: sdb
+  - &vm5
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/aws-ssh-2
+    ip_address: 52.90.111.196
+    zone: us-east-1a
+    internal_ip: 10.0.3.164
+    disk_specs:
+      - mount_point: /home/ubuntu/newmount
+      - name: nvme1n1
+  - &vm6
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/azure-ssh.pem
+    ip_address: 172.171.244.102
+    zone: eastus
+    internal_ip: 10.0.0.14
+    disk_specs:
+      - mount_point: /home/ubuntu/newmount/
+      - name: sda
+  - &vm7
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/gcp-ssh
+    ip_address: 34.145.193.27
+    zone: us-east4-c
+    internal_ip: 10.150.0.24
+    disk_specs:
+      - mount_point: /home/ubuntu/newmount
+      - name: sdb
+  - &vm8
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/oci-ssh.key
+    ip_address: 129.158.222.157
+    zone: eastus
+    internal_ip: 10.0.0.200
+    disk_specs:
+      - mount_point: /home/ubuntu/newmount
+      - name: sdb
+storage_tests:
+  # aws-GP
+  - block_storage_workload: &bsw_gp_1
+      vm_groups:
+        default:
+          static_vms:
+            - *vm5
+  # azure-GP
+  - block_storage_workload: &bsw_gp_2
+      vm_groups:
+        default:
+          static_vms:
+            - *vm6
+  # gcp-GP
+  - block_storage_workload: &bsw_gp_3
+      vm_groups:
+        default:
+          static_vms:
+            - *vm7
+  # oci-GP
+  - block_storage_workload: &bsw_gp_4
+      vm_groups:
+        default:
+          static_vms:
+            - *vm8
+  # aws-HP
+  - block_storage_workload: &bsw_p_1
+      vm_groups:
+        default:
+          static_vms:
+            - *vm1
+  # azure-HP
+  - block_storage_workload: &bsw_p_2
+      vm_groups:
+        default:
+          static_vms:
+            - *vm2
+  # gcp-HP
+  - block_storage_workload: &bsw_p_3
+      vm_groups:
+        default:
+          static_vms:
+            - *vm3
+  # oci-HP
+  - block_storage_workload: &bsw_p_4
+      vm_groups:
+        default:
+          static_vms:
+            - *vm4
+benchmarks:
+  - block_storage_workload: *bsw_p_4
+  - block_storage_workload: *bsw_p_4
+  - block_storage_workload: *bsw_p_3
+  - block_storage_workload: *bsw_p_2
+  - block_storage_workload: *bsw_p_1
+
+
+
+
+static_vms:
+  - &vm1
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/oci-ssh.key
+    ip_address: 141.148.43.194
+    zone: AD-1
+    internal_ip: 10.0.0.77
+  - &vm2
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/azure-ssh.pem
+    ip_address: 20.109.3.98
+    zone: eastus2
+    internal_ip: 10.1.0.5
+  - &vm3
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/gcp-ssh
+    ip_address: 34.150.213.214
+    zone: us-east1-b
+    internal_ip: 10.150.0.19
+  - &vm4
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/azure-ssh.pem
+    ip_address: 20.115.91.10
+    zone: eastus
+    internal_ip: 10.0.0.7
+  - &vm5
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/gcp-ssh
+    ip_address: 35.245.164.135
+    zone: us-east4-c
+    internal_ip: 10.150.0.11
+  - &vm6
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/azure-ssh.pem
+    ip_address: 20.232.169.146
+    zone: eastus
+    internal_ip: 10.0.0.8
+  - &vm7
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/gcp-ssh
+    ip_address: 104.155.105.220
+    zone: europe-west1-b
+    internal_ip: 10.132.0.2
+  - &vm8
+    user_name: ubuntu
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/aws-ssh-2
+    ip_address: 3.228.65.53
+    zone: us-east-1b
+    internal_ip: 10.0.1.42
+  - &vm9
+    user_name: azureuser
+    ssh_private_key: /home/jetryan4/GitRepos/PerfKitBenchmarker/config_files/.ssh/azure-ssh.pem
+    ip_address: 20.124.83.251
+    zone: eastus
+    internal_ip: 10.0.0.11
+cuda_memcpy: &c1
+  vm_groups:
+    default:
+      static_vms:
+        - *vm7
+gpu_pcie_bandwidth: &pcie1
+  vm_groups:
+    default:
+      static_vms:
+        - *vm3
+mlperf_inference: &mlperf_inference1
+  vm_groups:
+    default:
+      static_vms:
+        - *vm1
+inception3: &inception
+  vm_groups:
+    default:
+      static_vms:
+        - *vm6
+tensorflow: &tf
+  vm_groups:
+    default:
+      static_vms:
+        - *vm6

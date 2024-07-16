@@ -36,9 +36,9 @@ static_vms:
   - &gpu_azure
     user_name: azureuser
     ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
-    ip_address: 172.174.176.73
+    ip_address: 20.42.86.42
     zone: eastus
-    internal_ip: 10.0.0.29
+    internal_ip: 10.0.0.33
 
   - &no_gpu_oci
     user_name: ubuntu
@@ -49,12 +49,37 @@ static_vms:
     disk_specs:
         - mount_point: /home/ubuntu/mnt
 
-  - &gpu_oci
+  - &coremark_oci
     user_name: ubuntu
     ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
-    ip_address: 158.101.113.17
+    ip_address: 150.136.160.59
     zone: AD-1
-    internal_ip: 10.0.0.164
+    internal_ip: 10.0.0.118
+
+  - &fio_oci
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 141.148.85.186
+    zone: AD-1
+    internal_ip: 10.0.0.60
+    disk_specs:
+        - mount_point: /home/ubuntu/mnt
+
+  - &coremark_gcp
+    user_name: jad_beidas
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 130.211.237.108
+    zone: us-central1-f
+    internal_ip: 10.128.0.19
+
+  - &fio_gcp
+    user_name: jad_beidas
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 34.42.176.227 
+    zone: us-central1-b
+    internal_ip: 10.128.0.16
+    disk_specs:
+        - mount_point: /home/jad_beidas/scratch
 
 gpu_pcie_bandwidth: &gpu_pcie_bandwidth
   vm_groups:
@@ -76,17 +101,19 @@ fio: &fio
   
 iperf: &iperf
   vm_groups:
-    vm_1:
-      cloud: OCI
+    vm1:
+      static_vms:
+        - *coremark_gcp
       vm_spec:
-        OCI:
-          machine_type: VM.Standard.E2.1
-          zone: AD-1
-          image: ocid1.image.oc1.iad.aaaaaaaaa2zpbwjlinn63w36ytwvns4tke2g2b5zexfpfpwwx3zoczl3q5wq
-    vm_2:
-      cloud: OCI
+        GCP:
+          machine_type: n1-standard-1
+          image: ubuntu-14-04
+          zone: us-central1-c
+    vm2:
+      static_vms:
+        - *fio_gcp
       vm_spec:
-        OCI:
-          machine_type: VM.Standard.E2.1
-          zone: AD-1
-          image: ocid1.image.oc1.iad.aaaaaaaaa2zpbwjlinn63w36ytwvns4tke2g2b5zexfpfpwwx3zoczl3q5wq
+        GCP:
+          machine_type: n1-standard-1
+          image: ubuntu-14-04
+          zone: us-central1-c

@@ -1,0 +1,197 @@
+2024-07-16 12:08:09,504 b7b3ab1e MainThread pkb.py:1316 INFO     PerfKitBenchmarker version: 32142ceb
+2024-07-16 12:08:09,505 b7b3ab1e MainThread pkb.py:1289 INFO     Flag values:
+--ip_addresses=EXTERNAL
+--benchmark_config_file=intern_testing_config.yaml
+2024-07-16 12:08:09,789 b7b3ab1e MainThread vm_util.py:244 INFO     Running: ssh-keygen -t rsa -N  -m PEM -q -f /tmp/perfkitbenchmarker/runs/b7b3ab1e/perfkitbenchmarker_keyfile
+2024-07-16 12:08:10,245 b7b3ab1e MainThread vm_util.py:244 INFO     Ran: {ssh-keygen -t rsa -N  -m PEM -q -f /tmp/perfkitbenchmarker/runs/b7b3ab1e/perfkitbenchmarker_keyfile}
+ReturnCode:0
+STDOUT: 
+STDERR: 
+2024-07-16 12:08:10,246 b7b3ab1e MainThread pkb.py:1360 INFO     Setting --max_concurrent_threads=200.
+2024-07-16 12:08:10,273 b7b3ab1e MainThread __init__.py:278 WARNING  The key "vm1" was not in the default config, but was in user overrides. This may indicate a typo.
+2024-07-16 12:08:10,273 b7b3ab1e MainThread __init__.py:278 WARNING  The key "vm2" was not in the default config, but was in user overrides. This may indicate a typo.
+2024-07-16 12:08:10,289 b7b3ab1e MainThread publisher.py:1079 DEBUG    Using publishers: [<NewlineDelimitedJSONPublisher file_path="/tmp/perfkitbenchmarker/runs/b7b3ab1e/perfkitbenchmarker_results.json" mode="w">, <LogPublisher logger=<RootLogger root (DEBUG)> level=20>, <PrettyPrintStreamPublisher stream=<_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>>]
+2024-07-16 12:08:10,289 b7b3ab1e MainThread pkb.py:1110 INFO     
+-------------------------------------------------------------------------------------
+Starting benchmark 1/1 iperf (UID: iperf0) attempt 1 of 1
+-------------------------------------------------------------------------------------
+2024-07-16 12:08:10,289 b7b3ab1e MainThread publisher.py:1079 DEBUG    Using publishers: [<NewlineDelimitedJSONPublisher file_path="/tmp/perfkitbenchmarker/runs/b7b3ab1e/perfkitbenchmarker_results.json" mode="w">, <LogPublisher logger=<RootLogger root (DEBUG)> level=20>, <PrettyPrintStreamPublisher stream=<_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>>]
+2024-07-16 12:08:10,290 b7b3ab1e MainThread iperf(1/1) pkb.py:451 INFO     Provisioning resources for benchmark iperf
+2024-07-16 12:08:10,290 b7b3ab1e MainThread iperf(1/1) static_virtual_machine.py:359 WARNING  Could not find os type for VM. Defaulting to ubuntu2004.
+2024-07-16 12:08:10,290 b7b3ab1e MainThread iperf(1/1) static_virtual_machine.py:359 WARNING  Could not find os type for VM. Defaulting to ubuntu2004.
+2024-07-16 12:08:10,291 b7b3ab1e MainThread iperf(1/1) util.py:71 INFO     Running: gcloud config list --format=json
+2024-07-16 12:08:11,190 b7b3ab1e MainThread iperf(1/1) util.py:71 INFO     Ran: {gcloud config list --format=json}
+ReturnCode:0
+STDOUT: {
+  "core": {
+    "account": "jad.beidas@ampsight.io",
+    "disable_usage_reporting": "True",
+    "project": "perfkitbenchmark-test-project"
+  }
+}
+
+STDERR: 
+2024-07-16 12:08:11,192 b7b3ab1e MainThread iperf(1/1) pkb.py:945 ERROR    Error during benchmark iperf
+Traceback (most recent call last):
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/pkb.py", line 857, in RunBenchmark
+    DoProvisionPhase(spec, detailed_timer)
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/pkb.py", line 480, in DoProvisionPhase
+    events.benchmark_start.send(benchmark_spec=spec)
+  File "/home/jad_beidas/my_virtualenv/lib/python3.11/site-packages/blinker/base.py", line 279, in send
+    result = receiver(sender, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/container_service.py", line 370, in _SetKubeConfig
+    benchmark_spec.config.flags['kubeconfig'] = FLAGS.kubeconfig
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+TypeError: 'NoneType' object does not support item assignment
+2024-07-16 12:08:11,208 b7b3ab1e MainThread iperf(1/1) background_tasks.py:563 ERROR    Exception occurred while calling DeleteVm(130.211.237.108):
+Traceback (most recent call last):
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/background_tasks.py", line 256, in Run
+    self.return_value = self.target(*self.args, **self.kwargs)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/benchmark_spec.py", line 1023, in DeleteVm
+    vm.PackageCleanup()
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1209, in PackageCleanup
+    self.RestorePackages()
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 2652, in RestorePackages
+    self.RemoteCommand('sudo dpkg --clear-selections')
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1377, in RemoteCommand
+    return self.RemoteCommandWithReturnCode(*args, **kwargs)[:2]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1396, in RemoteCommandWithReturnCode
+    return self.RemoteHostCommandWithReturnCode(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1443, in RemoteHostCommandWithReturnCode
+    ip_address = self.GetConnectionIp()
+                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/virtual_machine.py", line 1333, in GetConnectionIp
+    raise errors.VirtualMachine.VirtualMachineError(
+perfkitbenchmarker.errors.VirtualMachine.VirtualMachineError: VM was not properly created, but PKB is attempting to connect to it anyways. Caller should guard against VM not being created.
+
+2024-07-16 12:08:11,208 b7b3ab1e MainThread iperf(1/1) background_tasks.py:563 ERROR    Exception occurred while calling DeleteVm(34.42.176.227):
+Traceback (most recent call last):
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/background_tasks.py", line 256, in Run
+    self.return_value = self.target(*self.args, **self.kwargs)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/benchmark_spec.py", line 1023, in DeleteVm
+    vm.PackageCleanup()
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1209, in PackageCleanup
+    self.RestorePackages()
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 2652, in RestorePackages
+    self.RemoteCommand('sudo dpkg --clear-selections')
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1377, in RemoteCommand
+    return self.RemoteCommandWithReturnCode(*args, **kwargs)[:2]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1396, in RemoteCommandWithReturnCode
+    return self.RemoteHostCommandWithReturnCode(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1443, in RemoteHostCommandWithReturnCode
+    ip_address = self.GetConnectionIp()
+                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/virtual_machine.py", line 1333, in GetConnectionIp
+    raise errors.VirtualMachine.VirtualMachineError(
+perfkitbenchmarker.errors.VirtualMachine.VirtualMachineError: VM was not properly created, but PKB is attempting to connect to it anyways. Caller should guard against VM not being created.
+
+2024-07-16 12:08:11,210 b7b3ab1e MainThread iperf(1/1) benchmark_spec.py:874 ERROR    Got an exception deleting VMs. Attempting to continue tearing down.
+Traceback (most recent call last):
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/pkb.py", line 857, in RunBenchmark
+    DoProvisionPhase(spec, detailed_timer)
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/pkb.py", line 480, in DoProvisionPhase
+    events.benchmark_start.send(benchmark_spec=spec)
+  File "/home/jad_beidas/my_virtualenv/lib/python3.11/site-packages/blinker/base.py", line 279, in send
+    result = receiver(sender, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/container_service.py", line 370, in _SetKubeConfig
+    benchmark_spec.config.flags['kubeconfig'] = FLAGS.kubeconfig
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+TypeError: 'NoneType' object does not support item assignment
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/benchmark_spec.py", line 872, in Delete
+    background_tasks.RunThreaded(self.DeleteVm, self.vms)
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/background_tasks.py", line 676, in RunThreaded
+    return RunParallelThreads(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/background_tasks.py", line 605, in RunParallelThreads
+    return _RunParallelTasks(
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/background_tasks.py", line 579, in _RunParallelTasks
+    raise parallel_exception_class(
+perfkitbenchmarker.errors.VmUtil.ThreadException: The following exceptions occurred during parallel execution:
+Exception occurred while calling DeleteVm(130.211.237.108):
+Traceback (most recent call last):
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/background_tasks.py", line 256, in Run
+    self.return_value = self.target(*self.args, **self.kwargs)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/benchmark_spec.py", line 1023, in DeleteVm
+    vm.PackageCleanup()
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1209, in PackageCleanup
+    self.RestorePackages()
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 2652, in RestorePackages
+    self.RemoteCommand('sudo dpkg --clear-selections')
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1377, in RemoteCommand
+    return self.RemoteCommandWithReturnCode(*args, **kwargs)[:2]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1396, in RemoteCommandWithReturnCode
+    return self.RemoteHostCommandWithReturnCode(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1443, in RemoteHostCommandWithReturnCode
+    ip_address = self.GetConnectionIp()
+                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/virtual_machine.py", line 1333, in GetConnectionIp
+    raise errors.VirtualMachine.VirtualMachineError(
+perfkitbenchmarker.errors.VirtualMachine.VirtualMachineError: VM was not properly created, but PKB is attempting to connect to it anyways. Caller should guard against VM not being created.
+
+Exception occurred while calling DeleteVm(34.42.176.227):
+Traceback (most recent call last):
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/background_tasks.py", line 256, in Run
+    self.return_value = self.target(*self.args, **self.kwargs)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/benchmark_spec.py", line 1023, in DeleteVm
+    vm.PackageCleanup()
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1209, in PackageCleanup
+    self.RestorePackages()
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 2652, in RestorePackages
+    self.RemoteCommand('sudo dpkg --clear-selections')
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1377, in RemoteCommand
+    return self.RemoteCommandWithReturnCode(*args, **kwargs)[:2]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1396, in RemoteCommandWithReturnCode
+    return self.RemoteHostCommandWithReturnCode(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/linux_virtual_machine.py", line 1443, in RemoteHostCommandWithReturnCode
+    ip_address = self.GetConnectionIp()
+                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/virtual_machine.py", line 1333, in GetConnectionIp
+    raise errors.VirtualMachine.VirtualMachineError(
+perfkitbenchmarker.errors.VirtualMachine.VirtualMachineError: VM was not properly created, but PKB is attempting to connect to it anyways. Caller should guard against VM not being created.
+
+2024-07-16 12:08:11,212 b7b3ab1e MainThread iperf(1/1) pkb.py:1123 ERROR    Exception running benchmark
+Traceback (most recent call last):
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/pkb.py", line 1121, in RunBenchmarkTask
+    RunBenchmark(spec_for_run, collector)
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/pkb.py", line 857, in RunBenchmark
+    DoProvisionPhase(spec, detailed_timer)
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/pkb.py", line 480, in DoProvisionPhase
+    events.benchmark_start.send(benchmark_spec=spec)
+  File "/home/jad_beidas/my_virtualenv/lib/python3.11/site-packages/blinker/base.py", line 279, in send
+    result = receiver(sender, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jad_beidas/PKB_Editing/PerfKitBenchmarker/perfkitbenchmarker/container_service.py", line 370, in _SetKubeConfig
+    benchmark_spec.config.flags['kubeconfig'] = FLAGS.kubeconfig
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+TypeError: 'NoneType' object does not support item assignment
+2024-07-16 12:08:11,214 b7b3ab1e MainThread iperf(1/1) pkb.py:1129 ERROR    Benchmark 1/1 iperf (UID: iperf0) failed. Execution will continue.
+2024-07-16 12:08:11,214 b7b3ab1e MainThread iperf(1/1) pkb.py:1143 INFO     Benchmark should not be retried. Finished 1 runs of 1
+2024-07-16 12:08:11,215 b7b3ab1e MainThread iperf(1/1) pkb.py:1414 INFO     Benchmark run statuses:
+---------------------------------------
+Name   UID     Status  Failed Substatus
+---------------------------------------
+iperf  iperf0  FAILED  UNCATEGORIZED   
+---------------------------------------
+Success rate: 0.00% (0/1)
+2024-07-16 12:08:11,215 b7b3ab1e MainThread iperf(1/1) pkb.py:1416 INFO     Complete logs can be found at: /tmp/perfkitbenchmarker/runs/b7b3ab1e/pkb.log
+2024-07-16 12:08:11,215 b7b3ab1e MainThread iperf(1/1) pkb.py:1417 INFO     Completion statuses can be found at: /tmp/perfkitbenchmarker/runs/b7b3ab1e/completion_statuses.json
+2024-07-16 12:08:11,215 b7b3ab1e MainThread iperf(1/1) pkb.py:1451 INFO     PKB exiting with return_code 1
