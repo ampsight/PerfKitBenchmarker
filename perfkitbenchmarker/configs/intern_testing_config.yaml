@@ -36,9 +36,9 @@ static_vms:
   - &gpu_azure
     user_name: azureuser
     ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
-    ip_address: 48.217.83.158
+    ip_address: 172.174.176.73
     zone: eastus
-    internal_ip: 10.0.0.19
+    internal_ip: 10.0.0.29
 
   - &no_gpu_oci
     user_name: ubuntu
@@ -60,7 +60,7 @@ gpu_pcie_bandwidth: &gpu_pcie_bandwidth
   vm_groups:
     default:
       static_vms:
-        - *gpu_gcp
+        - *gpu_azure
 
 coremark: &coremark
   vm_groups:

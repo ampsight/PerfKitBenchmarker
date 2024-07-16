@@ -2632,8 +2632,7 @@ class BaseDebianMixin(BaseLinuxMixin):
       # setting the timeout on the apt-get to 10 minutes because
       # it is known to get stuck.  In a normal update this
       # takes less than 30 seconds, but far flung regions can be slower.
-      ############ self.RemoteCommand('sudo apt-get update', timeout=600)
-      pass
+      self.RemoteCommand('sudo apt-get update', timeout=600)
     except errors.VirtualMachine.RemoteCommandError as e:
       # If there is a problem, remove the lists in order to get rid of
       # "Hash Sum mismatch" errors (the files will be restored when
@@ -2682,12 +2681,11 @@ class BaseDebianMixin(BaseLinuxMixin):
       self.AptUpdate()
       self._apt_updated = True
     try:
-      pass
-      #install_command = (
-        #  "sudo DEBIAN_FRONTEND='noninteractive' /usr/bin/apt-get -y install %s"
-       #   % (packages)
-      #)
-      #self.RemoteCommand(install_command)
+      install_command = (
+          "sudo DEBIAN_FRONTEND='noninteractive' /usr/bin/apt-get -y install %s"
+          % (packages)
+      )
+      self.RemoteCommand(install_command)
     except errors.VirtualMachine.RemoteCommandError as e:
       # TODO(user): Remove code below after Azure fix their package repository,
       # or add code to recover the sources.list

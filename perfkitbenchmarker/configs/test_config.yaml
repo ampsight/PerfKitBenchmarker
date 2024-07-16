@@ -1,0 +1,155 @@
+static_vms:
+  - &coremark_aws
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/jad_key.pem
+    ip_address: 3.84.31.200
+    zone: us-east-1a
+    internal_ip: 10.0.14.4
+
+  - &fio_aws
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/jad_key.pem
+    ip_address: 3.84.31.200
+    zone: us-east-1a
+    internal_ip: 10.0.15.21
+    disk_specs:
+        - mount_point: /home/ubuntu/scratch
+
+  - &gpu_aws
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/jad_key.pem
+    ip_address: 3.92.189.44
+    zone: us-east-1a
+    internal_ip: 10.0.14.4
+
+  - &coremark_gcp
+    user_name: jad_beidas
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 35.226.87.165
+    zone: us-central1-c
+    internal_ip: 10.128.0.9
+
+  - &fio_gcp
+    user_name: jad_beidas
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 34.42.176.227 
+    zone: us-central1-b
+    internal_ip: 10.128.0.16
+    disk_specs:
+        - mount_point: /home/jad_beidas/scratch
+
+  - &gpu_gcp
+    user_name: jad_beidas
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 34.42.0.50
+    zone: us-central1-f
+    internal_ip: 10.128.0.8
+
+  - &coremark_azure
+    user_name: azureuser
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 4.227.190.159
+    zone: eastus
+    internal_ip: 10.0.0.23
+
+  - &fio_azure
+    user_name: azureuser
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 20.55.52.93
+    zone: eastus
+    internal_ip: 10.0.0.30
+    disk_specs:
+        - mount_point: /mnt
+
+  - &gpu_azure
+    user_name: azureuser
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 172.174.176.73
+    zone: eastus
+    internal_ip: 10.0.0.29
+
+  - &coremark_oci
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 129.80.85.253
+    zone: AD-1
+    internal_ip: 10.0.0.112
+
+  - &fio_oci
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 141.148.85.186
+    zone: AD-1
+    internal_ip: 10.0.0.60
+    disk_specs:
+        - mount_point: /home/ubuntu/mnt
+
+  - &gpu_oci
+    user_name: ubuntu
+    ssh_private_key: /home/jad_beidas/.ssh/gpu_gcp_ssh
+    ip_address: 158.101.113.17
+    zone: AD-1
+    internal_ip: 10.0.0.164
+    
+
+
+gpu_pcie_bandwidth: 
+  vm_groups:
+    aws:
+      static_vms:
+        - *gpu_aws
+    gcp:
+      static_vms:
+        - *gpu_gcp
+    azure:
+      static_vms:
+        - *gpu_azure
+    oci:
+      static_vms:
+        - *gpu_oci
+
+coremark: 
+  vm_groups:
+    aws:
+      static_vms:
+        - *coremark_aws
+    gcp:
+      static_vms:
+        - *coremark_gcp
+    azure:
+      static_vms:
+        - *coremark_azure
+    oci:
+      static_vms:
+        - *coremark_oci
+
+storage_tests: 
+  # aws-fio
+  - fio: &fio_1
+      vm_groups:
+        default:
+          static_vms:
+            - *fio_aws
+  # azure-fio
+  - fio: &fio_2
+      vm_groups:
+        default:
+          static_vms:
+            - *fio_azure
+  # gcp-fio
+  - fio: &fio_3
+      vm_groups:
+        default:
+          static_vms:
+            - *fio_gcp
+  # oci-fio
+  - fio: &fio_4
+      vm_groups:
+        default:
+          static_vms:
+            - *fio_oci
+
+
+benchmarks:
+  - fio: *fio_1
+  - fio: *fio_2

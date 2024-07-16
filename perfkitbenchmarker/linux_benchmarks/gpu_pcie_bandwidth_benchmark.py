@@ -117,8 +117,9 @@ def Prepare(benchmark_spec):
     benchmark_spec: The benchmark specification. Contains all data that is
       required to run the benchmark.
   """
-  vm = benchmark_spec.vms[0]
-  vm.Install('cuda_toolkit')
+  #vm = benchmark_spec.vms[0]
+  #vm.Install('cuda_toolkit')
+  pass
 
 
 def _ParseDeviceInfo(test_output):
@@ -323,5 +324,6 @@ def Cleanup(benchmark_spec):
     benchmark_spec: The benchmark specification. Contains all data that is
       required to run the benchmark.
   """
-  vm = benchmark_spec.vms[0]
-  vm.Uninstall('cuda_toolkit')
+  #vm = benchmark_spec.vms[0]
+  #vm.Uninstall('cuda_toolkit')
+  pass
