@@ -8,28 +8,27 @@ COPY requirements.txt /pkb
 
 RUN pip install -r requirements.txt
 
-RUN apt-get install -y vim
+# Update package lists and install vim
+RUN apt-get update && apt-get install -y vim
 
+# Create the directory for the downloaded packages and set permissions
+RUN mkdir -p /mypackages && chmod 777 /mypackages
+
+# Copy necessary files
 COPY . /pkb
 
+# Install Python dependencies
 RUN pip install -r requirements-testing.txt
-
-#CMD python -m unittest discover -s tests -p '*test.py' -v
-
 RUN pip install -r perfkitbenchmarker/providers/aws/requirements.txt
-
 RUN pip install -r perfkitbenchmarker/providers/ibmcloud/requirements.txt
 
-# Update package lists and download the make and gcc packages to /tmp
+# Download the make and gcc packages to /mypackages with correct permissions
 RUN apt-get update && \
-    apt-get download make -o=Dir::Cache=/tmp && \
-    apt-get download gcc -o=Dir::Cache=/tmp
+    apt-get download make -o=Dir::Cache::archives=/mypackages && \
+    apt-get download gcc -o=Dir::Cache::archives=/mypackages
 
-# Create the /mypackages directory and move the downloaded .deb files there
-RUN mkdir -p /mypackages && \
-    mv /tmp/var/cache/apt/archives/make_*.deb /pkb/build_packages && \
-    mv /tmp/var/cache/apt/archives/gcc_*.deb /pkb/build_packages
+# Verify the contents of /mypackages
+RUN find /mypackages -type f
 
-# Install vim
-
+# Keep the container running (if needed for testing)
 CMD tail -f /dev/null
