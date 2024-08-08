@@ -18,14 +18,13 @@ import functools
 import json
 import logging
 import re
-from typing import Any, Optional, Set
+from typing import Any, Set
 from absl import flags
 from perfkitbenchmarker import context
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
-import six
 
 FLAGS = flags.FLAGS
 
@@ -80,6 +79,24 @@ def GetDefaultUser():
   stdout, _, _ = vm_util.IssueCommand(cmd)
   result = json.loads(stdout)
   return result['core']['account']
+
+
+def GetProjectNumber(project_id: str | None = None) -> str:
+  """Get the number of the default project."""
+  # All GCP projects have both a project number & a project id. The project id
+  # is the human-readable name of the project.
+  if not project_id:
+    project_id = GetDefaultProject()
+  cmd = [
+      FLAGS.gcloud_path,
+      'projects',
+      'list',
+      f'--filter=name:{project_id}',
+      '--format=json',
+  ]
+  stdout, _, _ = vm_util.IssueCommand(cmd)
+  result = json.loads(stdout)
+  return result[0]['projectNumber']
 
 
 def GetRegionFromZone(zone) -> str:
@@ -250,7 +267,7 @@ class GcloudCommand:
     use_beta_gcloud: boolean. Defaults to False.
   """
 
-  def __init__(self, common_resource: Optional[resource.BaseResource], *args):
+  def __init__(self, common_resource: resource.BaseResource | None, *args):
     """Initializes a GcloudCommand with the provided args and common flags.
 
     Args:
@@ -279,7 +296,7 @@ class GcloudCommand:
     cmd = [FLAGS.gcloud_path]
     cmd.extend(self.args)
     for flag_name, values in sorted(self.flags.items()):
-      flag_name_str = '--{0}'.format(flag_name)
+      flag_name_str = '--{}'.format(flag_name)
       if values is True:
         cmd.append(flag_name_str)
       elif values is None:
@@ -298,7 +315,7 @@ class GcloudCommand:
     return cmd
 
   def __repr__(self):
-    return '{0}({1})'.format(type(self).__name__, ' '.join(self.GetCommand()))
+    return '{}({})'.format(type(self).__name__, ' '.join(self.GetCommand()))
 
   @staticmethod
   def _IsIssueRateLimitMessage(text: str) -> bool:
@@ -377,7 +394,7 @@ class GcloudCommand:
     kwargs['stack_level'] = kwargs.get('stack_level', 1) + 1
     return _issue_retryable_command_function(self, **kwargs)
 
-  def _AddCommonFlags(self, common_resource: Optional[resource.BaseResource]):
+  def _AddCommonFlags(self, common_resource: resource.BaseResource | None):
     """Adds common flags to the command.
 
     Adds common gcloud flags derived from the PKB flags and provided resource.
@@ -517,7 +534,7 @@ def FormatTags(tags_dict: dict[str, str]):
     A string contains formatted tags
   """
   return ','.join(
-      '{0}={1}'.format(k, v) for k, v in sorted(six.iteritems(tags_dict))
+      '{}={}'.format(k, v) for k, v in sorted(tags_dict.items())
   )
 
 
@@ -535,7 +552,7 @@ def SplitTags(tags: str):
   )
 
 
-def GetDefaultTags(timeout_minutes: Optional[int] = None):
+def GetDefaultTags(timeout_minutes: int | None = None):
   """Get the default tags in a dictionary.
 
   Args:
@@ -550,7 +567,7 @@ def GetDefaultTags(timeout_minutes: Optional[int] = None):
   return benchmark_spec.GetResourceTags(timeout_minutes)
 
 
-def MakeFormattedDefaultTags(timeout_minutes: Optional[int] = None):
+def MakeFormattedDefaultTags(timeout_minutes: int | None = None):
   """Get the default tags formatted.
 
   Args:

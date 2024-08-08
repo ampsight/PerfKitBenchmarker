@@ -1,7 +1,7 @@
 """Tests for perfkitbenchmarker.dpb_service module."""
 
 import datetime
-from typing import Any, Optional
+from typing import Any
 import unittest
 from unittest import mock
 
@@ -26,6 +26,9 @@ CLUSTER_SPEC = mock.Mock(
 )
 TEST_RUN_URI = 'fakeru'
 FAKE_DATETIME_NOW = datetime.datetime(2010, 1, 1)
+JOB_RUN_TIME = 1
+JOB_STDOUT = 'stdout'
+JOB_STDERR = 'stderr'
 
 
 class MockDpbService(dpb_service.BaseDpbService):
@@ -33,19 +36,21 @@ class MockDpbService(dpb_service.BaseDpbService):
   def __init__(
       self,
       dpb_service_spec: Any,
-      cluster_create_time: Optional[float] = None,
-      cluster_duration: Optional[float] = None,
+      cluster_create_time: float | None = None,
+      cluster_duration: float | None = None,
   ):
     super().__init__(dpb_service_spec)
     self._cluster_create_time = cluster_create_time
     self.cluster_duration = cluster_duration
     self.metadata = {'foo': 42}
 
-  def GetClusterCreateTime(self) -> Optional[float]:
+  def GetClusterCreateTime(self) -> float | None:
     return self._cluster_create_time
 
   def SubmitJob(self, *args, **kwargs) -> dpb_service.JobResult:
-    return dpb_service.JobResult(run_time=1)
+    return dpb_service.JobResult(
+        run_time=JOB_RUN_TIME, stdout=JOB_STDOUT, stderr=JOB_STDERR
+    )
 
 
 class NoDynallocSupportingMockDpbService(MockDpbService):
@@ -405,6 +410,14 @@ class DpbServiceTest(pkb_common_test_case.PkbCommonTestCase):
   ):
     actual_samples = job_costs.GetSamples(**get_sample_kwargs)
     self.assertListEqual(actual_samples, expected_samples)
+
+  def testSubmitJob(self):
+    mock_dpb_service = MockDpbService(CLUSTER_SPEC)
+    mock_job = mock.Mock()
+    job_result = mock_dpb_service.SubmitJob(mock_job)
+    self.assertEqual(job_result.run_time, JOB_RUN_TIME)
+    self.assertEqual(job_result.stdout, JOB_STDOUT)
+    self.assertEqual(job_result.stderr, JOB_STDERR)
 
 
 if __name__ == '__main__':

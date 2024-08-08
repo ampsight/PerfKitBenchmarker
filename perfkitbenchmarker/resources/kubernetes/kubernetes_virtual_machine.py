@@ -98,7 +98,7 @@ class KubernetesVirtualMachine(virtual_machine.BaseVirtualMachine):
         if isinstance(self.CLOUD, str)
         else FLAGS.cloud
     )
-    self.sriov_network: Optional[str] = FLAGS.k8s_sriov_network or None
+    self.sriov_network: str | None = FLAGS.k8s_sriov_network or None
 
   def GetResourceMetadata(self):
     metadata = super().GetResourceMetadata()
@@ -405,13 +405,13 @@ class KubernetesVirtualMachine(virtual_machine.BaseVirtualMachine):
     if self.resource_requests:
       resources['requests'].update({
           'cpu': str(self.resource_requests.cpus),
-          'memory': '{0}Mi'.format(self.resource_requests.memory),
+          'memory': '{}Mi'.format(self.resource_requests.memory),
       })
 
     if self.resource_limits:
       resources['limits'].update({
           'cpu': str(self.resource_limits.cpus),
-          'memory': '{0}Mi'.format(self.resource_limits.memory),
+          'memory': '{}Mi'.format(self.resource_limits.memory),
       })
 
     if self.gpu_count:
@@ -431,11 +431,11 @@ class DebianBasedKubernetesVirtualMachine(
   def RemoteHostCommandWithReturnCode(
       self,
       command: str,
-      retries: Optional[int] = None,
+      retries: int | None = None,
       ignore_failure: bool = False,
       login_shell: bool = False,
-      timeout: Optional[float] = None,
-      ip_address: Optional[str] = None,
+      timeout: float | None = None,
+      ip_address: str | None = None,
       should_pre_log: bool = True,
       stack_level: int = 1,
   ):
@@ -529,7 +529,7 @@ class DebianBasedKubernetesVirtualMachine(
       file_path: str,
       remote_path: str = '',
       copy_to: bool = True,
-      retries: Optional[int] = None,
+      retries: int | None = None,
   ):
     """Copies a file to or from the VM.
 
@@ -601,7 +601,7 @@ class DebianBasedKubernetesVirtualMachine(
   def PrepareVMEnvironment(self):
     # Install sudo as most PrepareVMEnvironment assume it exists.
     self._InstallPrepareVmEnvironmentDependencies()
-    super(DebianBasedKubernetesVirtualMachine, self).PrepareVMEnvironment()
+    super().PrepareVMEnvironment()
     if k8s_flags.SETUP_SSH.value:
       # Don't rely on SSH being installed in Kubernetes containers,
       # so install it and restart the service so that it is ready to go.
@@ -617,15 +617,14 @@ class DebianBasedKubernetesVirtualMachine(
     # Ubuntu docker images are based on Minimal Ubuntu
     # https://wiki.ubuntu.com/Minimal
     # The VM images PKB uses are based on a full Ubuntu Server flavor and have a
-    # bunch of useful utilities
-    # Utilities packages install here so that we
-    # have similar base packages. This is essentially the same as running
-    # unminimize.
-    # ubuntu-minimal contains iputils-ping
-    # ubuntu-server contains curl, net-tools, software-properties-common
-    # ubuntu-standard contains wget
+    # bunch of useful utilities.
+    # There are ubuntu meta-packages that provide the same functionality, but
+    # they install additional packages that do not run well in a container
+    # (namely systemd). So we install the packages we need directly.
     # TODO(pclay): Revisit if Debian or RHEL images are added.
-    self.InstallPackages('ubuntu-minimal ubuntu-server ubuntu-standard')
+    self.InstallPackages(
+        'ubuntu-minimal curl net-tools software-properties-common wget'
+    )
 
   def DownloadPreprovisionedData(
       self,
@@ -667,7 +666,7 @@ class DebianBasedKubernetesVirtualMachine(
       )
     else:
       raise NotImplementedError(
-          'Cloud {0} does not support downloading preprovisioned '
+          'Cloud {} does not support downloading preprovisioned '
           'data on Kubernetes VMs.'.format(self.cloud)
       )
 
@@ -734,6 +733,12 @@ class DebianBasedKubernetesVirtualMachine(
 # sudo in the container startup script.
 
 
+class Ubuntu2004BasedKubernetesVirtualMachine(
+    DebianBasedKubernetesVirtualMachine, linux_virtual_machine.Ubuntu2004Mixin
+):
+  DEFAULT_IMAGE = 'ubuntu:20.04'
+
+
 class Ubuntu2204BasedKubernetesVirtualMachine(
     DebianBasedKubernetesVirtualMachine, linux_virtual_machine.Ubuntu2204Mixin
 ):
@@ -752,34 +757,8 @@ class Ubuntu2204BasedKubernetesVirtualMachine(
 
 
 class Ubuntu2404BasedKubernetesVirtualMachine(
+    linux_virtual_machine.Ubuntu2404Mixin,
     # Pick up fdisk fix.
     Ubuntu2204BasedKubernetesVirtualMachine,
-    linux_virtual_machine.Ubuntu2404Mixin,
 ):
   DEFAULT_IMAGE = 'ubuntu:24.04'
-
-
-class Ubuntu2004BasedKubernetesVirtualMachine(
-    DebianBasedKubernetesVirtualMachine, linux_virtual_machine.Ubuntu2004Mixin
-):
-  DEFAULT_IMAGE = 'ubuntu:20.04'
-
-
-class Ubuntu1804BasedKubernetesVirtualMachine(
-    DebianBasedKubernetesVirtualMachine, linux_virtual_machine.Ubuntu1804Mixin
-):
-  DEFAULT_IMAGE = 'ubuntu:18.04'
-
-
-class Ubuntu1604BasedKubernetesVirtualMachine(
-    DebianBasedKubernetesVirtualMachine, linux_virtual_machine.Ubuntu1604Mixin
-):
-  DEFAULT_IMAGE = 'ubuntu:16.04'
-
-
-class Ubuntu1604Cuda9BasedKubernetesVirtualMachine(
-    DebianBasedKubernetesVirtualMachine,
-    linux_virtual_machine.Ubuntu1604Cuda9Mixin,
-):
-  # Image is from https://hub.docker.com/r/nvidia/cuda/
-  DEFAULT_IMAGE = 'nvidia/cuda:9.0-devel-ubuntu16.04'

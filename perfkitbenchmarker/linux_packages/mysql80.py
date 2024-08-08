@@ -15,15 +15,65 @@
 
 """Module containing mysql installation and cleanup functions."""
 
+import logging
 import re
+
+from perfkitbenchmarker import data
+from perfkitbenchmarker import os_types
+from perfkitbenchmarker import virtual_machine
+
 
 MYSQL_PSWD = 'perfkitbenchmarker'
 PACKAGE_NAME = 'mysql'
 
+DISABLE_HUGE_PAGES = """
+[Unit]
+Description=Disable Transparent Huge Pages (THP)
+DefaultDependencies=no
+After=sysinit.target local-fs.target
+Before=mysqld.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo never | tee /sys/kernel/mm/transparent_hugepage/enabled > /dev/null'
+
+[Install]
+WantedBy=basic.target
+"""
+
+# OS dependent service defaults.
+MYSQL_SERVICE_NAME = 'MYSQL_SERVICE_NAME'
+MYSQL_CONFIG_PATH = 'MYSQL_CONFIG_PATH'
+MYSQL_LOG_PATH = 'MYSQL_LOG_PATH'
+OS_DEPENDENT_DEFAULTS = {
+    'debian': {
+        MYSQL_SERVICE_NAME: 'mysql',
+        MYSQL_CONFIG_PATH: '/etc/mysql/mysql.conf.d/mysqld.cnf',
+        MYSQL_LOG_PATH: '/var/log/mysql/error.log',
+    },
+    'centos': {
+        MYSQL_SERVICE_NAME: 'mysqld',
+        MYSQL_CONFIG_PATH: '/etc/my.cnf',
+        MYSQL_LOG_PATH: '/var/log/mysqld.log',
+    },
+}
+
 
 def YumInstall(vm):
   """Installs the mysql package on the VM."""
-  raise NotImplementedError
+  if vm.OS_TYPE not in os_types.AMAZONLINUX_TYPES:
+    vm.RemoteCommand('sudo dnf config-manager --set-enabled crb')
+    vm.RemoteCommand('sudo dnf install -y epel-release epel-next-release')
+  vm.RemoteCommand(
+      'sudo yum -y install '
+      'https://dev.mysql.com/get/mysql80-community-release-el9-5.noarch.rpm'
+  )
+  vm.RemoteCommand('sudo dnf config-manager --enable mysql80-community')
+  vm.RemoteCommand('sudo dnf config-manager --enable mysql-tools-community')
+  vm.RemoteCommand(
+      'sudo yum install -y mysql-community-server mysql-community-client luajit'
+      ' libaio screen mysql-community-libs'
+  )
 
 
 def AptInstall(vm):
@@ -94,3 +144,151 @@ def AptGetServiceName(vm):
   """Returns the name of the mysql service."""
   del vm
   return 'mysql'
+
+
+def ConfigureSystemSettings(vm: virtual_machine.VirtualMachine):
+  """Percona system settings.
+
+  These system settings are what Percona (consulting firm) applies to
+  the mysql instances that they build for their customers.
+  Currently tested for centos_stream9 and Ubuntu only.
+
+  Args:
+    vm: The VM to configure.
+  """
+  if vm.OS_TYPE not in os_types.LINUX_OS_TYPES:
+    logging.error(
+        'System settings not configured for unsupported OS: %s', vm.os_info)
+    return
+  sysctl_append = 'sudo tee -a /etc/sysctl.conf'
+  vm.RemoteCommand(f'echo "vm.swappiness=1" | {sysctl_append}')
+  vm.RemoteCommand(f'echo "vm.dirty_ratio=15" | {sysctl_append}')
+  vm.RemoteCommand(f'echo "vm.dirty_background_ratio=5" | {sysctl_append}')
+  vm.RemoteCommand(f'echo "net.core.somaxconn=65535" | {sysctl_append}')
+  vm.RemoteCommand(
+      f'echo "net.core.netdev_max_backlog=65535" | {sysctl_append}')
+  vm.RemoteCommand(
+      f'echo "net.ipv4.tcp_max_syn_backlog=65535" | {sysctl_append}')
+  vm.RemoteCommand(
+      f'echo "net.ipv4.ip_local_port_range=4000 65000" | {sysctl_append}')
+  vm.RemoteCommand(f'echo "net.ipv4.tcp_tw_reuse=1" | {sysctl_append}')
+  vm.RemoteCommand(f'echo "net.ipv4.tcp_fin_timeout=5" | {sysctl_append}')
+  vm.RemoteCommand('sudo sysctl -p')
+
+  limits_append = 'sudo tee -a /etc/security/limits.conf'
+  vm.RemoteCommand(f'echo "*     soft    nofile  64000" | {limits_append}')
+  vm.RemoteCommand(f'echo "*     hard    nofile  64000" | {limits_append}')
+
+  auth_append = 'sudo tee -a /etc/pam.d/login'
+  vm.RemoteCommand(f'echo "session required pam_limits.so" | {auth_append}')
+
+  thp_append = 'sudo tee -a /usr/lib/systemd/system/disable-thp.service'
+  vm.RemoteCommand('sudo touch /usr/lib/systemd/system/disable-thp.service')
+  vm.RemoteCommand(f'echo "{DISABLE_HUGE_PAGES}" | {thp_append}')
+  vm.RemoteCommand(
+      'sudo chown root:root /usr/lib/systemd/system/disable-thp.service')
+  vm.RemoteCommand(
+      'sudo chmod 0600 /usr/lib/systemd/system/disable-thp.service')
+  vm.RemoteCommand('sudo systemctl daemon-reload')
+  vm.RemoteCommand('sudo systemctl enable disable-thp.service')
+  vm.RemoteCommand('sudo systemctl start disable-thp.service')
+
+  vm.Reboot()
+
+
+def GetOSDependentDefaults(os_type: str) -> dict[str, str]:
+  """Returns the OS family."""
+  if os_type in os_types.CENTOS_TYPES or os_type in os_types.AMAZONLINUX_TYPES:
+    return OS_DEPENDENT_DEFAULTS['centos']
+  else:
+    return OS_DEPENDENT_DEFAULTS['debian']
+
+
+def ConfigureAndRestart(
+    vm: virtual_machine.VirtualMachine, buffer_pool_size: str, server_id: int
+):
+  """Configure and restart mysql."""
+  config_template = 'mysql/ha.cnf.j2'
+  remote_temp_config = '/tmp/my.cnf'
+  remote_final_config = GetOSDependentDefaults(vm.OS_TYPE)[MYSQL_CONFIG_PATH]
+  config_d_service = 'mysql/mysqld.service'
+  remote_temp_d_service = '/tmp/mysqld'
+  remote_final_d_service = '/lib/systemd/system/mysqld.service'
+  logrotation = 'mysql/logrotation'
+  remote_temp_logrotation = '/tmp/logrotation'
+  remote_final_logrotation = '/etc/logrotate.d/mysqld'
+  remote_final_log_dir = GetOSDependentDefaults(vm.OS_TYPE)[MYSQL_LOG_PATH]
+  service_name = GetOSDependentDefaults(vm.OS_TYPE)[MYSQL_SERVICE_NAME]
+  context = {
+      'scratch_dir': vm.GetScratchDir(),
+      'server_id': str(server_id),
+      'buffer_pool_size': buffer_pool_size,
+      'log_dir': remote_final_log_dir,
+  }
+  vm.RenderTemplate(
+      data.ResourcePath(config_template), remote_temp_config, context
+  )
+  vm.RemoteCommand(f'sudo cp {remote_temp_config} {remote_final_config}')
+  vm.PushDataFile(config_d_service, remote_temp_d_service)
+  vm.RemoteCommand(f'sudo cp {remote_temp_d_service} {remote_final_d_service}')
+  vm.PushDataFile(logrotation, remote_temp_logrotation)
+  vm.RemoteCommand(
+      f'sudo cp {remote_temp_logrotation} {remote_final_logrotation}'
+  )
+  vm.RemoteCommand(f'sudo chmod 0644 {remote_final_logrotation}')
+  vm.RemoteCommand('sudo systemctl daemon-reload')
+  vm.RemoteCommand(f'sudo systemctl stop {service_name}')
+  vm.RemoteCommand(f'sudo systemctl start {service_name}')
+
+
+def UpdatePassword(vm: virtual_machine.VirtualMachine, new_password: str):
+  """Update the password of the root user."""
+  log_path = GetOSDependentDefaults(vm.OS_TYPE)[MYSQL_LOG_PATH]
+  password = vm.RemoteCommand(
+      f'sudo grep "A temporary password" {log_path} | '
+      'sed "s/.*generated for root@localhost: //"'
+  )[0].strip()
+  if not password:
+    password = MYSQL_PSWD
+  vm.RemoteCommand(
+      f"""sudo mysql --connect-timeout=10 -uroot --password='{password}' """
+      """--connect-expired-password -e "alter user 'root'@'localhost' """
+      f'''identified by '{new_password}';"'''
+  )
+  vm.RemoteCommand('sudo touch /root/.my.cnf')
+  vm.RemoteCommand(
+      f"""echo "[client]\nuser=root\npassword='{new_password}'" | """
+      """sudo tee -a /root/.my.cnf"""
+  )
+  tmp_path = '/tmp/update_passwords.sql'
+  vm.RenderTemplate(
+      data.ResourcePath('mysql/update_passwords.sql.j2'),
+      tmp_path,
+      {'password': new_password},
+  )
+  vm.RemoteCommand(f'sudo mysql -uroot -p"{new_password}"< {tmp_path}')
+
+
+def CreateDatabase(
+    vm: virtual_machine.VirtualMachine, password: str, db_name: str
+):
+  """Create test db."""
+  tmp_path = '/tmp/create_db.sql'
+  vm.RenderTemplate(
+      data.ResourcePath('mysql/create_db.sql.j2'),
+      tmp_path,
+      {'database_name': db_name, 'password': password},
+  )
+  vm.RemoteCommand(f'sudo mysql -uroot -p"{password}"< {tmp_path}')
+
+
+def SetupReplica(
+    vm: virtual_machine.VirtualMachine, password: str, master_ip: str):
+  """Setup replica mysql server."""
+  tmp_path = '/tmp/setup_repl.sql'
+  vm.RenderTemplate(
+      data.ResourcePath('mysql/setup_repl.sql.j2'),
+      tmp_path,
+      {'password': password, 'private_ip': master_ip},
+  )
+  vm.RemoteCommand(f'sudo mysql -uroot -p"{password}"< {tmp_path}')

@@ -31,7 +31,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 from absl import flags
 import jinja2
@@ -153,6 +153,11 @@ class RetriableContainerException(
 
 def RunKubectlCommand(command: list[str], **kwargs):
   """Run a kubectl command."""
+  if 'stack_level' in kwargs:
+    kwargs['stack_level'] += 1
+  else:
+    # IssueCommand defaults stack_level to 1, so 2 skips this function.
+    kwargs['stack_level'] = 2
   cmd = [FLAGS.kubectl, '--kubeconfig', FLAGS.kubeconfig] + command
   return vm_util.IssueCommand(cmd, **kwargs)
 
@@ -161,7 +166,7 @@ class BaseContainer(resource.BaseResource):
   """Class representing a single container."""
 
   def __init__(
-      self, container_spec: Optional[container_spec_lib.ContainerSpec] = None
+      self, container_spec: container_spec_lib.ContainerSpec | None = None
   ):
     # Hack to make container_spec a kwarg
     assert container_spec
@@ -170,7 +175,7 @@ class BaseContainer(resource.BaseResource):
     self.memory: int = container_spec.memory
     self.command: list[str] = container_spec.command
     self.image: str = container_spec.image
-    self.ip_address: Optional[str] = None
+    self.ip_address: str | None = None
 
   def WaitForExit(self, timeout: int = 1200) -> dict[str, Any]:
     """Gets the successfully finished container.
@@ -199,9 +204,9 @@ class BaseContainerService(resource.BaseResource):
     self.command: list[str] = container_spec.command
     self.image: str = container_spec.image
     self.container_port: int = container_spec.container_port
-    self.ip_address: Optional[str] = None
-    self.port: Optional[int] = None
-    self.host_header: Optional[str] = None
+    self.ip_address: str | None = None
+    self.port: int | None = None
+    self.host_header: str | None = None
 
 
 class ContainerImage:
@@ -391,14 +396,14 @@ class BaseNodePoolConfig:
     self.machine_type = vm_config.machine_type
     self.name = NodePoolName(name)
     self.zone: str = vm_config.zone
-    self.sandbox_config: Optional[container_spec_lib.SandboxSpec] = None
+    self.sandbox_config: container_spec_lib.SandboxSpec | None = None
     self.num_nodes: int
     self.disk_type: str
     self.disk_size: int
     # Defined by google_kubernetes_engine
-    self.max_local_disks: Optional[int]
-    self.gpu_type: Optional[str]
-    self.gpu_count: Optional[int]
+    self.max_local_disks: int | None
+    self.gpu_type: str | None
+    self.gpu_count: int | None
     self.threads_per_core: int
     self.gce_tags: list[str]
     self.min_cpu_platform: str
@@ -626,7 +631,7 @@ class KubernetesPod:
     self.ip_address = pod.get('status', {}).get('podIP')
     return pod
 
-  def WaitForExit(self, timeout: Optional[int] = None) -> dict[str, Any]:
+  def WaitForExit(self, timeout: int | None = None) -> dict[str, Any]:
     """Gets the finished running container."""
 
     @vm_util.Retry(
@@ -876,7 +881,7 @@ class KubernetesCluster(BaseContainerCluster):
       self,
       resource_name: str,
       condition_name: str,
-      namespace: Optional[str] = None,
+      namespace: str | None = None,
       timeout: int = vm_util.DEFAULT_TIMEOUT,
   ):
     """Waits for a condition on a Kubernetes resource (eg: deployment, pod)."""
@@ -957,7 +962,7 @@ class KubernetesCluster(BaseContainerCluster):
     )
 
   def CreateServiceAccount(
-      self, name: str, clusterrole: Optional[str] = None, namespace='default'
+      self, name: str, clusterrole: str | None = None, namespace='default'
   ):
     """Create a k8s service account and cluster-role-binding."""
     RunKubectlCommand(
@@ -1096,11 +1101,11 @@ class KubernetesEvent:
   resource: KubernetesEventResource
   message: str
   # Reason is actually more of a machine readable message.
-  reason: Optional[str]
+  reason: str | None
   timestamp: float
 
   @classmethod
-  def FromDict(cls, yaml_data: dict[str, Any]) -> Optional['KubernetesEvent']:
+  def FromDict(cls, yaml_data: dict[str, Any]) -> 'KubernetesEvent | None':
     """Parse Kubernetes Event YAML output."""
     if 'message' not in yaml_data:
       return

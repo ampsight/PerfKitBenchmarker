@@ -16,7 +16,6 @@
 
 import json
 import time
-from typing import Optional
 
 from absl import flags
 from perfkitbenchmarker import errors
@@ -37,19 +36,19 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
   """Object representing an Azure Redis Cache."""
 
   CLOUD = provider_info.AZURE
+  SERVICE_TYPE = 'cache'
   MEMORY_STORE = managed_memory_store.REDIS
 
   # Azure redis could take up to an hour to create
   READY_TIMEOUT = 60 * 60  # 60 minutes
 
-  redis_version: Optional[str] = None
+  redis_version: str | None = None
 
   def __init__(self, spec):
     super(AzureRedisCache, self).__init__(spec)
     self.redis_region = FLAGS.cloud_redis_region
     self.resource_group = azure_network.GetResourceGroup(self.redis_region)
     self.azure_redis_size = FLAGS.azure_redis_size
-    self.failover_style = FLAGS.redis_failover_style
     if (
         self.failover_style
         == managed_memory_store.Failover.FAILOVER_SAME_REGION
@@ -64,7 +63,7 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
     Returns:
       dict mapping string property key to value.
     """
-    result = {
+    self.metadata.update({
         'cloud_redis_failover_style': self.failover_style,
         'cloud_redis_region': self.redis_region,
         'cloud_redis_azure_tier': self.azure_tier,
@@ -72,8 +71,8 @@ class AzureRedisCache(managed_memory_store.BaseManagedMemoryStore):
         'cloud_redis_version': managed_memory_store.ParseReadableVersion(
             self.redis_version
         ),
-    }
-    return result
+    })
+    return self.metadata
 
   def CheckPrerequisites(self):
     """Check benchmark prerequisites on the input flag parameters.

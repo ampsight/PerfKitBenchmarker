@@ -16,13 +16,14 @@
 
 import ntpath
 import posixpath
-from typing import Any, List, Optional
+from typing import Any, List
 
 from absl import flags
 from perfkitbenchmarker import data
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import sql_engine_utils
+from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.linux_packages import hammerdb as linux_hammerdb
 
 FLAGS = flags.FLAGS
@@ -61,7 +62,7 @@ class WindowsHammerDbTclScript(linux_hammerdb.HammerDbTclScript):
           vm, self.tcl_script_name, parameter
       )
 
-  def Run(self, vm, timeout: Optional[int] = 60 * 60 * 6) -> str:
+  def Run(self, vm, timeout: int | None = 60 * 60 * 6) -> str:
     """Run hammerdbcli script."""
     hammerdb_exe_dir = ntpath.join(
         vm.temp_dir, HAMMERDB.format(linux_hammerdb.HAMMERDB_VERSION.value)
@@ -85,8 +86,9 @@ class WindowsTclScriptParameters(linux_hammerdb.TclScriptParameters):
     )
 
 
+@vm_util.Retry(poll_interval=10, max_retries=3)
 def _GetFileContent(vm, file_path: str) -> str:
-  stdout, _ = vm.RemoteCommand(f' type {file_path}')
+  stdout, _ = vm.RemoteCommand(f' type {file_path}', timeout=10)
   return stdout
 
 
@@ -100,7 +102,7 @@ def ParseTpcCTPMResultsFromFile(stdout: str) -> List[sample.Sample]:
   return linux_hammerdb.ParseTpcCTPMResultsFromFile(stdout)
 
 
-def SetDefaultConfig(num_cpus: Optional[int]):
+def SetDefaultConfig(num_cpus: int | None):
   return linux_hammerdb.SetDefaultConfig(num_cpus)
 
 
@@ -126,6 +128,7 @@ def ParseTpcHResults(stdout: str) -> List[sample.Sample]:
   return linux_hammerdb.ParseTpcHResults(stdout)
 
 
+@vm_util.Retry(poll_interval=10, max_retries=3)
 def SearchAndReplaceTclScript(vm, search: str, replace: str, script_name: str):
   hammerdb_exe_dir = ntpath.join(
       vm.temp_dir, HAMMERDB.format(linux_hammerdb.HAMMERDB_VERSION.value)
@@ -134,7 +137,8 @@ def SearchAndReplaceTclScript(vm, search: str, replace: str, script_name: str):
       f'cd {hammerdb_exe_dir} ; '
       f'(Get-Content {script_name}) '
       f'-replace "{search}", "{replace}" | '
-      f'Set-Content {script_name} -encoding ASCII ; '
+      f'Set-Content {script_name} -encoding ASCII ; ',
+      timeout=60 * 5,
   )
 
 
@@ -166,13 +170,13 @@ def SetupConfig(
 
   if db_engine not in linux_hammerdb.SCRIPT_MAPPING:
     raise ValueError(
-        '{0} is currently not supported for running '
+        '{} is currently not supported for running '
         'hammerdb benchmarks.'.format(db_engine)
     )
 
   if hammerdb_script not in linux_hammerdb.SCRIPT_MAPPING[db_engine]:
     raise ValueError(
-        '{0} is not a known hammerdb script.'.format(hammerdb_script)
+        '{} is not a known hammerdb script.'.format(hammerdb_script)
     )
 
   linux_scripts = linux_hammerdb.SCRIPT_MAPPING[db_engine][hammerdb_script]
@@ -201,11 +205,12 @@ def SetupConfig(
   # Run all the build script or scripts before actual run phase
   for script in windows_scripts:
     if script.script_type == linux_hammerdb.BUILD_SCRIPT_TYPE:
-      script.Run(vm, timeout=TIMEOUT)
+      script.Run(vm, timeout=linux_hammerdb.HAMMERDB_BUILD_TIMEOUT.value + 600)
 
 
+@vm_util.Retry(poll_interval=10, max_retries=3)
 def Run(
-    vm, db_engine: str, hammerdb_script: str, timeout: Optional[int] = TIMEOUT
+    vm, db_engine: str, hammerdb_script: str, timeout: int | None = TIMEOUT
 ) -> List[sample.Sample]:
   """Run the HammerDB Benchmark.
 

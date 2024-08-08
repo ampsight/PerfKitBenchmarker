@@ -5,7 +5,7 @@ performance with postgres.
 """
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from absl import flags
 from perfkitbenchmarker import regex_util
@@ -66,7 +66,7 @@ class GCPAlloyRelationalDb(relational_db.BaseRelationalDb):
   REQUIRED_ATTRS = ['CLOUD', 'IS_MANAGED', 'ENGINE']
 
   def __init__(self, db_spec: relational_db_spec.RelationalDbSpec):
-    super(GCPAlloyRelationalDb, self).__init__(db_spec)
+    super().__init__(db_spec)
     self.cluster_id = self.instance_id + '-cluster'
     self.zone = self.spec.db_spec.zone
     self.replica_instance_id = None
@@ -90,7 +90,7 @@ class GCPAlloyRelationalDb(relational_db.BaseRelationalDb):
     """
     if engine not in SUPPORTED_ALLOYDB_ENGINE_VERSIONS:
       raise NotImplementedError(
-          'Default engine not specified for engine {0}'.format(engine)
+          'Default engine not specified for engine {}'.format(engine)
       )
     return DEFAULT_ENGINE_VERSION
 
@@ -219,10 +219,10 @@ class GCPAlloyRelationalDb(relational_db.BaseRelationalDb):
 
   def UpdateAlloyDBFlags(
       self,
-      columnar_engine_size: Optional[int],
+      columnar_engine_size: int | None,
       enable_columnar_recommendation: bool,
       enable_auto_columnarization: str,
-      relation: Optional[str] = None,
+      relation: str | None = None,
   ):
     database_flags = []
     if FLAGS.db_flags:
@@ -272,7 +272,7 @@ class GCPAlloyRelationalDb(relational_db.BaseRelationalDb):
     )
 
   def _GetAlloyDbCommand(
-      self, cmd_string: List[str], timeout: Optional[int] = None
+      self, cmd_string: List[str], timeout: int | None = None
   ) -> util.GcloudCommand:
     """Used to issue alloydb command."""
     cmd_string = [self, 'alpha', 'alloydb'] + cmd_string

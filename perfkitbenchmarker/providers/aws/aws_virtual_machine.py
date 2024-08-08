@@ -46,7 +46,6 @@ from perfkitbenchmarker.providers.aws import aws_disk_strategies
 from perfkitbenchmarker.providers.aws import aws_network
 from perfkitbenchmarker.providers.aws import flags as aws_flags
 from perfkitbenchmarker.providers.aws import util
-from six.moves import range
 
 
 FLAGS = flags.FLAGS
@@ -89,9 +88,6 @@ USER_INITIATED_SPOT_TERMINAL_STATUSES = frozenset(
     ['request-canceled-and-instance-running', 'instance-terminated-by-user']
 )
 
-# From https://wiki.debian.org/Cloud/AmazonEC2Image/Stretch
-# Marketplace AMI exists, but not in all regions
-DEBIAN_9_IMAGE_PROJECT = ['379101102735']
 # From https://wiki.debian.org/Cloud/AmazonEC2Image/Buster
 # From https://wiki.debian.org/Cloud/AmazonEC2Image/Bullseye
 DEBIAN_IMAGE_PROJECT = ['136693071363']
@@ -126,6 +122,7 @@ _MACHINE_TYPE_PREFIX_TO_ARM_ARCH = {
     'm7g': 'graviton3',
     'r6g': 'graviton2',
     'r7g': 'graviton3',
+    'r8g': 'graviton4',
     't4g': 'graviton2',
     'im4g': 'graviton2',
     'is4ge': 'graviton2',
@@ -215,7 +212,7 @@ def GetRootBlockDeviceSpecForImage(image_id, region):
   root_device_name = image_spec['RootDeviceName']
   block_device_mappings = image_spec['BlockDeviceMappings']
   root_block_device_dict = next(
-      (x for x in block_device_mappings if x['DeviceName'] == root_device_name)
+      x for x in block_device_mappings if x['DeviceName'] == root_device_name
   )
   return root_block_device_dict
 
@@ -295,7 +292,7 @@ class AwsDedicatedHost(resource.BaseResource):
   """
 
   def __init__(self, machine_type: str, zone: str):
-    super(AwsDedicatedHost, self).__init__()
+    super().__init__()
     self.machine_type = machine_type
     self.zone = zone
     self.region = util.GetRegionFromZone(self.zone)
@@ -368,7 +365,7 @@ class AwsVmSpec(virtual_machine.BaseVmSpec):
       flag_values: flags.FlagValues. Runtime flags that may override the
         provided config values.
     """
-    super(AwsVmSpec, cls)._ApplyFlags(config_values, flag_values)
+    super()._ApplyFlags(config_values, flag_values)
     if flag_values['aws_boot_disk_size'].present:
       config_values['boot_disk_size'] = flag_values.aws_boot_disk_size
     if flag_values['aws_spot_instances'].present:
@@ -389,7 +386,7 @@ class AwsVmSpec(virtual_machine.BaseVmSpec):
           The pair specifies a decoder class and its __init__() keyword
           arguments to construct in order to decode the named option.
     """
-    result = super(AwsVmSpec, cls)._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'use_spot_instance': (
             option_decoders.BooleanDecoder,
@@ -417,7 +414,7 @@ def _GetKeyfileSetKey(region):
   return (region, FLAGS.run_uri)
 
 
-class AwsKeyFileManager(object):
+class AwsKeyFileManager:
   """Object for managing AWS Keyfiles."""
 
   _lock = threading.Lock()
@@ -477,7 +474,7 @@ class AwsKeyFileManager(object):
 
   @classmethod
   def GetKeyNameForRun(cls):
-    return 'perfkit-key-{0}'.format(FLAGS.run_uri)
+    return 'perfkit-key-{}'.format(FLAGS.run_uri)
 
 
 class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
@@ -541,7 +538,7 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     Raises:
       ValueError: If an incompatible vm_spec is passed.
     """
-    super(AwsVirtualMachine, self).__init__(vm_spec)
+    super().__init__(vm_spec)
     assert isinstance(self.zone, str)
     self.region = util.GetRegionFromZone(self.zone)
     self.user_name = FLAGS.aws_user_name or self.DEFAULT_USER_NAME
@@ -940,7 +937,10 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
 
     # query fails on hpc6a.48xlarge which already disables smt.
     if FLAGS.disable_smt and self.machine_type not in (
-        'hpc6a.48xlarge', 'hpc6id.32xlarge', 'hpc7a.96xlarge'):
+        'hpc6a.48xlarge',
+        'hpc6id.32xlarge',
+        'hpc7a.96xlarge',
+    ):
       query_cmd = util.AWS_PREFIX + [
           'ec2',
           'describe-instance-types',
@@ -1028,9 +1028,7 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
           '--instance-market-options=%s' % json.dumps(instance_market_options)
       )
     if self.instance_profile:
-      create_cmd.append(
-          f'--iam-instance-profile=Name={self.instance_profile}'
-      )
+      create_cmd.append(f'--iam-instance-profile=Name={self.instance_profile}')
     return create_cmd
 
   def _CreateDependencies(self):
@@ -1548,7 +1546,7 @@ class AwsVirtualMachine(virtual_machine.BaseVirtualMachine):
     Returns:
       dict mapping string property key to value.
     """
-    result = super(AwsVirtualMachine, self).GetResourceMetadata()
+    result = super().GetResourceMetadata()
     result['boot_disk_type'] = self.DEFAULT_ROOT_DISK_TYPE
     result['boot_disk_size'] = self.boot_disk_size
     if self.use_dedicated_host:
@@ -1588,34 +1586,6 @@ class CoreOsBasedAwsVirtualMachine(
   DEFAULT_USER_NAME = 'core'
 
 
-class Debian9BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.Debian9Mixin
-):
-  # From https://wiki.debian.org/Cloud/AmazonEC2Image/Stretch
-  IMAGE_NAME_FILTER_PATTERN = 'debian-stretch-{alternate_architecture}-*'
-  IMAGE_OWNER = DEBIAN_9_IMAGE_PROJECT
-  DEFAULT_USER_NAME = 'admin'
-
-  def _BeforeSuspend(self):
-    """Prepares the aws vm for hibernation."""
-    raise NotImplementedError()
-
-
-class Debian10BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.Debian10Mixin
-):
-  # From https://wiki.debian.org/Cloud/AmazonEC2Image/Buster
-  IMAGE_NAME_FILTER_PATTERN = 'debian-10-{alternate_architecture}-*'
-  IMAGE_OWNER = DEBIAN_IMAGE_PROJECT
-  DEFAULT_USER_NAME = 'admin'
-
-
-class Debian10BackportsBasedAwsVirtualMachine(
-    Debian10BasedAwsVirtualMachine, linux_virtual_machine.Debian10BackportsMixin
-):
-  IMAGE_NAME_FILTER_PATTERN = 'debian-10-backports-{alternate_architecture}-*'
-
-
 class Debian11BasedAwsVirtualMachine(
     AwsVirtualMachine, linux_virtual_machine.Debian11Mixin
 ):
@@ -1645,33 +1615,6 @@ class UbuntuBasedAwsVirtualMachine(AwsVirtualMachine):
   DEFAULT_USER_NAME = 'ubuntu'
 
 
-class Ubuntu1604BasedAwsVirtualMachine(
-    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu1604Mixin
-):
-  IMAGE_NAME_FILTER_PATTERN = (
-      'ubuntu/images/*/ubuntu-xenial-16.04-{alternate_architecture}-server-20*'
-  )
-
-  def _InstallEfa(self):
-    super(Ubuntu1604BasedAwsVirtualMachine, self)._InstallEfa()
-    self.Reboot()
-
-
-class Ubuntu1804BasedAwsVirtualMachine(
-    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu1804Mixin
-):
-  IMAGE_NAME_FILTER_PATTERN = (
-      'ubuntu/images/*/ubuntu-bionic-18.04-{alternate_architecture}-server-20*'
-  )
-
-
-class Ubuntu1804EfaBasedAwsVirtualMachine(
-    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu1804EfaMixin
-):
-  IMAGE_OWNER = UBUNTU_EFA_IMAGE_PROJECT
-  IMAGE_NAME_FILTER_PATTERN = 'Deep Learning AMI GPU CUDA * (Ubuntu 18.04) *'
-
-
 class Ubuntu2004BasedAwsVirtualMachine(
     UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2004Mixin
 ):
@@ -1684,18 +1627,21 @@ class Ubuntu2004EfaBasedAwsVirtualMachine(
     UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2004EfaMixin
 ):
   """Ubuntu2004 Base DLAMI virtual machine."""
+
   IMAGE_OWNER = UBUNTU_EFA_IMAGE_PROJECT
   DEFAULT_ROOT_DISK_TYPE = 'gp3'
   IMAGE_NAME_FILTER_PATTERN = 'Deep Learning Base GPU AMI (Ubuntu 20.04) *'
 
 
 class Ubuntu2004DeepLearningAMIBasedAWSVirtualMachine(
-    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2004DLMixin):
+    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2004DLMixin
+):
   """Ubuntu2004 DLAMI VMs.
 
   This uses same underlying image as Ubuntu2004 EFA based VMs. But skips package
   installation whenever possible.
   """
+
   IMAGE_OWNER = UBUNTU_EFA_IMAGE_PROJECT
   DEFAULT_ROOT_DISK_TYPE = 'gp3'
   IMAGE_NAME_FILTER_PATTERN = (
@@ -1711,8 +1657,9 @@ class Ubuntu2004DeepLearningAMIBasedAWSVirtualMachine(
     Raises:
       ValueError: If an incompatible vm_spec is passed.
     """
-    super(Ubuntu2004DeepLearningAMIBasedAWSVirtualMachine, self).__init__(
-        vm_spec)
+    super().__init__(
+        vm_spec
+    )
     # Add preinstalled packages for Deep Learning AMI
     self._installed_packages.add('nccl')
     self._installed_packages.add('cuda_toolkit')
@@ -1766,7 +1713,7 @@ class AmazonLinux2EfaBasedAwsVirtualMachine(
     Raises:
       ValueError: If an incompatible vm_spec is passed.
     """
-    super(AmazonLinux2EfaBasedAwsVirtualMachine, self).__init__(vm_spec)
+    super().__init__(vm_spec)
     # Add preinstalled packages for Deep Learning AMI
     self._installed_packages.add('nccl')
     self._installed_packages.add('cuda_toolkit')
@@ -1781,15 +1728,6 @@ class Ubuntu2204BasedAwsVirtualMachine(
   )
 
 
-class Ubuntu2310BasedAwsVirtualMachine(
-    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2310Mixin
-):
-  IMAGE_NAME_FILTER_PATTERN = (
-      'ubuntu/images/*/ubuntu-mantic-23.10-{alternate_architecture}-server-20*'
-  )
-  DEFAULT_ROOT_DISK_TYPE = 'gp3'
-
-
 class Ubuntu2404BasedAwsVirtualMachine(
     UbuntuBasedAwsVirtualMachine, linux_virtual_machine.Ubuntu2404Mixin
 ):
@@ -1797,16 +1735,6 @@ class Ubuntu2404BasedAwsVirtualMachine(
       'ubuntu/images/*/ubuntu-noble-24.04-{alternate_architecture}-server-20*'
   )
   DEFAULT_ROOT_DISK_TYPE = 'gp3'
-
-
-class JujuBasedAwsVirtualMachine(
-    UbuntuBasedAwsVirtualMachine, linux_virtual_machine.JujuMixin
-):
-  """Class with configuration for AWS Juju virtual machines."""
-
-  IMAGE_NAME_FILTER_PATTERN = (
-      'ubuntu/images/*/ubuntu-trusty-14.04-{alternate_architecture}-server-20*'
-  )
 
 
 class AmazonLinux2BasedAwsVirtualMachine(
@@ -1833,17 +1761,6 @@ class AmazonLinux2023BasedAwsVirtualMachine(
   IMAGE_SSM_PATTERN = '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-{architecture}'
 
 
-class Rhel7BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.Rhel7Mixin
-):
-  """Class with configuration for AWS RHEL 7 virtual machines."""
-
-  # Documentation on finding RHEL images:
-  # https://access.redhat.com/articles/3692431
-  IMAGE_NAME_FILTER_PATTERN = 'RHEL-7*'
-  IMAGE_OWNER = RHEL_IMAGE_PROJECT
-
-
 class Rhel8BasedAwsVirtualMachine(
     AwsVirtualMachine, linux_virtual_machine.Rhel8Mixin
 ):
@@ -1866,52 +1783,6 @@ class Rhel9BasedAwsVirtualMachine(
   # All RHEL AMIs are HVM. HVM- blocks HVM_BETA.
   IMAGE_NAME_FILTER_PATTERN = 'RHEL-9*_HVM-*'
   IMAGE_OWNER = RHEL_IMAGE_PROJECT
-
-
-class CentOs7BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.CentOs7Mixin
-):
-  """Class with configuration for AWS CentOS 7 virtual machines."""
-
-  # Documentation on finding the CentOS 7 image:
-  # https://wiki.centos.org/Cloud/AWS#x86_64
-  IMAGE_NAME_FILTER_PATTERN = 'CentOS Linux 7*'
-  IMAGE_OWNER = CENTOS_IMAGE_PROJECT
-  DEFAULT_USER_NAME = 'centos'
-
-  def _InstallEfa(self):
-    logging.info(
-        'Upgrading Centos7 kernel, installing kernel headers and '
-        'rebooting before installing EFA.'
-    )
-    self.RemoteCommand('sudo yum upgrade -y kernel')
-    self.InstallPackages('kernel-devel')
-    self.Reboot()
-    super()._InstallEfa()
-
-
-class CentOs8BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.CentOs8Mixin
-):
-  """Class with configuration for AWS CentOS 8 virtual machines."""
-
-  # This describes the official AMIs listed here:
-  # https://wiki.centos.org/Cloud/AWS#Official_CentOS_Linux_:_Public_Images
-  IMAGE_OWNER = CENTOS_IMAGE_PROJECT
-  IMAGE_NAME_FILTER_PATTERN = 'CentOS 8*'
-  DEFAULT_USER_NAME = 'centos'
-
-
-class CentOsStream8BasedAwsVirtualMachine(
-    AwsVirtualMachine, linux_virtual_machine.CentOsStream8Mixin
-):
-  """Class with configuration for AWS CentOS Stream 8 virtual machines."""
-
-  # This describes the official AMIs listed here:
-  # https://wiki.centos.org/Cloud/AWS#Official_CentOS_Linux_:_Public_Images
-  IMAGE_OWNER = CENTOS_IMAGE_PROJECT
-  IMAGE_NAME_FILTER_PATTERN = 'CentOS Stream 8*'
-  DEFAULT_USER_NAME = 'centos'
 
 
 class RockyLinux8BasedAwsVirtualMachine(
@@ -1953,7 +1824,7 @@ class BaseWindowsAwsVirtualMachine(
   DEFAULT_USER_NAME = 'Administrator'
 
   def __init__(self, vm_spec):
-    super(BaseWindowsAwsVirtualMachine, self).__init__(vm_spec)
+    super().__init__(vm_spec)
     self.user_data = (
         '<powershell>%s</powershell>' % windows_virtual_machine.STARTUP_SCRIPT
     )
@@ -2025,7 +1896,7 @@ class BaseWindowsAwsVirtualMachine(
 
   def _PostCreate(self):
     """Retrieve generic VM info and then retrieve the VM's password."""
-    super(BaseWindowsAwsVirtualMachine, self)._PostCreate()
+    super()._PostCreate()
 
     # Get the decoded password data.
     decoded_password_data = self._GetDecodedPasswordData()
@@ -2053,7 +1924,7 @@ class BaseWindowsAwsVirtualMachine(
     Returns:
       dict mapping metadata key to value.
     """
-    result = super(BaseWindowsAwsVirtualMachine, self).GetResourceMetadata()
+    result = super().GetResourceMetadata()
     result['disable_interrupt_moderation'] = self.disable_interrupt_moderation
     return result
 
@@ -2081,7 +1952,7 @@ class BaseWindowsAwsVirtualMachine(
     self.RemoteCommand(command)
     try:
       self.RemoteCommand('Restart-NetAdapter -Name "Ethernet 2"')
-    except IOError:
+    except OSError:
       # Restarting the network adapter will always fail because
       # the winrm connection used to issue the command will be
       # broken.

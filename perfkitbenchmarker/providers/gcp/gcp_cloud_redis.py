@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Optional
+from typing import Any
 
 from absl import flags
 from google.cloud import monitoring_v3
@@ -44,17 +44,17 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
   """Object representing a GCP cloud redis instance."""
 
   CLOUD = provider_info.GCP
+  SERVICE_TYPE = 'memorystore'
   MEMORY_STORE = managed_memory_store.REDIS
 
   def __init__(self, spec):
-    super(CloudRedis, self).__init__(spec)
+    super().__init__(spec)
     self.project = FLAGS.project
     self.size = gcp_flags.REDIS_GB.value
     if self._clustered:
       self.size = self.node_count * _SHARD_SIZE_GB
     self.redis_region = FLAGS.cloud_redis_region
     self.redis_version = spec.config.cloud_redis.redis_version
-    self.failover_style = FLAGS.redis_failover_style
     self.tier = self._GetTier()
     self.network = (
         'default'
@@ -71,7 +71,7 @@ class CloudRedis(managed_memory_store.BaseManagedMemoryStore):
         gcp_flags.CLOUD_REDIS_API_OVERRIDE.value
     )
 
-  def _GetTier(self) -> Optional[str]:
+  def _GetTier(self) -> str | None:
     """Returns the tier of the instance."""
     # See https://cloud.google.com/memorystore/docs/redis/redis-tiers."""
     if self._clustered:

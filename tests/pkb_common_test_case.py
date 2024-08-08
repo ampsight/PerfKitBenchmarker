@@ -14,7 +14,6 @@
 """Common base class for PKB unittests."""
 
 import pathlib
-import subprocess
 from typing import Any, Dict
 
 from absl import flags
@@ -27,13 +26,14 @@ from perfkitbenchmarker import configs
 from perfkitbenchmarker import context
 from perfkitbenchmarker import linux_benchmarks
 from perfkitbenchmarker import linux_virtual_machine
+from perfkitbenchmarker import os_mixin
 from perfkitbenchmarker import pkb  # pylint:disable=unused-import
 from perfkitbenchmarker import resource
 from perfkitbenchmarker import virtual_machine
-from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.configs import benchmark_config_spec
 from perfkitbenchmarker.providers.gcp import gce_virtual_machine
 from perfkitbenchmarker.providers.gcp import util
+from tests import mock_command
 
 FLAGS = flags.FLAGS
 FLAGS.mark_as_parsed()
@@ -76,7 +76,7 @@ def CreateTestVmSpec() -> TestVmSpec:
   return TestVmSpec('test_component_name')
 
 
-class TestOsMixin(virtual_machine.BaseOsMixin):
+class TestOsMixin(os_mixin.BaseOsMixin):
   """Test class that provides dummy implementations of abstract functions."""
 
   OS_TYPE = 'test_os_type'
@@ -147,6 +147,9 @@ class TestOsMixin(virtual_machine.BaseOsMixin):
   def _IsSmtEnabled(self):
     return True
 
+  def GetConnectionIp(self):
+    pass
+
 
 class TestResource(resource.BaseResource):
 
@@ -180,6 +183,9 @@ class TestVirtualMachine(
   def _Resume(self):
     pass
 
+  def GetConnectionIp(self):
+    pass
+
 
 # Need to provide implementations for all of the abstract methods in
 # order to instantiate linux_virtual_machine.BaseLinuxMixin.
@@ -195,7 +201,6 @@ class TestGceLinuxVirtualMachine(  # pytype: disable=signature-mismatch  # overr
     gce_virtual_machine.GceVirtualMachine, TestLinuxVirtualMachine
 ):
   """Test class that has VM methods for a GCE virtual machine."""
-  pass
 
 
 class TestGceVirtualMachine(TestOsMixin, gce_virtual_machine.GceVirtualMachine):  # pytype: disable=signature-mismatch  # overriding-return-type-checks
@@ -230,11 +235,11 @@ def CreateBenchmarkSpecFromConfigDict(
   config_spec = benchmark_config_spec.BenchmarkConfigSpec(
       benchmark_name, flag_values=FLAGS, **config_dict
   )
-  benchmark_module = next((
+  benchmark_module = next(
       b
       for b in linux_benchmarks.BENCHMARKS
       if b.BENCHMARK_NAME == benchmark_name
-  ))
+  )
   return benchmark_spec.BenchmarkSpec(benchmark_module, config_spec, 'name0')
 
 
@@ -250,7 +255,7 @@ class PkbCommonTestCase(parameterized.TestCase, absltest.TestCase):
   """
 
   def setUp(self):
-    super(PkbCommonTestCase, self).setUp()
+    super().setUp()
     saved_flag_values = flagsaver.save_flag_values()
     self.addCleanup(flagsaver.restore_flag_values, saved_flag_values)
 
@@ -264,26 +269,43 @@ class PkbCommonTestCase(parameterized.TestCase, absltest.TestCase):
     )
     self.enter_context(p)
 
-  # TODO(user): Extend MockIssueCommand to support multiple calls to
-  # vm_util.IssueCommand
-  def MockIssueCommand(self, stdout: str, stderr: str, retcode: int) -> None:
-    """Mocks function calls inside vm_util.IssueCommand.
-
-    Mocks subproccess.Popen and _ReadIssueCommandOutput in IssueCommand.
-    This allows the logic of IssueCommand to run and returns the given
-    stdout, stderr when IssueCommand is called.
+  def MockIssueCommand(
+      self,
+      call_to_response: dict[str, list[tuple[str, str, int]]],
+  ) -> mock_command.MockIssueCommand:
+    """Mocks IssueCommand, returning response for the given call.
 
     Args:
-      stdout: String. Output from standard output
-      stderr: String. Output from standard error
-      retcode: Int. Return code from running the command.
+      call_to_response: A dictionary of commands to a list of responses.
+        Commands just need to be a substring of the actual command. Each
+        response is given in order, like with mock's normal iterating
+        side_effect.
+
+    Returns:
+      The mocked function object with call dict.
     """
+    return mock_command.MockIssueCommand(call_to_response, self)
 
-    p = mock.patch('subprocess.Popen', spec=subprocess.Popen)
-    cmd_output = mock.patch.object(vm_util, '_ReadIssueCommandOutput')
+  def MockRemoteCommand(
+      self,
+      call_to_response: dict[str, list[tuple[str, str]]],
+      vm: virtual_machine.BaseVirtualMachine | None = None,
+  ) -> virtual_machine.BaseVirtualMachine:
+    """Mocks vm.RemoteCommand, returning response for the given call.
 
-    self.addCleanup(p.stop)
-    self.addCleanup(cmd_output.stop)
+    Args:
+      call_to_response: A dictionary of commands to a list of responses.
+        Commands just need to be a substring of the actual command. Each
+        response is given in order, like with mock's normal iterating
+        side_effect.
+      vm: A mocked vm. If None, a mock is created.
 
-    p.start().return_value.returncode = retcode
-    cmd_output.start().side_effect = [(stdout, stderr)]
+    Returns:
+      The vm, now with a mocked RemoteCommand.
+    """
+    if vm is None:
+      vm = mock.create_autospec(virtual_machine.BaseVirtualMachine)
+    vm.RemoteCommand.mock_command = mock_command.MockRemoteCommand(
+        call_to_response, vm
+    )
+    return vm

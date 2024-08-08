@@ -15,7 +15,7 @@
 
 import copy
 import json
-from typing import Any, Optional
+from typing import Any
 import unittest
 from unittest import mock
 
@@ -54,9 +54,9 @@ _BASE_JOB_RUN_PAYLOAD = {
 
 
 def _GetJobRunMockPayload(
-    dpu_seconds: Optional[float],
-    max_capacity: Optional[float],
-    execution_time: Optional[float],
+    dpu_seconds: float | None,
+    max_capacity: float | None,
+    execution_time: float | None,
 ) -> dict[str, Any]:
   payload = copy.deepcopy(_BASE_JOB_RUN_PAYLOAD)
   if dpu_seconds is not None:
@@ -80,7 +80,7 @@ GLUE_SPEC = mock.Mock(
 class AwsDpbEmrTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
-    super(AwsDpbEmrTestCase, self).setUp()
+    super().setUp()
     FLAGS.run_uri = TEST_RUN_URI
     FLAGS.dpb_service_zone = AWS_ZONE_US_EAST_1A
     FLAGS.zones = [AWS_ZONE_US_EAST_1A]

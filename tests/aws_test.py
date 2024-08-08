@@ -56,7 +56,7 @@ def _AwsCommand(region, topic, *args):
 class AwsVolumeExistsTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
-    super(AwsVolumeExistsTestCase, self).setUp()
+    super().setUp()
     p = mock.patch(util.__name__ + '.IssueRetryableCommand')
     p.start()
     self.addCleanup(p.stop)
@@ -91,7 +91,7 @@ class AwsVolumeExistsTestCase(pkb_common_test_case.PkbCommonTestCase):
 class AwsVpcTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
-    super(AwsVpcTestCase, self).setUp()
+    super().setUp()
     p = mock.patch(
         'perfkitbenchmarker.providers.aws.util.IssueRetryableCommand'
     )
@@ -121,7 +121,11 @@ class AwsVpcTestCase(pkb_common_test_case.PkbCommonTestCase):
         'An error occurred (VpcLimitExceeded) when calling the CreateVpc '
         'operation: The maximum number of VPCs has been reached.'
     )
-    self.MockIssueCommand(None, stderr, 255)
+    self.MockIssueCommand(
+        {
+            '': ('', stderr, 255),
+        },
+    )
     with self.assertRaises(errors.Benchmarks.QuotaFailure) as e:
       self.vpc.Create()
     self.assertEqual(str(e.exception), stderr)
@@ -130,7 +134,11 @@ class AwsVpcTestCase(pkb_common_test_case.PkbCommonTestCase):
     stderr = 'An unknown error occurred when calling the CreateVpc opeartion.'
     retcode = 1
     error_msg = 'Failed to create Vpc: %s return code: %s' % (retcode, stderr)
-    self.MockIssueCommand(None, stderr, retcode)
+    self.MockIssueCommand(
+        {
+            '': ('', stderr, retcode),
+        },
+    )
     with self.assertRaises(errors.Resource.CreationError) as e:
       self.vpc.Create()
     self.assertEqual(str(e.exception), error_msg)
@@ -322,7 +330,7 @@ def CreateTestAwsVm():
 class AwsVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
-    super(AwsVirtualMachineTestCase, self).setUp()
+    super().setUp()
     FLAGS.cloud = provider_info.AWS
     FLAGS.run_uri = 'aaaaaa'
     FLAGS.temp_dir = 'tmp'
@@ -661,16 +669,16 @@ class AwsVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
     # when aws_efa_version is blanked out do not install EFA
     FLAGS.aws_efa = True
     FLAGS.aws_efa_version = ''
-    vm = InitCentosVm()
+    vm = InitVm()
     vm._InstallEfa = mock.Mock()
     vm._ConfigureEfa = mock.Mock()
     vm._PostCreate()
     vm._InstallEfa.assert_not_called()
 
-  def testInstallEfaCentos(self):
+  def testInstallEfa(self):
     # Confirms vm._PostCreate() calls for EFA creation
     FLAGS.aws_efa = True
-    vm = InitCentosVm()
+    vm = InitVm()
     vm._ConfigureElasticIp = mock.Mock()
     vm._PostCreate()
     aws_cmd = '; '.join(
@@ -680,13 +688,10 @@ class AwsVirtualMachineTestCase(pkb_common_test_case.PkbCommonTestCase):
         aws_cmd,
         '.*'.join([
             'curl -O https://s3-us-west-2',
-            'yum upgrade -y kernel',
-            'yum install -y kernel-devel',
             'efa_installer.sh -y',
             './efa_test.sh',
         ]),
     )
-    vm.Reboot.assert_called_once()
 
 
 def CreateVm():
@@ -704,7 +709,7 @@ def CreateVm():
   return ' '.join(vm_util.IssueCommand.call_args[0][0])
 
 
-def InitCentosVm():
+def InitVm():
   aws_response = {
       'Reservations': [{
           'Instances': [{
@@ -715,7 +720,7 @@ def InitCentosVm():
       }]
   }
   util.IssueRetryableCommand.return_value = json.dumps(aws_response), ''
-  vm = aws_virtual_machine.CentOs7BasedAwsVirtualMachine(TestVmSpec())
+  vm = aws_virtual_machine.Ubuntu2404BasedAwsVirtualMachine(TestVmSpec())
   # This assumes that STDOUT is never parsed, which is incredibly brittle.
   # If this test starts infinitely looping it's probably retrying an error
   # based on this mock.
@@ -755,7 +760,7 @@ class AwsGetRegionFromZoneTestCase(pkb_common_test_case.PkbCommonTestCase):
 class AwsGetBlockDeviceMapTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
-    super(AwsGetBlockDeviceMapTestCase, self).setUp()
+    super().setUp()
     p = mock.patch(util.__name__ + '.IssueRetryableCommand')
     p.start()
     self.addCleanup(p.stop)
@@ -820,7 +825,7 @@ class AwsGetRootBlockDeviceSpecForImageTestCase(
 ):
 
   def setUp(self):
-    super(AwsGetRootBlockDeviceSpecForImageTestCase, self).setUp()
+    super().setUp()
     p = mock.patch(util.__name__ + '.IssueRetryableCommand')
     p.start()
     self.addCleanup(p.stop)

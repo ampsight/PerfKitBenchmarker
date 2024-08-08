@@ -20,7 +20,7 @@ supported by Memtier, see
 https://github.com/RedisLabs/memtier_benchmark/blob/master/memtier_benchmark.cpp
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from absl import flags
 from perfkitbenchmarker import background_tasks
@@ -42,6 +42,7 @@ keydb_memtier:
     memtier_protocol: redis
     memtier_key_pattern: P:P
     memtier_run_duration: 1200
+    memtier_expiry_range: 600-600
     create_and_boot_post_task_delay: 5
     memtier_data_size: 1024
     memtier_key_maximum: 20000000
@@ -109,8 +110,26 @@ def Prepare(bm_spec: _BenchmarkSpec) -> None:
   server_vm.Install('keydb_server')
   keydb_server.Start(server_vm)
 
+  # Transfer SSL cert files to client(s)
+  if FLAGS.memtier_tls:
+    for client_vm in client_vms:
+      for filename in ['keydb.crt', 'keydb.key', 'ca.crt']:
+        server_vm.MoveHostFile(
+            client_vm,
+            f'{keydb_server.GetKeydbDir()}/tests/tls/{filename}',
+            remote_path='',
+        )
+
   # Load the KeyDB server with preexisting data.
   bm_spec.keydb_endpoint_ip = str(bm_spec.vm_groups['servers'][0].internal_ip)
+  # Hack in SSL args into the endpoint IP
+  if FLAGS.memtier_tls:
+    bm_spec.keydb_endpoint_ip = (
+        f'{bm_spec.keydb_endpoint_ip} '
+        '--cert=keydb.crt '
+        '--key=keydb.key '
+        '--cacert=ca.crt'
+    )
   memtier.Load(
       [client_vms[0]], bm_spec.keydb_endpoint_ip, keydb_server.DEFAULT_PORT
   )
@@ -119,7 +138,7 @@ def Prepare(bm_spec: _BenchmarkSpec) -> None:
 def Run(bm_spec: _BenchmarkSpec) -> List[sample.Sample]:
   """Run memtier_benchmark against KeyDB."""
   client_vms = bm_spec.vm_groups['clients']
-  server_vm: Optional[virtual_machine.BaseVirtualMachine] = None
+  server_vm: virtual_machine.BaseVirtualMachine | None = None
   if 'servers' in bm_spec.vm_groups:
     server_vm = bm_spec.vm_groups['servers'][0]
 

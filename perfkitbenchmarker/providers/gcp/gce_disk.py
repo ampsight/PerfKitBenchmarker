@@ -136,6 +136,7 @@ NVME_PD_MACHINE_FAMILIES = ['m3']
 HYPERDISK_ONLY_MACHINE_FAMILIES = [
     'c3a',
     'n4',
+    'c4',
 ]
 # Default boot disk type in pkb.
 # Console defaults to pd-balanced & gcloud defaults to pd-standard as of 11/23
@@ -210,7 +211,7 @@ class GceDiskSpec(disk.BaseDiskSpec):
       dict mapping config option names to values derived from the config
       values or flag values.
     """
-    super(GceDiskSpec, cls)._ApplyFlags(config_values, flag_values)
+    super()._ApplyFlags(config_values, flag_values)
     if flag_values['gce_ssd_interface'].present:
       config_values['interface'] = flag_values.gce_ssd_interface
     if flag_values['gce_num_local_ssds'].present:
@@ -232,7 +233,7 @@ class GceDiskSpec(disk.BaseDiskSpec):
           The pair specifies a decoder class and its __init__() keyword
           arguments to construct in order to decode the named option.
     """
-    result = super(GceDiskSpec, cls)._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'interface': (option_decoders.StringDecoder, {'default': 'NVME'}),
         'num_local_ssds': (
@@ -259,7 +260,7 @@ class GceBootDisk(boot_disk.BootDisk):
 
   def __init__(self, vm, boot_disk_spec):
     """Initialize a Boot Diks."""
-    super(GceBootDisk, self).__init__(boot_disk_spec)
+    super().__init__(boot_disk_spec)
     self.name = vm.name
     self.image = None
     self.vm = vm
@@ -297,7 +298,7 @@ class GceBootDisk(boot_disk.BootDisk):
     self.boot_disk_type = response['type'].split('/')[-1]
 
   def GetResourceMetadata(self):
-    result = super(GceBootDisk, self).GetResourceMetadata()
+    result = super().GetResourceMetadata()
     result['boot_disk_type'] = self.boot_disk_type
     result['boot_disk_size'] = self.boot_disk_size
     if self.boot_disk_iops:
@@ -336,7 +337,7 @@ class GceLocalDisk(disk.BaseDisk):
   """Object representing a GCE Local Disk."""
 
   def __init__(self, disk_spec, name):
-    super(GceLocalDisk, self).__init__(disk_spec)
+    super().__init__(disk_spec)
     self.interface = disk_spec.interface
     self.metadata['interface'] = disk_spec.interface
     self.metadata.update(DISK_METADATA[disk_spec.disk_type])
@@ -362,7 +363,7 @@ class GceDisk(disk.BaseDisk):
       image_project=None,
       replica_zones=None,
   ):
-    super(GceDisk, self).__init__(disk_spec)
+    super().__init__(disk_spec)
     self.spec = disk_spec
     self.interface = disk_spec.interface
     self.attached_vm_name = None
@@ -556,10 +557,10 @@ class GceDisk(disk.BaseDisk):
 
 
 class GceStripedDisk(disk.StripedDisk):
-  """Object representing multiple azure disks striped together."""
+  """Object representing multiple GCP disks striped together."""
 
   def __init__(self, disk_spec, disks):
-    super(GceStripedDisk, self).__init__(disk_spec, disks)
+    super().__init__(disk_spec, disks)
     if len(disks) <= 1:
       raise ValueError(
           f'{len(disks)} disks found for GceStripedDisk'
@@ -582,29 +583,10 @@ class GceStripedDisk(disk.StripedDisk):
 
   def _Create(self):
     """Creates the disk."""
-    cmd = util.GcloudCommand(
-        self, 'compute', 'disks', 'create', *self._GetDiskNames()
-    )
-    cmd.flags['size'] = self.disk_size
-    cmd.flags['type'] = self.disk_type
-    if self.provisioned_iops:
-      cmd.flags['provisioned-iops'] = self.provisioned_iops
-    if self.provisioned_throughput:
-      cmd.flags['provisioned-throughput'] = self.provisioned_throughput
-    cmd.flags['labels'] = util.MakeFormattedDefaultTags()
-    if self.image:
-      cmd.flags['image'] = self.image
-    if self.image_project:
-      cmd.flags['image-project'] = self.image_project
-
-    if self.replica_zones:
-      cmd.flags['region'] = self.region
-      cmd.flags['replica-zones'] = ','.join(self.replica_zones)
-      del cmd.flags['zone']
-    self.create_disk_start_time = time.time()
-    _, stderr, retcode = cmd.Issue(raise_on_failure=False)
-    self.create_disk_end_time = time.time()
-    util.CheckGcloudResponseKnownFailures(stderr, retcode)
+    create_tasks = []
+    for disk_details in self.disks:
+      create_tasks.append((disk_details.Create, (), {}))
+    background_tasks.RunParallelThreads(create_tasks, max_concurrency=200)
 
   def _PostCreate(self):
     """Called after _CreateResource() is called."""
@@ -631,7 +613,3 @@ class GceStripedDisk(disk.StripedDisk):
     for disk_details in self.disks:
       detach_tasks.append((disk_details.Detach, (), {}))
     background_tasks.RunParallelThreads(detach_tasks, max_concurrency=200)
-
-  def GetCreateTime(self):
-    if self.create_disk_start_time and self.create_disk_end_time:
-      return self.create_disk_end_time - self.create_disk_start_time

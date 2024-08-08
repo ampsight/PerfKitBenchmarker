@@ -105,7 +105,7 @@ class MemtierTestCase(
 ):
 
   def setUp(self):
-    super(MemtierTestCase, self).setUp()
+    super().setUp()
     path = os.path.join(
         os.path.dirname(__file__), '..', 'data', 'redis_memtier.json'
     )
@@ -1795,10 +1795,12 @@ class MemtierTestCase(
             'memtier_protocol': 'memcache_binary',
             'memtier_ratio': '1:9',
             'memtier_requests': 10000,
+            'memtier_expiry_range': None,
             'memtier_run_count': 1,
             'memtier_run_mode': 'NORMAL_RUN',
             'memtier_threads': 4,
             'memtier_version': '1.4.0',
+            'memtier_tls': False,
         },
     )
 

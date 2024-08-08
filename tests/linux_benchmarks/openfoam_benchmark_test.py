@@ -36,7 +36,7 @@ class OpenfoamBenchmarkTest(
 ):
 
   def setUp(self):
-    super(OpenfoamBenchmarkTest, self).setUp()
+    super().setUp()
     self.mock_vm = mock.Mock()
     self.mock_benchmark_spec = mock.Mock(vms=[self.mock_vm])
     self.enter_context(
@@ -96,7 +96,7 @@ class OpenfoamBenchmarkTest(
 
   def testYumInstallRaisesNotImplementedError(self):
     static_vm_spec = static_virtual_machine.StaticVmSpec('test_static_vm_spec')
-    self.mock_vm = static_virtual_machine.Rhel7BasedStaticVirtualMachine(
+    self.mock_vm = static_virtual_machine.Rhel9BasedStaticVirtualMachine(
         static_vm_spec
     )
     self.mock_vm.install_packages = True

@@ -24,7 +24,6 @@ from perfkitbenchmarker import resource
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.providers.gcp import util
 from tests import pkb_common_test_case
-import six
 
 
 _GCLOUD_PATH = 'path/gcloud'
@@ -42,7 +41,7 @@ def _MockIssueCommand(test_response):
 class GceResource(resource.BaseResource):
 
   def __init__(self, **kwargs):
-    for k, v in six.iteritems(kwargs):
+    for k, v in kwargs.items():
       setattr(self, k, v)
 
   def _Create(self):
@@ -55,7 +54,7 @@ class GceResource(resource.BaseResource):
 class GcloudCommandTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
-    super(GcloudCommandTestCase, self).setUp()
+    super().setUp()
     p = mock.patch(util.__name__ + '.FLAGS')
     self.mock_flags = p.start()
     self.addCleanup(p.stop)
@@ -213,15 +212,18 @@ class GcloudCommandTestCase(pkb_common_test_case.PkbCommonTestCase):
     )
     with p as mock_issue:
       return_value = cmd.Issue()
-      mock_issue.assert_called_with([
-          'path/gcloud',
-          'compute',
-          'images',
-          'list',
-          '--format',
-          'json',
-          '--quiet',
-      ], stack_level=mock.ANY)
+      mock_issue.assert_called_with(
+          [
+              'path/gcloud',
+              'compute',
+              'images',
+              'list',
+              '--format',
+              'json',
+              '--quiet',
+          ],
+          stack_level=mock.ANY,
+      )
     self.assertEqual(return_value, mock_issue_return_value)
 
   def testIssueWarningSuppressed(self):
@@ -234,15 +236,18 @@ class GcloudCommandTestCase(pkb_common_test_case.PkbCommonTestCase):
     )
     with p as mock_issue:
       return_value = cmd.Issue()
-      mock_issue.assert_called_with([
-          'path/gcloud',
-          'compute',
-          'images',
-          'list',
-          '--format',
-          'json',
-          '--quiet',
-      ], stack_level=mock.ANY)
+      mock_issue.assert_called_with(
+          [
+              'path/gcloud',
+              'compute',
+              'images',
+              'list',
+              '--format',
+              'json',
+              '--quiet',
+          ],
+          stack_level=mock.ANY,
+      )
     self.assertEqual(return_value, mock_issue_return_value)
 
   def testIssueRetryable(self):
@@ -255,15 +260,18 @@ class GcloudCommandTestCase(pkb_common_test_case.PkbCommonTestCase):
     )
     with p as mock_issue:
       return_value = cmd.IssueRetryable()
-      mock_issue.assert_called_with([
-          'path/gcloud',
-          'compute',
-          'images',
-          'list',
-          '--format',
-          'json',
-          '--quiet',
-      ], stack_level=mock.ANY)
+      mock_issue.assert_called_with(
+          [
+              'path/gcloud',
+              'compute',
+              'images',
+              'list',
+              '--format',
+              'json',
+              '--quiet',
+          ],
+          stack_level=mock.ANY,
+      )
     self.assertEqual(return_value, mock_issue_return_value)
 
   def testGetRegionFromZone(self):
@@ -367,6 +375,28 @@ class GcloudCommandTestCase(pkb_common_test_case.PkbCommonTestCase):
 
     expected_zones = {'us-west1-a', 'us-west1-b'}
     self.assertEqual(found_zones, expected_zones)
+
+  def testProjectNumber(self):
+    test_output = inspect.cleandoc("""
+[
+  {
+    "createTime": "2021-07-19T17:07:24.467Z",
+    "lifecycleState": "ACTIVE",
+    "name": "project-id-name",
+    "parent": {
+      "id": "123",
+      "type": "organization"
+    },
+    "projectId": "project-id-name",
+    "projectNumber": "12345"
+  }
+]
+        """)
+    self.enter_context(_MockIssueCommand(test_output))
+
+    project_number = util.GetProjectNumber('project-id-name')
+
+    self.assertEqual(project_number, '12345')
 
   @parameterized.named_parameters(
       (

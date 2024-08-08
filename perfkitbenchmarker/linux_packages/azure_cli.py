@@ -28,12 +28,7 @@ from perfkitbenchmarker import os_types
 from perfkitbenchmarker import vm_util
 
 # Debian info
-_DEB_REPO_FILE = '/etc/apt/sources.list.d/azure-cli.list'
-_DEB_REPO_KEY = 'https://packages.microsoft.com/keys/microsoft.asc'
-_DEB_REPO = (
-    'deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ '
-    '{az_repo} main'
-)
+_DEB_SCRIPT_URL = 'https://aka.ms/InstallAzureCLIDeb'
 
 # RedHat info
 _YUM_REPO_FILE = '/etc/yum.repos.d/azure-cli.repo'
@@ -85,10 +80,9 @@ def _PipInstall(vm):
 
 # https://packages.microsoft.com/repos/azure-cli/dists/
 SUPPORTED_APT_DISTROS = [
-    os_types.UBUNTU1804,
     os_types.UBUNTU2004,
     os_types.UBUNTU2204,
-    os_types.DEBIAN10,
+    os_types.UBUNTU2404,
     os_types.DEBIAN11,
     os_types.DEBIAN12,
 ]
@@ -103,14 +97,10 @@ def AptInstall(vm):
   if vm.is_aarch64 or vm.OS_TYPE not in SUPPORTED_APT_DISTROS:
     _PipInstall(vm)
     return
-  vm.InstallPackages('lsb-release curl apt-transport-https')
-  az_repo, _ = vm.RemoteCommand('lsb_release -cs')
-  _CreateFile(vm, _DEB_REPO.format(az_repo=az_repo.strip()), _DEB_REPO_FILE)
-  vm.RemoteCommand(
-      'curl -L {key} | sudo apt-key add -'.format(key=_DEB_REPO_KEY)
-  )
+
+  vm.InstallPackages('curl')
+  vm.RemoteCommand(f'curl -sL {_DEB_SCRIPT_URL} | sudo bash')
   vm.RemoteCommand('sudo apt-get update')
-  vm.InstallPackages('azure-cli')
 
 
 def YumInstall(vm):

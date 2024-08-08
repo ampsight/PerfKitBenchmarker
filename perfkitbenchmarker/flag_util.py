@@ -27,6 +27,7 @@ import six
 from six.moves import range
 import yaml
 
+
 FLAGS = flags.FLAGS
 
 INTEGER_GROUP_REGEXP = re.compile(r'(\d+)(-(\d+))?(-(\d+))?$')
@@ -580,3 +581,4 @@ def GetProvidedCommandLineFlags():
       for k in FLAGS
       if FLAGS[k].present
   }
+

@@ -34,10 +34,11 @@ class ElastiCacheMemcached(managed_memory_store.BaseManagedMemoryStore):
   """Object representing a AWS Elasticache memcached instance."""
 
   CLOUD = provider_info.AWS
+  SERVICE_TYPE = 'elasticache'
   MEMORY_STORE = managed_memory_store.MEMCACHED
 
   def __init__(self, spec):
-    super(ElastiCacheMemcached, self).__init__(spec)
+    super().__init__(spec)
     self.subnet_group_name = 'subnet-%s' % self.name
     self.zone = self.spec.vms[0].zone
     self.region = util.GetRegionFromZone(self.zone)
@@ -57,11 +58,11 @@ class ElastiCacheMemcached(managed_memory_store.BaseManagedMemoryStore):
     Returns:
       dict mapping string property key to value.
     """
-    result = {
+    self.metadata.update({
         'cloud_memcached_version': self.version,
         'cloud_memcached_node_type': self.node_type,
-    }
-    return result
+    })
+    return self.metadata
 
   def _CreateDependencies(self):
     """Create the subnet dependencies."""
@@ -194,7 +195,7 @@ class ElastiCacheMemcached(managed_memory_store.BaseManagedMemoryStore):
     cluster_info = self._DescribeInstance()
     if not cluster_info:
       raise errors.Resource.RetryableGetError(
-          'Failed to retrieve information on {0}.'.format(self.name)
+          'Failed to retrieve information on {}.'.format(self.name)
       )
 
     endpoint = cluster_info['ConfigurationEndpoint']

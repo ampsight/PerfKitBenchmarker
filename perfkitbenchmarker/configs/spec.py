@@ -16,14 +16,13 @@
 import collections
 import logging
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from absl import flags
 from perfkitbenchmarker import errors
 from perfkitbenchmarker import provider_info
 from perfkitbenchmarker.configs import auto_registry
 from perfkitbenchmarker.configs import option_decoders
-import six
 
 
 _SPEC_REGISTRY = {}
@@ -64,7 +63,7 @@ class BaseSpecMetaClass(type):
     )
 
 
-class BaseSpec(six.with_metaclass(BaseSpecMetaClass, object)):
+class BaseSpec(metaclass=BaseSpecMetaClass):
   """Object decoded from a YAML config."""
 
   # Each derived class has its own copy of the following three variables. They
@@ -77,7 +76,7 @@ class BaseSpec(six.with_metaclass(BaseSpecMetaClass, object)):
   def __init__(
       self,
       component_full_name: str,
-      flag_values: Optional[flags.FlagValues] = None,
+      flag_values: flags.FlagValues | None = None,
       **kwargs: Any,
   ):
     """Initializes a BaseSpec.
@@ -107,7 +106,7 @@ class BaseSpec(six.with_metaclass(BaseSpecMetaClass, object)):
     missing_options = self._required_options.difference(kwargs)
     if missing_options:
       raise errors.Config.MissingOption(
-          'Required options were missing from {0}: {1}.'.format(
+          'Required options were missing from {}: {}.'.format(
               component_full_name, ', '.join(sorted(missing_options))
           )
       )
@@ -121,7 +120,7 @@ class BaseSpec(six.with_metaclass(BaseSpecMetaClass, object)):
           self._DecodersToString(),
       )
       raise errors.Config.UnrecognizedOption(
-          'Unrecognized options were found in {0}: {1}.'.format(
+          'Unrecognized options were found in {}: {}.'.format(
               component_full_name,
               ', '.join(sorted(unrecognized_options)),
           )
@@ -155,7 +154,7 @@ class BaseSpec(six.with_metaclass(BaseSpecMetaClass, object)):
       if not cls._decoders:
         constructions = cls._GetOptionDecoderConstructions()
         for option, decoder_construction in sorted(
-            six.iteritems(constructions)
+            constructions.items()
         ):
           decoder_class, init_args = decoder_construction
           decoder = decoder_class(option=option, **init_args)
@@ -200,7 +199,7 @@ class BaseSpec(six.with_metaclass(BaseSpecMetaClass, object)):
       decoders: collections.OrderedDict[
           str, option_decoders.ConfigOptionDecoder
       ],
-      flag_values: Optional[flags.FlagValues],
+      flag_values: flags.FlagValues | None,
   ):
     """Initializes spec attributes from provided config option values.
 
@@ -218,7 +217,7 @@ class BaseSpec(six.with_metaclass(BaseSpecMetaClass, object)):
         'decoders must be an OrderedDict. The order in which options are '
         'decoded must be guaranteed.'
     )
-    for option, decoder in six.iteritems(decoders):
+    for option, decoder in decoders.items():
       if option in config:
         value = decoder.Decode(config[option], component_full_name, flag_values)
       else:
@@ -252,9 +251,6 @@ class PerCloudConfigSpec(BaseSpec):
 
 class PerCloudConfigDecoder(option_decoders.TypeVerifier):
   """Decodes the disk_spec or vm_spec option of a VM group config object."""
-
-  def __init__(self, **kwargs):
-    super().__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Decodes the disk_spec or vm_spec option of a VM group config object.

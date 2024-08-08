@@ -29,7 +29,6 @@ from perfkitbenchmarker.providers.aws import aws_nfs_service
 from perfkitbenchmarker.providers.aws import aws_virtual_machine
 from perfkitbenchmarker.providers.aws import util
 from tests import pkb_common_test_case
-import six
 
 FLAGS = flags.FLAGS
 
@@ -109,7 +108,7 @@ _MOUNT = AwsResponses(
 class BaseTest(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
-    super(BaseTest, self).setUp()
+    super().setUp()
     self.issue_cmd = mock.Mock()
     self.aws_network_spec = self._CreatePatched(aws_network, 'AwsNetwork')
     mock_network = mock.Mock()
@@ -135,7 +134,7 @@ class BaseTest(pkb_common_test_case.PkbCommonTestCase):
     FLAGS['aws_delete_file_system'].parse(True)
     FLAGS['efs_throughput_mode'].parse(_THROUGHPUT_MODE)
     FLAGS['efs_provisioned_throughput'].parse(_PROVISIONED_THROUGHPUT)
-    for key, value in six.iteritems(kwargs):
+    for key, value in kwargs.items():
       FLAGS[key].parse(value)
 
   def _CreatePatched(self, module, method_name):
@@ -270,7 +269,7 @@ class AwsVirtualMachineTest(BaseTest):
     vm_spec = aws_virtual_machine.AwsVmSpec(
         _COMPONENT, zone=_AWS_ZONE, machine_type='m2.2xlarge'
     )
-    aws_machine = aws_virtual_machine.Rhel7BasedAwsVirtualMachine(vm_spec)
+    aws_machine = aws_virtual_machine.Rhel9BasedAwsVirtualMachine(vm_spec)
     aws_machine.RemoteCommand = mock.Mock()
     aws_machine.RemoteHostCommand = mock.Mock()
     aws_machine.GetNVMEDeviceInfo = mock.Mock()
@@ -310,7 +309,7 @@ class AwsVirtualMachineTest(BaseTest):
     fstab_cmd = (
         'echo "{host}:/ /scratch nfs {mount_opt}" | sudo tee -a /etc/fstab'
     ).format(mount_opt=mount_opt, host=host)
-    install_nfs = 'sudo yum install -y nfs-utils'
+    install_nfs = 'sudo dnf install -y nfs-utils --allowerasing'
 
     aws_machine = self._CallCreateScratchDisk(disk.NFS)
     aws_machine.SetupAllScratchDisks()
@@ -357,7 +356,7 @@ class AwsVirtualMachineTest(BaseTest):
 class AwsEfsCommandsTest(BaseTest):
 
   def setUp(self):
-    super(AwsEfsCommandsTest, self).setUp()
+    super().setUp()
     self.SetFlags()
     self.issue_cmd = self._CreatePatched(vm_util, 'IssueCommand')
     self.aws = aws_nfs_service.AwsEfsCommands(_AWS_REGION)

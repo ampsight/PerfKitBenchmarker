@@ -16,7 +16,6 @@
 import dataclasses
 import inspect
 import os
-from typing import Optional
 import unittest
 from absl import flags
 from absl.testing import parameterized
@@ -90,7 +89,7 @@ ENV_METADATA = (
 class HPCCTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
-    super(HPCCTestCase, self).setUp()
+    super().setUp()
     FLAGS.hpcc_math_library = 'openblas'
     path = os.path.join(os.path.dirname(__file__), '../data', 'hpcc-sample.txt')
     with open(path) as fp:
@@ -263,7 +262,7 @@ class HPCCTestCase(pkb_common_test_case.PkbCommonTestCase):
       num_vms: int,
       num_vcpus: int,
       memory_size_gb: int,
-      flag_memory_size_mb: Optional[int],
+      flag_memory_size_mb: int | None,
       problem_size: int,
       num_rows: int,
       num_columns: int,

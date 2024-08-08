@@ -33,7 +33,7 @@ REDIS_VERSION_MAPPING = {
     'redis_4_0': '4.0.10',
     'redis_5_0': '5.0.6',
     'redis_6_x': '6.x',
-    'redis_7_x': '7.0',
+    'redis_7_x': '7.1',
 }
 
 
@@ -41,20 +41,20 @@ class ElastiCacheRedis(managed_memory_store.BaseManagedMemoryStore):
   """Object representing a AWS Elasticache redis instance."""
 
   CLOUD = provider_info.AWS
+  SERVICE_TYPE = 'elasticache'
   MEMORY_STORE = managed_memory_store.REDIS
 
   # AWS Clusters can take up to 2 hours to create
   READY_TIMEOUT = 120 * 60
 
   def __init__(self, spec):
-    super(ElastiCacheRedis, self).__init__(spec)
+    super().__init__(spec)
     self.subnet_group_name = 'subnet-%s' % self.name
     self.version = REDIS_VERSION_MAPPING[spec.config.cloud_redis.redis_version]
     self.node_type = FLAGS.elasticache_node_type
     self.redis_region = FLAGS.cloud_redis_region
     self.failover_zone = FLAGS.elasticache_failover_zone
     self.failover_subnet = None
-    self.failover_style = FLAGS.redis_failover_style
 
     self.subnets = []
 

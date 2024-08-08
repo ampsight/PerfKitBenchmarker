@@ -48,7 +48,7 @@ import datetime
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from absl import flags
 from perfkitbenchmarker import background_tasks
@@ -56,7 +56,6 @@ from perfkitbenchmarker import events
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import stages
 from perfkitbenchmarker.traces import base_collector
-import six
 
 _MPSTAT = flags.DEFINE_boolean(
     'mpstat',
@@ -168,7 +167,7 @@ def _GetCPUAverageMetrics(
     host_stats: List[Dict[str, Any]],
     number_of_cpus: int,
     metadata: Dict[str, Any],
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ):
   """Get average metrics for all CPUs.
 
@@ -242,7 +241,7 @@ def _GetCPUAverageInterruptions(
     host_stats: List[Dict[str, Any]],
     number_of_cpus: int,
     metadata: Dict[str, Any],
-    timestamp: Optional[float] = None,
+    timestamp: float | None = None,
 ):
   """Get average interruption for all CPUs.
 
@@ -431,8 +430,7 @@ class MpstatCollector(base_collector.BaseCollector):
     def _Analyze(role, output):
       """Parse file and record samples."""
       with open(
-          os.path.join(self.output_directory, os.path.basename(output)), 'r'
-      ) as fp:
+          os.path.join(self.output_directory, os.path.basename(output))) as fp:
         output = json.loads(fp.read())
         metadata = {
             'event': 'mpstat',
@@ -448,7 +446,7 @@ class MpstatCollector(base_collector.BaseCollector):
         )
 
     background_tasks.RunThreaded(
-        _Analyze, [((k, w), {}) for k, w in six.iteritems(self._role_mapping)]
+        _Analyze, [((k, w), {}) for k, w in self._role_mapping.items()]
     )
 
 

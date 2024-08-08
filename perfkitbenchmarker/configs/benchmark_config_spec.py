@@ -37,9 +37,11 @@ from perfkitbenchmarker.configs import container_spec
 from perfkitbenchmarker.configs import option_decoders
 from perfkitbenchmarker.configs import spec
 from perfkitbenchmarker.configs import vm_group_decoders
+from perfkitbenchmarker.resources import example_resource_spec
+from perfkitbenchmarker.resources import jobs_setter
 # Included to import & load Kubernetes' __init__.py somewhere.
 from perfkitbenchmarker.resources import kubernetes  # pylint:disable=unused-import
-import six
+from perfkitbenchmarker.resources import managed_ai_model_spec
 
 _NONE_OK = {'default': None, 'none_ok': True}
 
@@ -48,7 +50,7 @@ class _DpbApplicationListDecoder(option_decoders.ListDecoder):
   """Decodes the list of applications to be enabled on the dpb service."""
 
   def __init__(self, **kwargs):
-    super(_DpbApplicationListDecoder, self).__init__(
+    super().__init__(
         default=None,
         item_decoder=option_decoders.EnumDecoder(
             [dpb_constants.FLINK, dpb_constants.HIVE]
@@ -59,9 +61,6 @@ class _DpbApplicationListDecoder(option_decoders.ListDecoder):
 
 class _DpbServiceDecoder(option_decoders.TypeVerifier):
   """Validates the dpb service dictionary of a benchmark config object."""
-
-  def __init__(self, **kwargs):
-    super(_DpbServiceDecoder, self).__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Verifies dpb service dictionary of a benchmark config object.
@@ -111,9 +110,7 @@ class _DpbServiceSpec(spec.BaseSpec):
   """
 
   def __init__(self, component_full_name, flag_values=None, **kwargs):
-    super(_DpbServiceSpec, self).__init__(
-        component_full_name, flag_values=flag_values, **kwargs
-    )
+    super().__init__(component_full_name, flag_values=flag_values, **kwargs)
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -124,7 +121,7 @@ class _DpbServiceSpec(spec.BaseSpec):
       pair. The pair specifies a decoder class and its __init__() keyword
       arguments to construct in order to decode the named option.
     """
-    result = super(_DpbServiceSpec, cls)._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'static_dpb_service_instance': (
             option_decoders.StringDecoder,
@@ -245,7 +242,7 @@ class _DpbServiceSpec(spec.BaseSpec):
       flag_values: flags.FlagValues. Runtime flags that may override the
         provided config values.
     """
-    super(_DpbServiceSpec, cls)._ApplyFlags(config_values, flag_values)
+    super()._ApplyFlags(config_values, flag_values)
     if flag_values['static_dpb_service_instance'].present:
       config_values['static_dpb_service_instance'] = (
           flag_values.static_dpb_service_instance
@@ -258,6 +255,111 @@ class _DpbServiceSpec(spec.BaseSpec):
           config_values[group]['vm_spec'][cloud]['zone'] = flag_values.zone[0]
 
 
+class _ExampleResourceDecoder(option_decoders.TypeVerifier):
+  """Validate the example_resource dictionary of a benchmark config object."""
+
+  def Decode(self, value, component_full_name, flag_values):
+    """Verify example_resource dict of a benchmark config object.
+
+    Args:
+      value: dict. Config dictionary
+      component_full_name: string.  Fully qualified name of the configurable
+        component containing the config option.
+      flag_values: flags.FlagValues.  Runtime flag values to be propagated to
+        BaseSpec constructors.
+
+    Returns:
+      ExampleResourceSpec built from the config passed in value.
+
+    Raises:
+      errors.Config.InvalidValue upon invalid input value.
+    """
+    example_config = super().Decode(value, component_full_name, flag_values)
+    if 'example_type' in example_config:
+      spec_class = example_resource_spec.GetExampleResourceSpecClass(
+          example_config['example_type']
+      )
+    else:
+      raise errors.Config.InvalidValue(
+          'Required attribute `example_type` missing from example_resource '
+          'config.'
+      )
+    return spec_class(
+        self._GetOptionFullName(component_full_name),
+        flag_values,
+        **example_config,
+    )
+
+
+class _BaseJobDecoder(option_decoders.TypeVerifier):
+  """Validates the base_job dictionary of a benchmark config object."""
+
+  def Decode(self, value, component_full_name, flag_values):
+    """Verifies base_job dictionary of a benchmark config object.
+
+    Args :
+      value: dict base_job config dictionary
+      component_full_name: string.  Fully qualified name of the configurable
+        component containing the config option.
+      flag_values: flags.FlagValues.  Runtime flag values to be propagated to
+        BaseSpec constructors.
+
+    Returns:
+        BaseJobSpec built from the config passed in value.
+    Raises:
+        errors.Config.InvalidValue upon invalid input value.
+    """
+    base_job_config = super().Decode(value, component_full_name, flag_values)
+    if 'job_type' in base_job_config:
+      spec_class = jobs_setter.GetJobSpecClass(base_job_config['job_type'])
+    else:
+      raise errors.Config.InvalidValue(
+          'job_type is required for base_job config'
+      )
+    return spec_class(
+        self._GetOptionFullName(component_full_name),
+        flag_values,
+        **base_job_config,
+    )
+
+
+class _ManagedAiModelSpecDecoder(option_decoders.TypeVerifier):
+  """Validate the managed_model dictionary of a benchmark config object."""
+
+  def Decode(self, value, component_full_name, flag_values):
+    """Verify managed_model dict of a benchmark config object.
+
+    Args:
+      value: dict. Config dictionary
+      component_full_name: string.  Fully qualified name of the configurable
+        component containing the config option.
+      flag_values: flags.FlagValues.  Runtime flag values to be propagated to
+        BaseSpec constructors.
+
+    Returns:
+      ManagedAiModelSpec built from the config passed in value.
+
+    Raises:
+      errors.Config.InvalidValue upon invalid input value.
+    """
+    config = super().Decode(value, component_full_name, flag_values)
+    if 'cloud' in config and 'model_name' in config:
+      providers.LoadProvider(config['cloud'])
+      spec_class = managed_ai_model_spec.GetManagedAiModelSpecClass(
+          config['cloud'], config['model_name']
+      )
+    else:
+      raise errors.Config.InvalidValue(
+          'Required attribute missing from model spec '
+          f'config {config}.'
+      )
+    return spec_class(
+        self._GetOptionFullName(component_full_name),
+        flag_values,
+        **config,
+    )
+
+
 class _TpuGroupSpec(spec.BaseSpec):
   """Configurable options of a TPU."""
 
@@ -266,8 +368,8 @@ class _TpuGroupSpec(spec.BaseSpec):
   def __init__(
       self, component_full_name, group_name, flag_values=None, **kwargs
   ):
-    super(_TpuGroupSpec, self).__init__(
-        '{0}.{1}'.format(component_full_name, group_name),
+    super().__init__(
+        '{}.{}'.format(component_full_name, group_name),
         flag_values=flag_values,
         **kwargs,
     )
@@ -285,7 +387,7 @@ class _TpuGroupSpec(spec.BaseSpec):
       The pair specifies a decoder class and its __init__() keyword arguments
       to construct in order to decode the named option.
     """
-    result = super(_TpuGroupSpec, cls)._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'cloud': (
             option_decoders.EnumDecoder,
@@ -329,7 +431,7 @@ class _TpuGroupSpec(spec.BaseSpec):
       flag_values: flags.FlagValues. Runtime flags that may override the
         provided config values.
     """
-    super(_TpuGroupSpec, cls)._ApplyFlags(config_values, flag_values)
+    super()._ApplyFlags(config_values, flag_values)
     if flag_values['cloud'].present:
       config_values['cloud'] = flag_values.cloud
     if flag_values['tpu_cidr_range'].present:
@@ -353,9 +455,6 @@ class _TpuGroupSpec(spec.BaseSpec):
 class _EdwServiceDecoder(option_decoders.TypeVerifier):
   """Validates the edw service dictionary of a benchmark config object."""
 
-  def __init__(self, **kwargs):
-    super(_EdwServiceDecoder, self).__init__(valid_types=(dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Verifies edw service dictionary of a benchmark config object.
 
@@ -371,9 +470,7 @@ class _EdwServiceDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    edw_service_config = super(_EdwServiceDecoder, self).Decode(
-        value, component_full_name, flag_values
-    )
+    edw_service_config = super().Decode(value, component_full_name, flag_values)
     result = _EdwServiceSpec(
         self._GetOptionFullName(component_full_name),
         flag_values,
@@ -395,9 +492,7 @@ class _EdwServiceSpec(spec.BaseSpec):
   """
 
   def __init__(self, component_full_name, flag_values=None, **kwargs):
-    super(_EdwServiceSpec, self).__init__(
-        component_full_name, flag_values=flag_values, **kwargs
-    )
+    super().__init__(component_full_name, flag_values=flag_values, **kwargs)
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -408,7 +503,7 @@ class _EdwServiceSpec(spec.BaseSpec):
       The pair specifies a decoder class and its __init__() keyword arguments to
       construct in order to decode the named option.
     """
-    result = super(_EdwServiceSpec, cls)._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'type': (
             option_decoders.StringDecoder,
@@ -488,7 +583,7 @@ class _EdwServiceSpec(spec.BaseSpec):
       flag_values: flags.FlagValues. Runtime flags that may override the
         provided config values.
     """
-    super(_EdwServiceSpec, cls)._ApplyFlags(config_values, flag_values)
+    super()._ApplyFlags(config_values, flag_values)
     # TODO(saksena): Add cluster_subnet_group and cluster_parameter_group flags
     # Restoring from a snapshot, so defer to the user supplied cluster details
     if flag_values['edw_service_cluster_snapshot'].present:
@@ -513,9 +608,7 @@ class _EdwComputeResourceDecoder(option_decoders.TypeVerifier):
   """Validates the edw compute resource dictionary of a benchmark config object."""
 
   def __init__(self, **kwargs):
-    super(_EdwComputeResourceDecoder, self).__init__(
-        valid_types=(dict,), **kwargs
-    )
+    super().__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Verifies edw compute resource dictionary of a benchmark config object.
@@ -532,9 +625,9 @@ class _EdwComputeResourceDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    edw_compute_resource_config = super(
-        _EdwComputeResourceDecoder, self
-    ).Decode(value, component_full_name, flag_values)
+    edw_compute_resource_config = super().Decode(
+        value, component_full_name, flag_values
+    )
     result = _EdwComputeResourceSpec(
         self._GetOptionFullName(component_full_name),
         flag_values,
@@ -551,15 +644,11 @@ class _EdwComputeResourceSpec(spec.BaseSpec):
   """
 
   def __init__(self, component_full_name, flag_values=None, **kwargs):
-    super(_EdwComputeResourceSpec, self).__init__(
-        component_full_name, flag_values=flag_values, **kwargs
-    )
+    super().__init__(component_full_name, flag_values=flag_values, **kwargs)
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
-    result = super(
-        _EdwComputeResourceSpec, cls
-    )._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'type': (
             option_decoders.StringDecoder,
@@ -574,7 +663,7 @@ class _EdwComputeResourceSpec(spec.BaseSpec):
 
   @classmethod
   def _ApplyFlags(cls, config_values, flag_values):
-    super(_EdwComputeResourceSpec, cls)._ApplyFlags(config_values, flag_values)
+    super()._ApplyFlags(config_values, flag_values)
     if 'cloud' not in config_values:
       config_values['cloud'] = flag_values.cloud
 
@@ -585,9 +674,7 @@ class _PlacementGroupSpecsDecoder(option_decoders.TypeVerifier):
   cloud: str
 
   def __init__(self, **kwargs):
-    super(_PlacementGroupSpecsDecoder, self).__init__(
-        valid_types=(dict,), **kwargs
-    )
+    super().__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Verifies placement_group_specs dictionary of a benchmark config object.
@@ -607,18 +694,18 @@ class _PlacementGroupSpecsDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    placement_group_spec_configs = super(
-        _PlacementGroupSpecsDecoder, self
-    ).Decode(value, component_full_name, flag_values)
+    placement_group_spec_configs = super().Decode(
+        value, component_full_name, flag_values
+    )
     result = {}
-    for placement_group_name, placement_group_spec_config in six.iteritems(
+    for placement_group_name, placement_group_spec_config in (
         placement_group_spec_configs
-    ):
+    ).items():
       placement_group_spec_class = placement_group.GetPlacementGroupSpecClass(
           self.cloud
       )
       result[placement_group_name] = placement_group_spec_class(
-          '{0}.{1}'.format(
+          '{}.{}'.format(
               self._GetOptionFullName(component_full_name), placement_group_name
           ),
           flag_values=flag_values,
@@ -629,9 +716,6 @@ class _PlacementGroupSpecsDecoder(option_decoders.TypeVerifier):
 
 class _RelationalDbDecoder(option_decoders.TypeVerifier):
   """Validate the relational_db dictionary of a benchmark config object."""
-
-  def __init__(self, **kwargs):
-    super(_RelationalDbDecoder, self).__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Verify relational_db dict of a benchmark config object.
@@ -675,9 +759,6 @@ class _RelationalDbDecoder(option_decoders.TypeVerifier):
 class _NonRelationalDbDecoder(option_decoders.TypeVerifier):
   """Validate the non_relational_db dictionary of a benchmark config object."""
 
-  def __init__(self, **kwargs):
-    super(_NonRelationalDbDecoder, self).__init__(valid_types=(dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Verify non_relational_db dict of a benchmark config object.
 
@@ -716,9 +797,6 @@ class _NonRelationalDbDecoder(option_decoders.TypeVerifier):
 class _TpuGroupsDecoder(option_decoders.TypeVerifier):
   """Validate the tpu dictionary of a benchmark config object."""
 
-  def __init__(self, **kwargs):
-    super(_TpuGroupsDecoder, self).__init__(valid_types=(dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Verify tpu dict of a benchmark config object.
 
@@ -735,11 +813,9 @@ class _TpuGroupsDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    tpu_group_configs = super(_TpuGroupsDecoder, self).Decode(
-        value, component_full_name, flag_values
-    )
+    tpu_group_configs = super().Decode(value, component_full_name, flag_values)
     result = {}
-    for tpu_group_name, tpu_group_config in six.iteritems(tpu_group_configs):
+    for tpu_group_name, tpu_group_config in tpu_group_configs.items():
       result[tpu_group_name] = _TpuGroupSpec(
           self._GetOptionFullName(component_full_name),
           tpu_group_name,
@@ -755,11 +831,9 @@ class _CloudRedisSpec(spec.BaseSpec):
   redis_name: str
 
   def __init__(self, component_full_name, flag_values=None, **kwargs):
-    super(_CloudRedisSpec, self).__init__(
-        component_full_name, flag_values=flag_values, **kwargs
-    )
+    super().__init__(component_full_name, flag_values=flag_values, **kwargs)
     if not self.redis_name:
-      self.redis_name = 'pkb-cloudredis-{0}'.format(flag_values.run_uri)
+      self.redis_name = 'pkb-cloudredis-{}'.format(flag_values.run_uri)
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -770,7 +844,7 @@ class _CloudRedisSpec(spec.BaseSpec):
       The pair specifies a decoder class and its __init__() keyword arguments to
       construct in order to decode the named option.
     """
-    result = super(_CloudRedisSpec, cls)._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'cloud': (
             option_decoders.EnumDecoder,
@@ -800,16 +874,13 @@ class _CloudRedisSpec(spec.BaseSpec):
       flag_values: flags.FlagValues. Runtime flags that may override the
         provided config values.
     """
-    super(_CloudRedisSpec, cls)._ApplyFlags(config_values, flag_values)
+    super()._ApplyFlags(config_values, flag_values)
     if flag_values['cloud'].present or 'cloud' not in config_values:
       config_values['cloud'] = flag_values.cloud
 
 
 class _CloudRedisDecoder(option_decoders.TypeVerifier):
   """Validate the cloud_redis dictionary of a benchmark config object."""
-
-  def __init__(self, **kwargs):
-    super(_CloudRedisDecoder, self).__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Verify cloud_redis dict of a benchmark config object.
@@ -827,9 +898,7 @@ class _CloudRedisDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    cloud_redis_config = super(_CloudRedisDecoder, self).Decode(
-        value, component_full_name, flag_values
-    )
+    cloud_redis_config = super().Decode(value, component_full_name, flag_values)
     result = _CloudRedisSpec(
         self._GetOptionFullName(component_full_name),
         flag_values,
@@ -848,11 +917,9 @@ class _VPNServiceSpec(spec.BaseSpec):
   name: str
 
   def __init__(self, component_full_name, flag_values=None, **kwargs):
-    super(_VPNServiceSpec, self).__init__(
-        component_full_name, flag_values=flag_values, **kwargs
-    )
+    super().__init__(component_full_name, flag_values=flag_values, **kwargs)
     if not self.name:
-      self.name = 'pkb-vpn-svc-{0}'.format(flag_values.run_uri)
+      self.name = 'pkb-vpn-svc-{}'.format(flag_values.run_uri)
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -863,7 +930,7 @@ class _VPNServiceSpec(spec.BaseSpec):
       The pair specifies a decoder class and its __init__() keyword arguments to
       construct in order to decode the named option.
     """
-    result = super(_VPNServiceSpec, cls)._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'shared_key': (
             option_decoders.StringDecoder,
@@ -902,7 +969,7 @@ class _VPNServiceSpec(spec.BaseSpec):
       flag_values: flags.FlagValues. Runtime flags that may override the
         provided config values.
     """
-    super(_VPNServiceSpec, cls)._ApplyFlags(config_values, flag_values)
+    super()._ApplyFlags(config_values, flag_values)
     if flag_values['vpn_service_tunnel_count'].present:
       config_values['tunnel_count'] = flag_values.vpn_service_tunnel_count
     if flag_values['vpn_service_gateway_count'].present:
@@ -920,9 +987,6 @@ class _VPNServiceSpec(spec.BaseSpec):
 class _VPNServiceDecoder(option_decoders.TypeVerifier):
   """Validate the vpn_service dictionary of a benchmark config object."""
 
-  def __init__(self, **kwargs):
-    super(_VPNServiceDecoder, self).__init__(valid_types=(dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Verify vpn_service dict of a benchmark config object.
 
@@ -939,9 +1003,7 @@ class _VPNServiceDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    vpn_service_config = super(_VPNServiceDecoder, self).Decode(
-        value, component_full_name, flag_values
-    )
+    vpn_service_config = super().Decode(value, component_full_name, flag_values)
     result = _VPNServiceSpec(
         self._GetOptionFullName(component_full_name),
         flag_values,
@@ -1004,9 +1066,6 @@ class AppGroupSpec(spec.BaseSpec):
 class _AppGroupsDecoder(option_decoders.TypeVerifier):
   """Verify app_groups dictionary of a benchmark config object."""
 
-  def __init__(self, **kwargs):
-    super(_AppGroupsDecoder, self).__init__(valid_types=(dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Verifys app_groups dictionary of a benchmark config object.
 
@@ -1023,13 +1082,11 @@ class _AppGroupsDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    app_group_configs = super(_AppGroupsDecoder, self).Decode(
-        value, component_full_name, flag_values
-    )
+    app_group_configs = super().Decode(value, component_full_name, flag_values)
     result = {}
-    for app_group_name, app_group_config in six.iteritems(app_group_configs):
+    for app_group_name, app_group_config in app_group_configs.items():
       result[app_group_name] = AppGroupSpec(
-          '{0}.{1}'.format(
+          '{}.{}'.format(
               self._GetOptionFullName(component_full_name), app_group_name
           ),
           flag_values=flag_values,
@@ -1040,9 +1097,6 @@ class _AppGroupsDecoder(option_decoders.TypeVerifier):
 
 class _AppServiceDecoder(option_decoders.TypeVerifier):
   """Verify app_service dict of a benchmark config object."""
-
-  def __init__(self, **kwargs):
-    super(_AppServiceDecoder, self).__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Verify app_service dict of a benchmark config object.
@@ -1060,9 +1114,7 @@ class _AppServiceDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    config = super(_AppServiceDecoder, self).Decode(
-        value, component_full_name, flag_values
-    )
+    config = super().Decode(value, component_full_name, flag_values)
     spec_cls = app_service.GetAppServiceSpecClass(
         flag_values.appservice or config.get('appservice')
     )
@@ -1117,9 +1169,6 @@ class _MessagingServiceSpec(spec.BaseSpec):
 
 class _MessagingServiceDecoder(option_decoders.TypeVerifier):
   """Validate the messaging_service dictionary of a benchmark config object."""
-
-  def __init__(self, **kwargs):
-    super().__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Verify messaging_service dict of a benchmark config object.
@@ -1196,9 +1245,6 @@ class _DataDiscoveryServiceSpec(spec.BaseSpec):
 class _DataDiscoveryServiceDecoder(option_decoders.TypeVerifier):
   """Validate the data_discovery_service dict of a benchmark config object."""
 
-  def __init__(self, **kwargs):
-    super().__init__(valid_types=(dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Verify data_discovery_service dict of a benchmark config object.
 
@@ -1230,9 +1276,6 @@ class _DataDiscoveryServiceDecoder(option_decoders.TypeVerifier):
 
 class _KeyDecoder(option_decoders.TypeVerifier):
   """Validates the key dict of a benchmark config object."""
-
-  def __init__(self, **kwargs):
-    super().__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Verifies the key dict of a benchmark config object."""
@@ -1275,13 +1318,13 @@ class BenchmarkConfigSpec(spec.BaseSpec):
       errors.Config.InvalidValue: If expected_os_types is provided and any of
           the VM groups are configured with an OS type that is not included.
     """
-    super(BenchmarkConfigSpec, self).__init__(component_full_name, **kwargs)
+    super().__init__(component_full_name, **kwargs)
     if expected_os_types is not None:
       mismatched_os_types = []
-      for group_name, group_spec in sorted(six.iteritems(self.vm_groups)):
+      for group_name, group_spec in sorted(self.vm_groups.items()):
         if group_spec.os_type not in expected_os_types:
           mismatched_os_types.append(
-              '{0}.vm_groups[{1}].os_type: {2}'.format(
+              '{}.vm_groups[{}].os_type: {}'.format(
                   component_full_name,
                   repr(group_name),
                   repr(group_spec.os_type),
@@ -1289,8 +1332,8 @@ class BenchmarkConfigSpec(spec.BaseSpec):
           )
       if mismatched_os_types:
         raise errors.Config.InvalidValue(
-            'VM groups in {0} may only have the following OS types: {1}. The '
-            'following VM group options are invalid:{2}{3}'.format(
+            'VM groups in {} may only have the following OS types: {}. The '
+            'following VM group options are invalid:{}{}'.format(
                 component_full_name,
                 ', '.join(repr(os_type) for os_type in expected_os_types),
                 os.linesep,
@@ -1310,7 +1353,7 @@ class BenchmarkConfigSpec(spec.BaseSpec):
       The pair specifies a decoder class and its __init__() keyword arguments
       to construct in order to decode the named option.
     """
-    result = super(BenchmarkConfigSpec, cls)._GetOptionDecoderConstructions()
+    result = super()._GetOptionDecoderConstructions()
     result.update({
         'description': (option_decoders.StringDecoder, {'default': None}),
         'name': (option_decoders.StringDecoder, {'default': None}),
@@ -1337,6 +1380,8 @@ class BenchmarkConfigSpec(spec.BaseSpec):
         'tpu_groups': (_TpuGroupsDecoder, {'default': {}}),
         'edw_compute_resource': (_EdwComputeResourceDecoder, {'default': None}),
         'edw_service': (_EdwServiceDecoder, {'default': None}),
+        'example_resource': (_ExampleResourceDecoder, {'default': None}),
+        'base_job': (_BaseJobDecoder, {'default': None}),
         'cloud_redis': (_CloudRedisDecoder, {'default': None}),
         'vpn_service': (_VPNServiceDecoder, {'default': None}),
         'app_groups': (_AppGroupsDecoder, {'default': {}}),
@@ -1360,6 +1405,7 @@ class BenchmarkConfigSpec(spec.BaseSpec):
                 'default': None,
             },
         ),
+        'ai_model': (_ManagedAiModelSpecDecoder, {'default': None}),
         'data_discovery_service': (
             _DataDiscoveryServiceDecoder,
             {
@@ -1400,9 +1446,7 @@ class BenchmarkConfigSpec(spec.BaseSpec):
     decoders = decoders.copy()
     self.flags = config.get('flags')
     with self.RedirectFlags(flag_values):
-      super(BenchmarkConfigSpec, self)._DecodeAndInit(
-          component_full_name, config, decoders, flag_values
-      )
+      super()._DecodeAndInit(component_full_name, config, decoders, flag_values)
 
   @contextlib.contextmanager
   def RedirectFlags(self, flag_values):

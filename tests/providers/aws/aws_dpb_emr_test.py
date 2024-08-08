@@ -16,7 +16,7 @@
 import copy
 import json
 import time
-from typing import Any, Optional
+from typing import Any
 import unittest
 from unittest import mock
 
@@ -100,9 +100,9 @@ def _GetEmrSpec():
 
 
 def _GetJobRunMockPayload(
-    vcpu_hour: Optional[float] = None,
-    memory_gb_hour: Optional[float] = None,
-    storage_gb_hour: Optional[float] = None,
+    vcpu_hour: float | None = None,
+    memory_gb_hour: float | None = None,
+    storage_gb_hour: float | None = None,
 ) -> dict[str, Any]:
   payload = copy.deepcopy(_BASE_JOB_RUN_PAYLOAD)
   if vcpu_hour is not None:
@@ -142,7 +142,7 @@ class LocalAwsDpbEmr(aws_dpb_emr.AwsDpbEmr):
 class AwsDpbEmrTestCase(pkb_common_test_case.PkbCommonTestCase):
 
   def setUp(self):
-    super(AwsDpbEmrTestCase, self).setUp()
+    super().setUp()
     FLAGS.run_uri = TEST_RUN_URI
     FLAGS.dpb_service_zone = AWS_ZONE_US_EAST_1A
     FLAGS.zones = [AWS_ZONE_US_EAST_1A]

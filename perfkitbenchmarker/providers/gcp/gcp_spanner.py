@@ -23,7 +23,7 @@ import datetime
 import json
 import logging
 import statistics
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from absl import flags
 from google.cloud import monitoring_v3
@@ -169,7 +169,7 @@ class SpannerSpec(relational_db_spec.RelationalDbSpec):
   def __init__(
       self,
       component_full_name: str,
-      flag_values: Optional[flags.FlagValues] = None,
+      flag_values: flags.FlagValues | None = None,
       **kwargs,
   ):
     super().__init__(component_full_name, flag_values=flag_values, **kwargs)
@@ -276,7 +276,7 @@ class GcpSpannerInstance(relational_db.BaseRelationalDb):
   REQUIRED_ATTRS = ['CLOUD', 'IS_MANAGED', 'ENGINE']
 
   def __init__(self, db_spec: SpannerSpec, **kwargs):
-    super(GcpSpannerInstance, self).__init__(db_spec, **kwargs)
+    super().__init__(db_spec, **kwargs)
     self.instance_id = (
         db_spec.spanner_instance_id or f'pkb-instance-{FLAGS.run_uri}'
     )

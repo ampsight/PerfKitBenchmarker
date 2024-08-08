@@ -22,11 +22,13 @@ parameter values. Each file is accessed in a separate map task.
 """
 
 import copy
+from typing import List
 
 from absl import flags
 from perfkitbenchmarker import configs
 from perfkitbenchmarker import dpb_constants
 from perfkitbenchmarker import errors
+from perfkitbenchmarker import regex_util
 from perfkitbenchmarker import sample
 
 BENCHMARK_NAME = 'dpb_testdfsio_benchmark'
@@ -46,9 +48,11 @@ dpb_testdfsio_benchmark:
         GCP:
           disk_size: 1500
           disk_type: pd-standard
+          mount_point: /scratch
         AWS:
           disk_size: 1500
           disk_type: gp2
+          mount_point: /scratch
     worker_count: 2
 """
 
@@ -74,7 +78,12 @@ flags.DEFINE_list(
 
 FLAGS = flags.FLAGS
 
-SUPPORTED_DPB_BACKENDS = [dpb_constants.DATAPROC, dpb_constants.EMR]
+SUPPORTED_DPB_BACKENDS = [
+    dpb_constants.DATAPROC,
+    dpb_constants.EMR,
+    # add unmanged hadoop yarn cluster support for dfsio
+    dpb_constants.UNMANAGED_DPB_SVC_YARN_CLUSTER,
+]
 
 # TestDSIO commands
 WRITE = 'write'
@@ -106,6 +115,12 @@ def CheckPrerequisites(benchmark_config):
 
 def Prepare(benchmark_spec):
   del benchmark_spec  # unused
+
+
+def ParseResults(command: str, stdout: str) -> List[sample.Sample]:
+  regex = r'Throughput mb/sec: (\d+.\d+)'
+  throughput = regex_util.ExtractFloat(regex, stdout)
+  return [sample.Sample(f'{command}_throughput', throughput, 'MB/s')]
 
 
 def Run(benchmark_spec):
@@ -157,6 +172,8 @@ def Run(benchmark_spec):
                 command + '_run_time', result.run_time, 'seconds', metadata
             )
         )
+        if command in (WRITE, READ):
+          results += ParseResults(command, result.stderr)
   return results
 
 

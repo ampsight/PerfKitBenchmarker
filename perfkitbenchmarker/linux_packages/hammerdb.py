@@ -19,13 +19,11 @@ import functools
 import posixpath
 import re
 import statistics
-from typing import Any, FrozenSet, List, Optional
+from typing import Any, FrozenSet, List
 
 from absl import flags
 from dateutil import parser
 from perfkitbenchmarker import data
-from perfkitbenchmarker import errors
-from perfkitbenchmarker import os_types
 from perfkitbenchmarker import regex_util
 from perfkitbenchmarker import sample
 from perfkitbenchmarker import sql_engine_utils
@@ -124,7 +122,7 @@ HAMMERDB_SCRIPT = flags.DEFINE_enum(
     'The script to run for hammerdb.',
 )
 
-_HAMMERDB_BUILD_TIMEOUT = flags.DEFINE_integer(
+HAMMERDB_BUILD_TIMEOUT = flags.DEFINE_integer(
     'hammerdbcli_build_timeout',
     15000,
     'Timeout hammerdb build phase when exceed build timeout.',
@@ -231,8 +229,14 @@ HAMMERDB_RESTART_BEFORE_RUN = flags.DEFINE_bool(
     'Restart SQL Server before run phase',
 )
 
+HAMMERDB_SERVER_CONFIGURATION = flags.DEFINE_string(
+    'hammerdbcli_server_configuration',
+    '',
+    'Server configuration to use when benchmarking IAAS DB using HammerDB tool',
+)
 
-def SetDefaultConfig(num_cpus: Optional[int]):
+
+def SetDefaultConfig(num_cpus: int | None):
   """Set the default configurations of unfilled flags."""
   if HAMMERDB_NUM_VU.value is None:
     if HAMMERDB_SCRIPT.value == HAMMERDB_SCRIPT_TPC_H:
@@ -253,16 +257,7 @@ def SetDefaultConfig(num_cpus: Optional[int]):
 
 def CheckPrerequisites(_):
   """Verifies that benchmark setup is correct."""
-  # hammerdb 4.5 and later versions required glibc 2.29 or later,
-  # which is not available on ubuntu1804 and earlier.
-  if HAMMERDB_VERSION.value == HAMMERDB_4_5 and FLAGS.os_type in [
-      os_types.UBUNTU1604,
-      os_types.UBUNTU1804,
-  ]:
-    raise errors.Setup.InvalidFlagConfigurationError(
-        'Hammerdb version 4.5 is not supported on os type {}.'
-        'Use a later version of the os or an earlier version of hammerdb.'
-    )
+  pass
 
 
 # define Hammerdb exception
@@ -327,7 +322,7 @@ class HammerDbTclScript(object):
   def Run(
       self,
       vm: virtual_machine.BaseVirtualMachine,
-      timeout: Optional[int] = 60 * 60 * 6,
+      timeout: int | None = 60 * 60 * 6,
   ) -> str:
     """Run hammerdbcli script."""
     script_location = '{0}/{1}'.format(
@@ -428,7 +423,7 @@ class TclScriptParameters(object):
         SCRIPT_PARAMETER_PASSWORD: password,
         SCRIPT_PARAMETER_USER: user,
         SCRIPT_PARAMETER_AZURE: 'true' if is_managed_azure else 'false',
-        SCRIPT_PARAMETER_BUILD_TIMEOUT: _HAMMERDB_BUILD_TIMEOUT.value,
+        SCRIPT_PARAMETER_BUILD_TIMEOUT: HAMMERDB_BUILD_TIMEOUT.value,
     }
 
     if hammerdb_script == HAMMERDB_SCRIPT_TPC_H:
@@ -953,7 +948,7 @@ def Run(
     vm: virtual_machine.BaseVirtualMachine,
     db_engine: str,
     hammerdb_script: str,
-    timeout: Optional[int] = 60 * 60 * 8,
+    timeout: int | None = 60 * 60 * 8,
 ) -> str:
   """Run the HammerDBCli Benchmark.
 

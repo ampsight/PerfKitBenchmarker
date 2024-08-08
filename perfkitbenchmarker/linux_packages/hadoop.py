@@ -152,11 +152,7 @@ def YumInstall(vm):
 
 def AptInstall(vm):
   """Installs Hadoop on the VM."""
-  libsnappy = 'libsnappy1'
-  if not vm.HasPackage(libsnappy):
-    # libsnappy's name on ubuntu16.04 is libsnappy1v5. Let's try that instead.
-    libsnappy = 'libsnappy1v5'
-  vm.InstallPackages(libsnappy)
+  vm.InstallPackages('libsnappy1v5')
   _Install(vm)
 
 
@@ -222,10 +218,25 @@ def _RenderConfig(
   num_reduce_tasks = reduces_per_node * num_workers
   block_size = _BLOCKSIZE_OVERRIDE.value * 1024 * 1024
 
+  dfs_data_paths = None
+  mapreduce_cluster_local_paths = None
+
   if vm.scratch_disks:
-    # TODO(pclay): support multiple scratch disks. A current suboptimal
-    # workaround is RAID0 local_ssds with --num_striped_disks.
     scratch_dir = posixpath.join(vm.GetScratchDir(), 'hadoop')
+    dfs_data_paths = ','.join([
+        'file://' + posixpath.join(vm.GetScratchDir(i), 'hadoop', 'dfs', 'data')
+        for i in range(len(vm.scratch_disks))
+    ])
+    mapreduce_cluster_local_paths = ','.join([
+        posixpath.join(vm.GetScratchDir(i), 'hadoop', 'mapred', 'local')
+        for i in range(len(vm.scratch_disks))
+    ])
+    # according to mapred-default.xml, the paths for mapreduce.cluster.local.dir
+    # need to be existing, otherwise they will be ignored.
+    _MakeFolders(
+        mapreduce_cluster_local_paths,
+        vm,
+    )
   else:
     scratch_dir = posixpath.join('/tmp/pkb/local_scratch', 'hadoop')
 
@@ -250,6 +261,8 @@ def _RenderConfig(
       'configure_s3': configure_s3,
       'optional_tools': optional_tools,
       'block_size': block_size,
+      'dfs_data_paths': dfs_data_paths,
+      'mapreduce_cluster_local_paths': mapreduce_cluster_local_paths,
   }
 
   for file_name in DATA_FILES:
@@ -263,6 +276,12 @@ def _RenderConfig(
       vm.RenderTemplate(file_path, os.path.splitext(remote_path)[0], context)
     else:
       vm.RemoteCopy(file_path, remote_path)
+
+
+def _MakeFolders(paths_split_by_comma, vm):
+  vm.RemoteCommand(
+      ('mkdir -p {0}').format(' '.join(paths_split_by_comma.split(',')))
+  )
 
 
 def _GetHDFSOnlineNodeCount(master):
@@ -308,7 +327,17 @@ def ConfigureAndStart(master, workers, start_yarn=True, configure_s3=False):
   def AddKey(vm):
     vm.RemoteCommand('echo "{0}" >> ~/.ssh/authorized_keys'.format(public_key))
 
+  # Add unmanaged Hadoop bin path to the environment PATH so that
+  # hadoop/yarn/hdfs commands can be ran without specifying the full path.
+  def ExportHadoopBinPath(vm):
+    vm.RemoteCommand(
+        'echo "export PATH=$PATH:{0}" >> ~/.bashrc && source ~/.bashrc'.format(
+            HADOOP_BIN
+        )
+    )
+
   background_tasks.RunThreaded(AddKey, vms)
+  background_tasks.RunThreaded(ExportHadoopBinPath, vms)
 
   context = {
       'hadoop_dir': HADOOP_DIR,

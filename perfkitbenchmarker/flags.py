@@ -178,9 +178,14 @@ flags.DEFINE_integer('data_disk_size', None, 'Size, in gb, for all data disks.')
 flags.DEFINE_integer(
     'num_striped_disks',
     None,
-    'The number of data disks to stripe together to form one '
-    '"logical" data disk. This defaults to 1, '
-    'which means no striping. ',
+    'The number of data disks for PKB to create and stripe together into a '
+    'single RAID 0 device. This defaults to 1, which means no striping. If '
+    'data disks are local this is simply the number of existing disks you '
+    'would like to combine. If data disks are provisioned remote disks, PKB '
+    'will create this many disks and stripe them together. You do not need to '
+    'set vm_group.disk_count. If you do set both vm_group.disk_count=m and '
+    'num_striped_disks=n, you will end up with m logical disks striped out of '
+    'm x n remote disks, which is probably not what you want.',
     lower_bound=1,
 )
 flags.DEFINE_integer(
@@ -474,4 +479,36 @@ ALWAYS_CALL_CLEANUP = flags.DEFINE_boolean(
     'always_call_cleanup',
     False,
     'Indicates that this benchmark run should always run the Cleanup phase.'
+)
+SKIP_TEARDOWN_CONDITIONS = flags.DEFINE_list(
+    'skip_teardown_conditions',
+    [],
+    'A list of conditions that warrant skipping teardown. This is useful for '
+    'investigating resources with interesting performance characteristics.\n'
+    'Each item contains three tokens: '
+    '\tmetric: the metric to check\n'
+    '\tdirection: the direction to check against ("<" or ">")\n'
+    '\tthreshold: the threshold to check against (in seconds)\n'
+    'For example: "kernel_start>50"\n'
+    'Additional conditions should be separated by commas. '
+    'Adjust the --timeout_minutes flag to annotate the affected resources with '
+    'your desired keep up time. The PKB run will complete, so users of this '
+    'flag must have a spearate teardown procedure in place for resources with '
+    'extended uptimes.',
+)
+SKIP_TEARDOWN_ZONAL_VM_LIMIT = flags.DEFINE_integer(
+    'skip_teardown_zonal_vm_limit',
+    None,
+    'The maximum number of VMs in the zone (within a project) that can be left '
+    'behind via the --skip_teardown_conditions flag. If skipping teardown will '
+    'cause the number of VMs in the project to exceed this limit, teardown '
+    'will be performed regardless of the --skip_teardown_conditions flag.',
+)
+SKIP_TEARDOWN_KEEP_UP_MINUTES = flags.DEFINE_integer(
+    'skip_teardown_keep_up_minutes',
+    1440,  # 24 hours
+    'The time in minutes that VMs left behind by the benchmark should live. '
+    'This is used to annotate the "timeout_utc" tag for resources that are '
+    'kept alive through the --skip_teardown_conditions flag.\n'
+    'Only implemented for GCE VMs.',
 )

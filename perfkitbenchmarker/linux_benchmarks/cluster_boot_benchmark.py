@@ -68,7 +68,7 @@ import signal
 import socket
 import subprocess
 import time
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from absl import flags
 from perfkitbenchmarker import background_tasks
@@ -89,6 +89,9 @@ cluster_boot:
   vm_groups:
     default:
       vm_spec:
+        AliCloud:
+          machine_type: ecs.g5.large
+          zone: us-east-1a
         AWS:
           machine_type: m5.large
           zone: us-east-1
@@ -168,7 +171,7 @@ def CollectNetworkSamples() -> bool:
   return bool(_CALLBACK_EXTERNAL.value or _CALLBACK_INTERNAL.value)
 
 
-def PrepareStartupScript() -> Tuple[str, Optional[int], str]:
+def PrepareStartupScript() -> Tuple[str, int | None, str]:
   """Prepare startup script which will be ran as part of VM booting process."""
   port = _TCPDUMP_PORT.value
   if CollectNetworkSamples():

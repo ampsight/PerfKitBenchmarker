@@ -71,7 +71,7 @@ class TestCreateFailedRunSampleFlag(unittest.TestCase):
     ]
 
     self.spec = mock.MagicMock()
-    self.collector = mock.Mock()
+    self.collector = mock.MagicMock()
 
   def testCreateProvisionFailedSample(self):
     self.flags_mock.create_failed_run_samples = True
@@ -230,12 +230,14 @@ class TestMiscFunctions(
 ):
   """Testing for various functions in pkb.py."""
 
+  OS_TYPE = 'debian12'
+
   def _MockVm(
       self, name: str, remote_command_text: str
   ) -> linux_virtual_machine.BaseLinuxVirtualMachine:
     vm_spec = pkb_common_test_case.CreateTestVmSpec()
     vm = pkb_common_test_case.TestLinuxVirtualMachine(vm_spec=vm_spec)
-    vm.OS_TYPE = 'debian9'
+    vm.OS_TYPE = self.OS_TYPE
     vm.name = name
     vm.RemoteCommand = mock.Mock(return_value=(remote_command_text, ''))
     return vm
@@ -243,7 +245,7 @@ class TestMiscFunctions(
   def _MockVmWithVuln(
       self, name: str, cpu_vuln: linux_virtual_machine.CpuVulnerabilities
   ) -> mock.Mock:
-    vm = mock.Mock(OS_TYPE='debian9')
+    vm = mock.Mock(OS_TYPE=self.OS_TYPE)
     vm.name = name
     type(vm).cpu_vulnerabilities = mock.PropertyMock(return_value=cpu_vuln)
     return vm
@@ -561,6 +563,75 @@ class TestRunBenchmarks(pkb_common_test_case.PkbCommonTestCase):
     flags_dict = {'retries': retries, 'run_stage': run_stage}
     self.assertEqual(pkb.ValidateRetriesAndRunStages(flags_dict), is_valid)
 
+  @parameterized.named_parameters(
+      ('InvalidCondition', ['invalid_condition']),
+      ('InvalidDirection', ['metric1=1.5']),
+      ('InvalidThreshold', ['metric1>invalid_threshold']),
+  )
+  def testParseSkipTeardownConditionsInvalid(self, conditions):
+    self.assertRaises(
+        ValueError,
+        pkb.ParseSkipTeardownConditions,
+        conditions,
+    )
+
+  @parameterized.named_parameters(
+      (
+          'ValidCondition',
+          ['metric1>1.5'],
+          {
+              'metric1': {'lower_bound': 1.5, 'upper_bound': None}
+          },
+      ),
+      (
+          'ValidConditions',
+          ['metric1>1.5', 'metric2<2.5'],
+          {
+              'metric1': {'lower_bound': 1.5, 'upper_bound': None},
+              'metric2': {'lower_bound': None, 'upper_bound': 2.5},
+          },
+      ),
+      (
+          'UpperAndLowerBounds',
+          ['metric1>1.5', 'metric1<2.5'],
+          {
+              'metric1': {'lower_bound': 1.5, 'upper_bound': 2.5},
+          },
+      ),
+      (
+          'LowerBoundReplaced',
+          ['metric1>2.5', 'metric1>1.5'],
+          {
+              'metric1': {'lower_bound': 1.5, 'upper_bound': None},
+          },
+      ),
+      (
+          'UpperBoundReplaced',
+          ['metric1<1.5', 'metric1<2.5'],
+          {
+              'metric1': {'lower_bound': None, 'upper_bound': 2.5},
+          },
+      ),
+  )
+  def testParseSkipTeardownConditionsValid(self, conditions, parsed):
+    self.assertEqual(pkb.ParseSkipTeardownConditions(conditions), parsed)
+
+  @parameterized.named_parameters(
+      ('NoConditions', {'skip_teardown_conditions': []}, True),
+      (
+          'InvalidThreshold',
+          {'skip_teardown_conditions': ['metric1>invalid_threshold']},
+          False,
+      ),
+      (
+          'ValidConditions',
+          {'skip_teardown_conditions': ['metric1>1.5', 'metric2<2.5']},
+          True,
+      ),
+  )
+  def testValidateSkipTeardownConditions(self, flags_dict, is_valid):
+    self.assertEqual(pkb.ValidateSkipTeardownConditions(flags_dict), is_valid)
+
   @flagsaver.flagsaver(zone=['zone_1'], smart_quota_retry=True, retries=1)
   def testSmartQuotaRetry(self):
     test_spec = pkb_common_test_case.CreateBenchmarkSpecFromYaml()
@@ -695,6 +766,153 @@ class FreezeRestoreTest(pkb_common_test_case.PkbCommonTestCase):
     test_bm_spec.Delete()
 
     test_bm_spec.relational_db.Delete.assert_called_with(freeze=True)
+
+
+class TestConditionalSkipTeardown(parameterized.TestCase):
+  SAMPLES = [
+      sample.Sample(
+          metric='metric1',
+          value=1.0,
+          unit='seconds',
+          timestamp=1678147200.0,
+      ).asdict(),
+      sample.Sample(
+          metric='metric2',
+          value=2.0,
+          unit='seconds',
+          timestamp=1678147200.0,
+      ).asdict(),
+      sample.Sample(
+          metric='metricminus10',
+          value=-10.0,
+          unit='seconds',
+          timestamp=1678147200.0,
+      ).asdict(),
+  ]
+
+  @parameterized.named_parameters(
+      {
+          'testcase_name': 'no_conditions_met',
+          'conditions': {
+              'metric1': {'lower_bound': 1.5, 'upper_bound': None},
+              'metric2': {'lower_bound': None, 'upper_bound': 1.5},
+          },
+      },
+      {
+          'testcase_name': 'upper_greater_than_lower',
+          'conditions': {
+              'metric1': {'lower_bound': 1.5, 'upper_bound': 2.5},
+          },
+      },
+      {
+          'testcase_name': 'upper_less_than_lower',
+          'conditions': {
+              'metric1': {'lower_bound': 1.5, 'upper_bound': 0.5},
+          },
+      },
+      {
+          'testcase_name': 'neither_bound',
+          'conditions': {
+              'metric1': {'lower_bound': None, 'upper_bound': None},
+          },
+      },
+      {
+          'testcase_name': 'no_flag_passed',
+          'conditions': None,
+      },
+  )
+  def testTeardownAsUsual(self, conditions):
+    self.assertTrue(
+        pkb.ShouldTeardown(
+            skip_teardown_conditions=conditions,
+            samples=self.SAMPLES,
+        )
+    )
+
+  @parameterized.named_parameters(
+      {
+          'testcase_name': 'less_test',
+          'conditions': {
+              'metric1': {'lower_bound': None, 'upper_bound': 1.5},
+          },
+      },
+      {
+          'testcase_name': 'greater_test',
+          'conditions': {
+              'metric2': {'lower_bound': 1.5, 'upper_bound': None},
+          },
+      },
+      {
+          'testcase_name': 'multiple_conditions',
+          'conditions': {
+              'metric1': {'lower_bound': None, 'upper_bound': 1.5},
+              'metric2': {'lower_bound': 1.5, 'upper_bound': None},
+          },
+      },
+      {
+          'testcase_name': 'upper_greater_than_lower',
+          'conditions': {
+              'metric1': {'lower_bound': 0.5, 'upper_bound': 1.5},
+          },
+      },
+      {
+          'testcase_name': 'upper_less_than_lower',
+          'conditions': {
+              'metric1': {'lower_bound': 2.5, 'upper_bound': 1.5},
+          },
+      },
+      {
+          'testcase_name': 'zero_bound',
+          'conditions': {
+              'metricminus10': {'lower_bound': None, 'upper_bound': 0.0},
+          },
+      },
+  )
+  def testSkipTeardown(self, conditions):
+    self.assertFalse(
+        pkb.ShouldTeardown(
+            skip_teardown_conditions=conditions,
+            samples=self.SAMPLES,
+        )
+    )
+
+  @parameterized.named_parameters(
+      {
+          'testcase_name': 'teardown_anyway',
+          'num_vms': 1,
+          'zonal_vm_limit': 1,
+          'expected_result': True,
+      },
+      {
+          'testcase_name': 'skip_teardown',
+          'num_vms': 1,
+          'zonal_vm_limit': 2,
+          'expected_result': False,
+      },
+      {
+          'testcase_name': 'teardown_anyway_multiple_vms',
+          'num_vms': 2,
+          'zonal_vm_limit': 2,
+          'expected_result': True,
+      },
+  )
+  def testShouldTeardownZonalVmLimit(
+      self, num_vms, zonal_vm_limit, expected_result
+  ):
+    test_vm = mock.MagicMock()
+    test_vm.GetNumTeardownSkippedVms.return_value = 1
+    test_conditions = {
+        'metric1': {'lower_bound': None, 'upper_bound': 1.5},
+    }
+    self.assertEqual(
+        expected_result,
+        pkb.ShouldTeardown(
+            skip_teardown_conditions=test_conditions,
+            samples=self.SAMPLES,
+            vms=[test_vm] * num_vms,
+            skip_teardown_zonal_vm_limit=zonal_vm_limit,
+        )
+    )
 
 
 if __name__ == '__main__':

@@ -19,11 +19,11 @@ database.
 
 import ntpath
 import os
-from typing import Optional
 
 from absl import flags
 from perfkitbenchmarker import data
 from perfkitbenchmarker import db_util
+from perfkitbenchmarker import errors
 from perfkitbenchmarker import iaas_relational_db
 from perfkitbenchmarker import os_types
 from perfkitbenchmarker import relational_db
@@ -385,6 +385,7 @@ class SQLServerIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
     self.PushAndRunPowershellScript(
         replica_vms[0], "uninstall_sql_server.ps1")
     replica_vms[0].Reboot()
+    server_vm.Reboot()
 
     if self.spec.high_availability_type == "FCIMW":
       # Configure MW cluster disks.
@@ -433,6 +434,8 @@ class SQLServerIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
               sql_srv_vm, "update_sql_server.ps1", [kb_number]
           )
           sql_srv_vm.Reboot()
+    self.PushAndRunPowershellScript(
+        server_vm, "check_sql_role_status_after_upgrade.ps1")
 
     # Update variables user for connection to SQL server.
     self.spec.database_password = win_password
@@ -522,10 +525,27 @@ class SQLServerIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
     self.PushAndRunPowershellScript(
         controller_vm, "grant_witness_access.ps1")
 
-    server_vm.RemoteCommand(
-        f"Enable-SqlAlwaysOn -ServerInstance {server_vm.name} -Force")
-    replica_vms[0].RemoteCommand(
-        f"Enable-SqlAlwaysOn -ServerInstance {replica_vms[0].name} -Force")
+    retry_count = 0
+    while retry_count < 3:
+      try:
+        server_vm.RemoteCommand(
+            f"Enable-SqlAlwaysOn -ServerInstance {server_vm.name} -Force")
+        break
+      except errors.VirtualMachine.RemoteCommandError as e:
+        retry_count += 1
+        if retry_count >= 3:
+          raise e
+
+    retry_count = 0
+    while retry_count < 3:
+      try:
+        replica_vms[0].RemoteCommand(
+            f"Enable-SqlAlwaysOn -ServerInstance {replica_vms[0].name} -Force")
+        break
+      except errors.VirtualMachine.RemoteCommandError as e:
+        retry_count += 1
+        if retry_count >= 3:
+          raise e
 
     # Create folder structure and dummy DB database for AOAG creation
     server_vm.RemoteCommand(r"mkdir F:\DATA; mkdir F:\Logs; mkdir F:\Backup")
@@ -707,9 +727,9 @@ class SQLServerIAASRelationalDb(iaas_relational_db.IAASRelationalDb):
       self,
       vm: virtual_machine.VirtualMachine,
       script_name: str,
-      cmd_parameters: Optional[list[str]] = None,
-      source_path: str = "relational_db_configs/sqlserver_ha_configs/"
-      ) -> tuple[str, str]:
+      cmd_parameters: list[str] | None = None,
+      source_path: str = "relational_db_configs/sqlserver_ha_configs/",
+  ) -> tuple[str, str]:
     """Pushes a powershell script to VM and run it.
 
     Args:

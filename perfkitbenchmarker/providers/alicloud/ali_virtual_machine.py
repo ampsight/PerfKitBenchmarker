@@ -76,7 +76,7 @@ class AliVirtualMachine(virtual_machine.BaseVirtualMachine):
     Args:
       vm_spec: virtual_machine.BaseVirtualMachineSpec object of the VM.
     """
-    super(AliVirtualMachine, self).__init__(vm_spec)
+    super().__init__(vm_spec)
     self.image = FLAGS.image
     self.user_name = FLAGS.ali_user_name
     self.key_pair_name = None
@@ -430,7 +430,7 @@ class AliVirtualMachine(virtual_machine.BaseVirtualMachine):
     util.AddTags(self.id, util.ResourceTypes.INSTANCE, self.region, **kwargs)
 
 
-class AliCloudKeyFileManager(object):
+class AliCloudKeyFileManager:
   """Object for managing AliCloud Keyfiles."""
 
   _lock = threading.Lock()
@@ -479,7 +479,7 @@ class AliCloudKeyFileManager(object):
 
   @classmethod
   def GetKeyNameForRun(cls):
-    return 'perfkit_key_{0}'.format(FLAGS.run_uri)
+    return 'perfkit_key_{}'.format(FLAGS.run_uri)
 
   @classmethod
   def GetPublicKey(cls):
@@ -494,19 +494,19 @@ class Debian113BasedAliVirtualMachine(
   IMAGE_NAME_FILTER = 'debian_11_3_x64_20G*alibase*.vhd'
 
 
-class Ubuntu1604BasedAliVirtualMachine(
-    AliVirtualMachine, linux_virtual_machine.Ubuntu1604Mixin
+class Ubuntu2004BasedAliVirtualMachine(
+    AliVirtualMachine, linux_virtual_machine.Ubuntu2004Mixin
 ):
-  IMAGE_NAME_FILTER = 'ubuntu_16_04_x64*alibase*.vhd'
+  IMAGE_NAME_FILTER = 'ubuntu_20_04_x64*alibase*.vhd'
 
 
-class Ubuntu1804BasedAliVirtualMachine(
-    AliVirtualMachine, linux_virtual_machine.Ubuntu1804Mixin
+class Ubuntu2204BasedAliVirtualMachine(
+    AliVirtualMachine, linux_virtual_machine.Ubuntu2204Mixin
 ):
-  IMAGE_NAME_FILTER = 'ubuntu_18_04_x64*alibase*.vhd'
+  IMAGE_NAME_FILTER = 'ubuntu_22_04_x64*alibase*.vhd'
 
 
-class CentOs7BasedAliVirtualMachine(
-    AliVirtualMachine, linux_virtual_machine.CentOs7Mixin
+class Ubuntu2404BasedAliVirtualMachine(
+    AliVirtualMachine, linux_virtual_machine.Ubuntu2404Mixin
 ):
-  IMAGE_NAME_FILTER = 'centos_7_05_x64*alibase*.vhd'
+  IMAGE_NAME_FILTER = 'ubuntu_24_04_x64*alibase*.vhd'

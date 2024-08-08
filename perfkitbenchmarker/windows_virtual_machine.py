@@ -18,13 +18,13 @@ import logging
 import ntpath
 import os
 import time
-from typing import Optional, Tuple, cast
+from typing import Tuple, cast
 
 from absl import flags
 from perfkitbenchmarker import background_tasks
 from perfkitbenchmarker import errors
+from perfkitbenchmarker import os_mixin
 from perfkitbenchmarker import os_types
-from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker import windows_packages
 import six
@@ -86,7 +86,7 @@ class WaitTimeoutError(Exception):
   """Exception thrown if a wait operation takes too long."""
 
 
-class BaseWindowsMixin(virtual_machine.BaseOsMixin):
+class BaseWindowsMixin(os_mixin.BaseOsMixin):
   """Class that holds Windows related VM methods and attributes."""
 
   OS_TYPE = os_types.WINDOWS
@@ -108,7 +108,7 @@ class BaseWindowsMixin(virtual_machine.BaseOsMixin):
       self,
       command: str,
       ignore_failure: bool = False,
-      timeout: Optional[float] = None,
+      timeout: float | None = None,
   ) -> Tuple[str, str]:
     """Runs a powershell command on the VM.
 
@@ -131,7 +131,7 @@ class BaseWindowsMixin(virtual_machine.BaseOsMixin):
       self,
       command: str,
       ignore_failure: bool = False,
-      timeout: Optional[float] = None,
+      timeout: float | None = None,
   ) -> Tuple[str, str]:
     """Runs a powershell command on the VM.
 
@@ -380,15 +380,15 @@ class BaseWindowsMixin(virtual_machine.BaseOsMixin):
     # Log driver information so that the user has a record of which drivers
     # were used.
     # TODO(user): put the driver information in the metadata.
-    stdout, _ = self.RemoteCommand('dism /online /get-drivers')
+    stdout, _ = self.RemoteCommand('dism /online /get-drivers', timeout=10)
     logging.info(stdout)
-    stdout, _ = self.RemoteCommand('echo $env:TEMP')
+    stdout, _ = self.RemoteCommand('echo $env:TEMP', timeout=10)
     self.temp_dir = ntpath.join(stdout.strip(), 'pkb')
-    stdout, _ = self.RemoteCommand('echo $env:USERPROFILE')
+    stdout, _ = self.RemoteCommand('echo $env:USERPROFILE', timeout=10)
     self.home_dir = stdout.strip()
-    stdout, _ = self.RemoteCommand('echo $env:SystemDrive')
+    stdout, _ = self.RemoteCommand('echo $env:SystemDrive', timeout=10)
     self.system_drive = stdout.strip()
-    self.RemoteCommand('mkdir %s -Force' % self.temp_dir)
+    self.RemoteCommand('mkdir %s -Force' % self.temp_dir, timeout=10)
     self.DisableGuestFirewall()
 
   def _Reboot(self):
@@ -398,7 +398,7 @@ class BaseWindowsMixin(virtual_machine.BaseOsMixin):
   @vm_util.Retry(log_errors=False, poll_interval=1)
   def VMLastBootTime(self):
     """Returns the time the VM was last rebooted as reported by the VM."""
-    resp, _ = self.RemoteCommand('systeminfo | find /i "Boot Time"')
+    resp, _ = self.RemoteCommand('systeminfo | find /i "Boot Time"', timeout=10)
     return resp
 
   def _AfterReboot(self):
@@ -412,6 +412,7 @@ class BaseWindowsMixin(virtual_machine.BaseOsMixin):
     """Installs packages using the OS's package manager."""
     pass
 
+  @vm_util.Retry(poll_interval=10, max_retries=5)
   def Install(self, package_name):
     """Installs a PerfKit package on the VM."""
     if not self.install_packages:
@@ -528,6 +529,7 @@ class BaseWindowsMixin(virtual_machine.BaseOsMixin):
     """Returns True if the VM can reach the ip address and False otherwise."""
     return self.TryRemoteCommand('ping -n 1 %s' % ip)
 
+  @vm_util.Retry(poll_interval=10, max_retries=5)
   def DownloadFile(self, url, dest):
     """Downloads the content at the url to the specified destination."""
 
@@ -539,7 +541,7 @@ class BaseWindowsMixin(virtual_machine.BaseOsMixin):
         '"tls, tls11, tls12";'
         'Invoke-WebRequest {url} -OutFile {dest}'
     ).format(url=url, dest=dest)
-    self.RemoteCommand(command)
+    self.RemoteCommand(command, timeout=5 * 60)
 
   def UnzipFile(self, zip_file, dest):
     """Unzips the file with the given path."""
@@ -548,12 +550,12 @@ class BaseWindowsMixin(virtual_machine.BaseOsMixin):
         "[IO.Compression.ZipFile]::ExtractToDirectory('{zip_file}', "
         "'{dest}')"
     ).format(zip_file=zip_file, dest=dest)
-    self.RemoteCommand(command)
+    self.RemoteCommand(command, timeout=5 * 60)
 
   def DisableGuestFirewall(self):
     """Disables the guest firewall."""
     command = 'netsh advfirewall set allprofiles state off'
-    self.RemoteCommand(command)
+    self.RemoteCommand(command, timeout=10)
 
   def EnableGuestFirewall(self):
     """Enables the guest firewall."""

@@ -17,7 +17,7 @@ See perfkitbenchmarker/configs/__init__.py for more information about
 configuration files.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 from absl import flags
 from perfkitbenchmarker import custom_virtual_machine_spec
@@ -26,7 +26,6 @@ from perfkitbenchmarker import provider_info
 from perfkitbenchmarker import virtual_machine
 from perfkitbenchmarker.configs import option_decoders
 from perfkitbenchmarker.configs import spec
-import six
 
 
 _DEFAULT_VM_COUNT = 1
@@ -40,7 +39,7 @@ class ContainerSpec(spec.BaseSpec):
   def __init__(
       self,
       component_full_name: str,
-      flag_values: Optional[flags.FlagValues] = None,
+      flag_values: flags.FlagValues | None = None,
       **kwargs: Any,
   ):
     super().__init__(component_full_name, flag_values, **kwargs)
@@ -107,16 +106,16 @@ class ContainerRegistrySpec(spec.BaseSpec):
   def __init__(
       self,
       component_full_name: str,
-      flag_values: Optional[flags.FlagValues] = None,
+      flag_values: flags.FlagValues | None = None,
       **kwargs: Any,
   ):
     super().__init__(component_full_name, flag_values=flag_values, **kwargs)
-    self.spec: Optional[dict[str, Any]]
+    self.spec: dict[str, Any] | None
     self.cloud: str
     registry_spec = getattr(self.spec, self.cloud, {})
-    self.project: Optional[str] = registry_spec.get('project')
-    self.zone: Optional[str] = registry_spec.get('zone')
-    self.name: Optional[str] = registry_spec.get('name')
+    self.project: str | None = registry_spec.get('project')
+    self.zone: str | None = registry_spec.get('zone')
+    self.name: str | None = registry_spec.get('name')
     self.cpus: float
     self.memory: int
     self.command: list[str]
@@ -165,9 +164,6 @@ class ContainerRegistrySpec(spec.BaseSpec):
 class ContainerRegistryDecoder(option_decoders.TypeVerifier):
   """Validates the container_registry dictionary of a benchmark config."""
 
-  def __init__(self, **kwargs):
-    super().__init__(valid_types=(dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Verifies container_registry dictionary of a benchmark config object.
 
@@ -196,9 +192,6 @@ class ContainerRegistryDecoder(option_decoders.TypeVerifier):
 class ContainerSpecsDecoder(option_decoders.TypeVerifier):
   """Validates the container_specs dictionary of a benchmark config object."""
 
-  def __init__(self, **kwargs):
-    super().__init__(valid_types=(dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Verifies container_specs dictionary of a benchmark config object.
 
@@ -220,9 +213,9 @@ class ContainerSpecsDecoder(option_decoders.TypeVerifier):
         value, component_full_name, flag_values
     )
     result = {}
-    for spec_name, spec_config in six.iteritems(container_spec_configs):
+    for spec_name, spec_config in container_spec_configs.items():
       result[spec_name] = ContainerSpec(
-          '{0}.{1}'.format(
+          '{}.{}'.format(
               self._GetOptionFullName(component_full_name), spec_name
           ),
           flag_values=flag_values,
@@ -240,13 +233,13 @@ class NodepoolSpec(spec.BaseSpec):
       self, component_full_name, group_name, flag_values=None, **kwargs
   ):
     super().__init__(
-        '{0}.{1}'.format(component_full_name, group_name),
+        '{}.{}'.format(component_full_name, group_name),
         flag_values=flag_values,
         **kwargs,
     )
     self.vm_count: int
     self.vm_spec: spec.PerCloudConfigSpec
-    self.sandbox_config: Optional[SandboxSpec]
+    self.sandbox_config: SandboxSpec | None
 
   @classmethod
   def _GetOptionDecoderConstructions(cls):
@@ -295,9 +288,6 @@ class NodepoolSpec(spec.BaseSpec):
 class _NodepoolsDecoder(option_decoders.TypeVerifier):
   """Validate the nodepool dictionary of a nodepools config object."""
 
-  def __init__(self, **kwargs):
-    super().__init__(valid_types=(dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Verify Nodepool dict of a benchmark config object.
 
@@ -314,11 +304,11 @@ class _NodepoolsDecoder(option_decoders.TypeVerifier):
     Raises:
       errors.Config.InvalidValue upon invalid input value.
     """
-    nodepools_configs = super(_NodepoolsDecoder, self).Decode(
+    nodepools_configs = super().Decode(
         value, component_full_name, flag_values
     )
     result = {}
-    for nodepool_name, nodepool_config in six.iteritems(nodepools_configs):
+    for nodepool_name, nodepool_config in nodepools_configs.items():
       result[nodepool_name] = NodepoolSpec(
           self._GetOptionFullName(component_full_name),
           nodepool_name,
@@ -364,9 +354,6 @@ class SandboxSpec(spec.BaseSpec):
 class _SandboxDecoder(option_decoders.TypeVerifier):
   """Decodes the sandbox configuration option of a nodepool."""
 
-  def __init__(self, **kwargs):
-    super(_SandboxDecoder, self).__init__((dict,), **kwargs)
-
   def Decode(self, value, component_full_name, flag_values):
     """Decodes the sandbox configuration option of a nodepool.
 
@@ -410,15 +397,15 @@ class ContainerClusterSpec(spec.BaseSpec):
         self.cloud, provider_info.DEFAULT_VM_PLATFORM
     )
     self.vm_spec = vm_spec_class(
-        '{0}.vm_spec.{1}'.format(component_full_name, self.cloud),
+        '{}.vm_spec.{}'.format(component_full_name, self.cloud),
         flag_values=flag_values,
         **vm_config,
     )
     nodepools = {}
-    for nodepool_name, nodepool_spec in sorted(six.iteritems(self.nodepools)):
+    for nodepool_name, nodepool_spec in sorted(self.nodepools.items()):
       if nodepool_name == DEFAULT_NODEPOOL:
         raise errors.Config.InvalidValue(
-            'Nodepool name {0} is reserved for use during cluster creation. '
+            'Nodepool name {} is reserved for use during cluster creation. '
             'Please rename nodepool'.format(nodepool_name)
         )
       nodepool_config = getattr(nodepool_spec.vm_spec, self.cloud, None)
@@ -428,7 +415,7 @@ class ContainerClusterSpec(spec.BaseSpec):
             'configuration for "{1}".'.format(component_full_name, self.cloud)
         )
       nodepool_spec.vm_spec = vm_spec_class(
-          '{0}.vm_spec.{1}'.format(component_full_name, self.cloud),
+          '{}.vm_spec.{}'.format(component_full_name, self.cloud),
           flag_values=flag_values,
           **nodepool_config,
       )
@@ -501,9 +488,6 @@ class ContainerClusterSpec(spec.BaseSpec):
 
 class ContainerClusterSpecDecoder(option_decoders.TypeVerifier):
   """Validates a ContainerClusterSpec dictionary."""
-
-  def __init__(self, **kwargs):
-    super().__init__(valid_types=(dict,), **kwargs)
 
   def Decode(self, value, component_full_name, flag_values):
     """Verifies container_cluster dictionary of a benchmark config object."""
